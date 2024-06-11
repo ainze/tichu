@@ -1,94 +1,57 @@
+import random
+from abc import ABC
 from typing import List, Union
+
+from action import Action
 from cards import Card, DogCard, DragonCard, PhoenixCard, MahJongCard
 
 
-class Player:
-    """
-    Represents a player in the Tishu game.
-
-    Attributes:
-        name (str): The name of the player.
-        hand (List[Union[Card, DogCard, DragonCard, PhoenixCard, OneCard]]): The player's current hand of cards.
-    """
+class Player(ABC):
 
     def __init__(self, name: str):
         self.name = name
-        self.hand = []
-
-    def receive_cards(self, cards: List[Card]):
-        """
-        Adds received cards to the player's hand.
-
-        Args:
-            cards (List[Union[Card, DogCard, DragonCard, PhoenixCard, OneCard]]): A list of cards to add to the hand.
-        """
-        self.hand.extend(cards)
-
-    def play_card(self, card: Card) -> List[Card]:
-        if card not in self.hand:
-            raise ValueError(f"Card {card} is not in hand")
-        self.hand.remove(card)
-        return card
+        self.cards: List[Card] = []
+        self.stored_cards: List[Card] = []
 
     def __repr__(self):
-        """
-        Returns a string representation of the player.
+        return f"Player(name={self.name})"
 
-        Returns:
-            str: A string representing the player.
-        """
-        return f"Player(name={self.name}, hand={self.hand})"
+    def ask_trick(self, cards_on_table: List[List[Card]]) -> Action:
+        raise NotImplementedError()
 
+    def ask_grandTichu(self) -> bool:
+        raise NotImplementedError()
 
-class AIPlayer(Player):
-    """
-    Represents an AI player in the Tishu game, inheriting from Player.
+    def rec_cards(self, cardsRec):
+        self.cards.extend(cardsRec)
 
-    Methods:
-        make_move(): Determines and returns the AI's move.
-    """
+    def hasMahJong(self) -> bool:
+        return any(card.rank == 'MahJong' for card in self.cards)
 
-    def __init__(self, name: str):
-        super().__init__(name)
+    def store_cards(self, store_cards):
+        self.stored_cards.extend(store_cards)
 
-    def make_move(self) -> Union[Card, DogCard, DragonCard, PhoenixCard, MahJongCard]:
-        """
-        Determines the AI's move. This is a simple implementation and can be extended with more complex logic.
-
-        Returns:
-            Union[Card, DogCard, DragonCard, PhoenixCard, OneCard]: The card chosen to play.
-        """
-        # For simplicity, the AI will play the first card in its hand.
-        # More sophisticated strategies can be implemented here.
-        if not self.hand:
-            raise ValueError("AI has no cards to play")
-        return self.play_card(self.hand[0])
+    def is_valid_trick(self, last_trick: List[Card], new_trick: List[Card], cards_available: List[Card]) -> bool:
+        if (len(last_trick) == 0):
+            return True # any card is valid if this is the first hand to play
+#         if(is_bomb(new_trick)):
+#
+#
+#         if(len(new_trick) == len(last_trick))
+#
+# =        if (len(last_trick))
 
 
-if __name__ == "__main__":
-    # Testing the Player and AIPlayer classes
-    from cards import Deck
 
-    # Create players
-    player1 = Player("Alice")
-    ai_player = AIPlayer("AI")
+class RandomPlayer(Player):
 
-    # Create and shuffle deck
-    deck = Deck()
+    def ask_trick(self, cards_on_table: List[List[Card]]) -> Action:
+        card = random.choice(self.cards)
+        self.cards.remove(card)
 
-    # Deal hands to players
-    player1.receive_cards(deck.deal_hand(5))
-    ai_player.receive_cards(deck.deal_hand(5))
+        return Action([card], False)
 
-    print(player1)
-    print(ai_player)
+    def ask_grandTichu(self) -> bool:
+        return random.choice([True, False])
 
-    # Players play cards
-    try:
-        print(f"{player1.name} plays: {player1.play_card(player1.hand[0])}")
-        print(f"{ai_player.name} plays: {ai_player.make_move()}")
-    except ValueError as e:
-        print(e)
 
-    print(player1)
-    print(ai_player)
