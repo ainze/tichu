@@ -67,6 +67,7 @@ class Game:
             else:
                 #not all have passed so we continue
                 self.current_player = (self.current_player + 1) % 4
+    @classmethod
     def is_bomb(self, new_trick: List[Card]) -> bool:
         if(len(new_trick) == 4):
             # check if all 4 are same rank

@@ -4,6 +4,7 @@ from typing import List, Union
 
 from action import Action
 from cards import Card, DogCard, DragonCard, PhoenixCard, MahJongCard
+from game import Game
 
 
 class Player(ABC):
@@ -32,14 +33,32 @@ class Player(ABC):
         self.stored_cards.extend(store_cards)
 
     def is_valid_trick(self, last_trick: List[Card], new_trick: List[Card], cards_available: List[Card]) -> bool:
-        if (len(last_trick) == 0):
+        # Check if the player has the cards they want to play
+        for card in new_trick:
+            if card not in cards_available:
+                return False
+
+        if len(last_trick) == 0:
             return True # any card is valid if this is the first hand to play
-#         if(is_bomb(new_trick)):
-#
-#
-#         if(len(new_trick) == len(last_trick))
-#
-# =        if (len(last_trick))
+        if Game.is_bomb(new_trick):
+            if not Game.is_bomb(last_trick):
+                return True #bombs can always be played
+            else:
+                return Game.compare_bombs(new_trick, last_trick)
+
+        # If the last trick is a bomb and the new trick is not, the new trick is invalid
+        if Game.is_bomb(last_trick) and not Game.is_bomb(new_trick):
+            return False
+
+        # Check if the new trick matches the type and is higher in value than the last trick
+        return Game.compare_tricks(new_trick, last_trick)
+
+
+
+
+        if(len(new_trick) == len(last_trick))
+
+=        if (len(last_trick))
 
 
 
