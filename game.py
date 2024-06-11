@@ -1,4 +1,4 @@
-
+import logging
 from typing import List
 
 from cards import Deck, Card
@@ -50,10 +50,10 @@ class Game:
                     players_tichu[self.current_player] = True
                 cards_on_table.append(action.cards)
                 if len(self.players[self.current_player].cards) == 0:
-                    print(f"Player {self.players[self.current_player].name} played his last card so he is now flagged PASS")
+                    logging.info(f'Player {self.players[self.current_player].name} played his last card so he is now flagged PASS')
                     players_passed[self.current_player] = True
                     players_no_more_cards[self.current_player] = True
-                print(f"Player {self.players[self.current_player].name} has played {action.cards}")
+                logging.info(f'Player {self.players[self.current_player].name} has played {action.cards}')
 
             if players_no_more_cards.count(True) == 3:
                 # TODO: hier moeten we nog checken of een team klaar is
@@ -61,6 +61,7 @@ class Game:
             elif players_passed.count(True) == 3:
                 # All players passed, it is again to the current player.
                 # but first some cleanup and storing of cards
+                logging.debug(f'Three players passed')
                 players_passed= [False, False, False, False]
                 self.players[self.current_player].store_cards([item for sublist in cards_on_table for item in sublist])
                 cards_on_table = [[]]

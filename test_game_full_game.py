@@ -1,3 +1,4 @@
+import logging
 import unittest
 from game import Game
 from cards import Card
@@ -13,8 +14,13 @@ class TestFullGame(unittest.TestCase):
 
         self.game.round_loop()
 
-        print(self.game)
+        logging.info(self.game)
 
+        total_cards = []
+        for i in range(4):
+            total_cards.extend(self.game.players[i].stored_cards)
+
+        logging.info(f'Total cards={len(total_cards)}')
 
 if __name__ == "__main__":
     unittest.main()

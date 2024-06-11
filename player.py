@@ -15,7 +15,7 @@ class Player(ABC):
         self.stored_cards: List[Card] = []
 
     def __repr__(self):
-        return f"Player(name={self.name})"
+        return f"Player(name={self.name}, cards={self.cards}, stored_cards={self.stored_cards})"
 
     def ask_trick(self, cards_on_table: List[List[Card]]) -> Action:
         raise NotImplementedError()
@@ -40,7 +40,7 @@ class RandomPlayer(Player):
     def ask_trick(self, cards_on_table: List[List[Card]]) -> Action:
 
         for card in self.cards:
-            if GameRules.is_valid_trick(cards_on_table[-1], [card], self.cards):
+            if GameRules.is_valid_trick(cards_on_table, [card], self.cards):
                 self.cards.remove(card)
                 return Action([card], 'PLAY')
         return Action([], 'PASS')
