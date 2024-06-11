@@ -2,6 +2,7 @@ import random
 from abc import ABC
 from typing import List, Union
 
+from GameRules import GameRules
 from action import Action
 from cards import Card, DogCard, DragonCard, PhoenixCard, MahJongCard
 
@@ -37,10 +38,13 @@ class Player(ABC):
 class RandomPlayer(Player):
 
     def ask_trick(self, cards_on_table: List[List[Card]]) -> Action:
-        card = random.choice(self.cards)
-        self.cards.remove(card)
 
-        return Action([card], False)
+        for card in self.cards:
+            if GameRules.is_valid_trick(cards_on_table[-1], [card], self.cards):
+                self.cards.remove(card)
+                return Action([card], 'PLAY')
+        return Action([], 'PASS')
+
 
     def ask_grandTichu(self) -> bool:
         return random.choice([True, False])
