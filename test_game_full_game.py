@@ -22,5 +22,7 @@ class TestFullGame(unittest.TestCase):
 
         logging.info(f'Total cards={len(total_cards)}')
 
+
+
 if __name__ == "__main__":
     unittest.main()

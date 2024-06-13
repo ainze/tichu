@@ -12,7 +12,8 @@ class GameRules:
         self.rules = []
 
     @classmethod
-    def is_valid_trick(cls, cards_on_table: List[List[Card]], new_trick: List[Card], cards_available: List[Card]) -> bool:
+    def is_valid_trick(cls, cards_on_table: List[List[Card]], new_trick: List[Card],
+                       cards_available: List[Card]) -> bool:
         # Check if the player has the cards they want to play
         for card in new_trick:
             if card not in cards_available:
@@ -30,6 +31,14 @@ class GameRules:
 
         # If the last trick is a bomb and the new trick is not, the new trick is invalid
         if cls.is_bomb(last_trick) and not cls.is_bomb(new_trick):
+            return False
+
+        if last_trick == [Card('Special', 'Dog')]:
+            return True  # any card can be played when dog was played
+        if len(last_trick) == 0 and new_trick == [Card('Special', 'Dog')]:
+            return False  # can't play dog when a card is already played
+
+        if len(last_trick) != len(new_trick):
             return False
 
         # Check if the new trick matches the type and is higher in value than the last trick
@@ -87,14 +96,14 @@ class GameRules:
         else:
             last_trick_rank = cls.get_trick_rank2(last_trick)
 
-        logging.debug(f'Unsorted new trick ranks: {new_trick_rank}')
-        logging.debug(f'Unsorted last trick ranks: {last_trick_rank}')
+        #logging.debug(f'Unsorted new trick ranks: {new_trick_rank}')
+        #logging.debug(f'Unsorted last trick ranks: {last_trick_rank}')
 
         new_trick_rank.sort()
         last_trick_rank.sort()
 
-        logging.debug(f'Sorted new trick ranks: {new_trick_rank}')
-        logging.debug(f'Sorted last trick ranks: {last_trick_rank}')
+        #logging.debug(f'Sorted new trick ranks: {new_trick_rank}')
+        #logging.debug(f'Sorted last trick ranks: {last_trick_rank}')
 
         return new_trick_rank > last_trick_rank
 
@@ -107,7 +116,7 @@ class GameRules:
                 # This is a simplification; adjust as per your game rules
                 if previousCard:
                     if previousCard.rank == 'Dragon':
-                        ranks.append(-1) # can't really happen; this is kinda of a hack
+                        ranks.append(-1)  # can't really happen; this is kinda of a hack
                     else:
                         ranks.append(Card.RANKS.index(previousCard.rank) + 0.5)
                 else:

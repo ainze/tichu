@@ -1,4 +1,6 @@
 import unittest
+
+from GameRules import GameRules
 from game import Game
 from cards import Card
 from player import RandomPlayer
@@ -138,6 +140,11 @@ class TestGameClassMethods(unittest.TestCase):
 
         self.assertTrue(Game.is_valid_trick(last_trick, new_trick, cards_available))
 
+    def test_comparing_straight_and_full_house(self):
+        last_trick = [Card('Diamonds', '5'), Card('Hearts', '6'), Card('Clubs', '7'), Card('Spades', '8'), Card('Spades', '9')]
+        new_trick = [Card('Diamonds', '8'), Card('Hearts', '8'), Card('Clubs', '8'), Card('Spades', 'A'), Card('Hearts', 'A')]
+
+        self.assertTrue(GameRules.compare_tricks(last_trick, new_trick,[]))
 
 if __name__ == "__main__":
     unittest.main()
