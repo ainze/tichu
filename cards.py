@@ -33,10 +33,10 @@ class Card:
     def __lt__(self, other):
         if isinstance(other, (DogCard, DragonCard, PhoenixCard, MahJongCard)):
             return True
-        if self.RANKS.index(self.rank) < other.RANKS.index(other.rank):
+        if self.RANKS_EXTENDED.index(self.rank) < other.RANKS_EXTENDED.index(other.rank):
             return True
-        if self.RANKS.index(self.rank) == other.RANKS.index(other.rank):
-            return self.SUITS.index(self.suit) < self.SUITS.index(other.suit)
+        if self.RANKS_EXTENDED.index(self.rank) == other.RANKS_EXTENDED.index(other.rank):
+            return self.SUITS_EXTENDED.index(self.suit) < self.SUITS_EXTENDED.index(other.suit)
         return False
 
     def __eq__(self, other):

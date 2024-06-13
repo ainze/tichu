@@ -33,6 +33,12 @@ class Player(ABC):
     def store_cards(self, store_cards):
         self.stored_cards.extend(store_cards)
 
+    def hasCards(self) -> bool:
+        return len(self.cards) > 0
+
+    def hasNoCards(self) -> bool:
+        return not self.hasCards()
+
 
 class RandomPlayer(Player):
 
