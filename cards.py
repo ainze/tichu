@@ -14,7 +14,7 @@ class Card:
     RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 
     SUITS_EXTENDED = ['Diamonds', 'Clubs', 'Hearts', 'Spades', 'Special']
-    RANKS_EXTENDED = ['Dog', 'Phoenix', 'MahJong', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', 'Dragon']
+    RANKS_EXTENDED = ['Phoenix', 'Dog', 'MahJong', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', 'Dragon']
 
     def __init__(self, suit: str, rank: str):
         if suit == 'Special':
