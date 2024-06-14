@@ -10,7 +10,7 @@ class TestFullGame(unittest.TestCase):
         self.game = Game([RandomPlayer("P1"), RandomPlayer("P2"), RandomPlayer("P3"), RandomPlayer("P4")])
 
     def test_is_bomb_same_rank(self):
-        for i in range(1):
+        for i in range(10000):
             self.game.deal()
 
             self.game.round_loop()
@@ -21,9 +21,7 @@ class TestFullGame(unittest.TestCase):
             for i in range(4):
                 total_cards.extend(self.game.players[i].stored_cards)
 
-            total_cards.sort()
-            logging.info(f'Total cards={total_cards}')
-            logging.info(f'Total cards={len(total_cards)}')
+            self.assertEqual(len(total_cards), 56)
 
             self.game.finish_round()
 

@@ -118,7 +118,7 @@ class GameRules:
                     if previousCard.rank == 'Dragon':
                         ranks.append(-1)  # can't really happen; this is kinda of a hack
                     else:
-                        ranks.append(Card.RANKS.index(previousCard.rank) + 0.5)
+                        ranks.append(Card.RANKS_EXTENDED.index(previousCard.rank) + 0.5)
                 else:
                     ranks.append(0.5)
 

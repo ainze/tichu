@@ -16,7 +16,7 @@ class Player(ABC):
         self.stored_cards: List[Card] = []
 
     def __repr__(self):
-        return f"Player(name={self.name}, cards={self.cards}, stored_cards={self.stored_cards})"
+        return f"Player(name={self.name},#cards={len(self.cards)}, cards={self.cards}, stored_cards={self.stored_cards})"
 
     def ask_trick(self, cards_on_table: List[List[Card]]) -> Action:
         raise NotImplementedError()
@@ -39,6 +39,9 @@ class Player(ABC):
     def hasNoCards(self) -> bool:
         return not self.hasCards()
 
+    def next_round(self):
+        self.stored_cards = []
+
 
 class RandomPlayer(Player):
 
@@ -51,7 +54,7 @@ class RandomPlayer(Player):
     #     return Action([], 'PASS')
 
     def ask_trick(self, cards_on_table: List[List[Card]]) -> Action:
-        logging.info(f'Player {self.name} ask_trick')
+        # logging.info(f'Player {self.name} ask_trick')
         possible_plays = self.generate_possible_plays()
         random.shuffle(possible_plays)  # we are a random player are we not
         for play in possible_plays:

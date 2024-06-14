@@ -14,9 +14,11 @@ class Game:
         self.deck = Deck()
         self.current_player = 0
 
+        self.rounds = 0
+
     def deal(self):
         self.deck.shuffle()
-        logging.info(f'deck is {len(self.deck.cards)}')
+        # logging.info(f'deck is {len(self.deck.cards)}')
         # give first 8 and ask for GrandTichu
         for i in range(4):
             self.players[(i + self.dealer) % 4].rec_cards(self.deck.deal_hand(8))
@@ -27,11 +29,11 @@ class Game:
             self.players[(i + self.dealer) % 4].rec_cards(self.deck.deal_hand(6))
 
         for i in range(4):
-            logging.info(f'player has {len(self.players[i].cards)} cards')
+            # logging.info(f'player has {len(self.players[i].cards)} cards')
             if self.players[i].hasMahJong():
                 self.current_player = i
 
-        logging.info(f'deck is {len(self.deck.cards)}')
+        # logging.info(f'deck is {len(self.deck.cards)}')
 
     def round_loop(self):
         round_not_finished = True
@@ -41,6 +43,9 @@ class Game:
         players_tichu = [False, False, False, False]
 
         while round_not_finished:
+
+            self.check_if_cards_are_56(cards_on_table)
+
             action = self.players[self.current_player].ask_trick(cards_on_table)
             if action.action == 'PASS':
                 players_passed[self.current_player] = True
@@ -54,7 +59,7 @@ class Game:
 
                 if len(self.players[self.current_player].cards) == 0:
                     logging.info(
-                        f'Player {self.players[self.current_player].name} played his last card so he is now flagged PASS')
+                        f'[{self.rounds} Player {self.players[self.current_player].name} played his last card so he is now flagged PASS')
                     players_passed[self.current_player] = True
                     players_no_more_cards.append(self.players[self.current_player])
 
@@ -67,33 +72,45 @@ class Game:
                         logging.info(f'Team has finished first')
                         round_not_finished = False
 
-                logging.info(f'Player {self.players[self.current_player].name} has played {action.cards}')
+                logging.info(f'{self.rounds} Player {self.players[self.current_player].name} has played {action.cards}')
 
             if players_passed.count(True) == 3:
                 # All players passed, it is again to the current player.
                 # but first some cleanup and storing of cards
-                logging.debug(f'Three players passed')
+                logging.debug(f'{self.rounds} Three players passed')
                 players_passed = [False, False, False, False]
                 self.players[self.current_player].store_cards([item for sublist in cards_on_table for item in sublist])
                 cards_on_table = [[]]
+                self.check_if_cards_are_56(cards_on_table)
             else:
                 # not all have passed so we continue
                 self.current_player = (self.current_player + 1) % 4
 
             if not round_not_finished:
+                self.rounds += 1
+                self.players[self.current_player].store_cards([item for sublist in cards_on_table for item in sublist])
+                cards_on_table = [[]]
                 for player in players_no_more_cards:
-                    logging.debug(f'Player {player.name} no longer has cards')
+                    logging.debug(f'{self.rounds} Player {player.name} no longer has cards')
                 # take remaining cards and give it to first player
                 for player in self.players:
-                    logging.debug(f'Player {player.name} has {len(player.cards)} cards and {len(player.stored_cards)} stored cards')
+                    logging.debug(f'{self.rounds} Player {player.name} has {len(player.cards)} cards and {len(player.stored_cards)} stored cards')
                     if player not in players_no_more_cards:
-                        logging.debug(f'player {player.name} his cards {player.cards} are given '
+                        logging.debug(f'{self.rounds} player {player.name} his cards {player.cards} are given '
                                       f'to first player {players_no_more_cards[0].name}')
                         players_no_more_cards[0].store_cards(player.cards)
                         player.cards = []
                         logging.debug(
-                            f'Player {player.name} now has {len(player.cards)} cards and {len(player.stored_cards)} stored cards')
+                            f'{self.rounds} Player {player.name} now has {len(player.cards)} cards and {len(player.stored_cards)} stored cards')
+                self.check_if_cards_are_56(cards_on_table)
 
+    def check_if_cards_are_56(self, cards_on_table):
+        sum_cards = 0
+        for i in range(4):
+            sum_cards += len(self.players[i].cards)
+            sum_cards += len(self.players[i].stored_cards)
+        sum_cards += len([item for sublist in cards_on_table for item in sublist])
+        assert sum_cards == 56, f'The sum of all cards is not equal to 56 but instead {sum_cards}'
 
     def __repr__(self):
         return f"GameState: {self.players}"
@@ -126,11 +143,16 @@ class Game:
         # Additional scoring rules can be applied here if needed
 
         logging.info(team_scores)
+        return team_scores
 
     def finish_round(self):
 
         self.calculate_score()
         self.deck = Deck()
+
+        for i in range(4):
+            self.players[i].next_round()
+
         pass
 
 
