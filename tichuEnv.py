@@ -2,10 +2,13 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
+from game import Game
+
 
 class TichuEnv(gym.Env):
     def __init__(self):
         super(TichuEnv, self).__init__()
+        self.game = Game()
 
         # Define action and observation space
         # Actions 59:
