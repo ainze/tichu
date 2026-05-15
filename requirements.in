@@ -1,0 +1,7 @@
+# Core (no ML)
+# (tichu_engine has no runtime deps)
+
+# Dev / CI
+pytest>=8.0
+pip-tools>=7.0
+hypothesis>=6.0
