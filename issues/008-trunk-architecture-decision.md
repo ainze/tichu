@@ -2,8 +2,28 @@
 id: "008"
 title: "Trunk architecture decision: transformer vs large MLP"
 type: HITL
+status: closed
+decision: "Large MLP over engineered features"
+adr: "docs/adr/001-trunk-architecture.md"
 blocked_by: ["007"]
 stories: [30]
+---
+
+## Decision (2026-05-15)
+
+**Chosen trunk: Large MLP** over the v1 engineered features
+(`tichu_training/featurizer.py`).
+
+Concrete shape (subject to tuning in #009):
+4 residual blocks of width 1024 with GELU + LayerNorm, 512-dim trunk output.
+Per-task heads are independent on top.
+
+Full rationale: [docs/adr/001-trunk-architecture.md](../docs/adr/001-trunk-architecture.md).
+
+The benchmark in this issue was skipped in favour of an engineering decision
+so #009 is not blocked. If BC accuracy plateaus on the held-out split and
+failure analysis points at a representational ceiling, the natural follow-up
+is the deferred transformer-vs-MLP benchmark on the same split.
 ---
 
 ## What to build
