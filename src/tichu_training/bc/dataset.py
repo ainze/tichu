@@ -32,6 +32,10 @@ class BCExample:
     legal_mask: np.ndarray
     sample_weight: float
     skill_decile: int  # index in [0, num_buckets]; num_buckets is the neutral row
+    # Team-0 minus team-1 Ergebnis for the round the decision was made in.
+    # Used as the reward signal for AWR offline refinement (#012). Defaults
+    # to 0.0 — BC training ignores it.
+    round_outcome: float = 0.0
 
 
 class SyntheticBCDataset(Iterable[BCExample]):
@@ -70,6 +74,10 @@ class SyntheticBCDataset(Iterable[BCExample]):
                     skill = self.skill_buckets  # neutral / cold-start
                 else:
                     skill = int(rng.integers(0, self.skill_buckets))
+                # Deterministic non-zero outcome with feature dependence so the
+                # AWR value baseline has signal to fit. Magnitude (~ ±50) is
+                # plausible for Tichu Ergebnis values.
+                round_outcome = float(features[: min(4, features.size)].sum() * 10.0)
                 yield BCExample(
                     decision_type=decision_type,
                     features=features,
@@ -77,6 +85,7 @@ class SyntheticBCDataset(Iterable[BCExample]):
                     legal_mask=legal.astype(bool),
                     sample_weight=1.0,
                     skill_decile=skill,
+                    round_outcome=round_outcome,
                 )
 
 
