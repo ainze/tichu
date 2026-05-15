@@ -59,6 +59,10 @@ class ReplayResult:
     # Decision records produced during replay (one per Parsed action that we
     # successfully fed to the engine, in execution order):
     decisions: list[tuple[ParsedAction, Action]] = field(default_factory=list)
+    # Engine state observed immediately before each decision was applied, in
+    # lockstep with `decisions`. `None` for pseudo-decisions (Tichu/Grand-Tichu
+    # call passthroughs and phantom passes) where no engine step happened.
+    pre_decision_states: list[GameState | None] = field(default_factory=list)
 
 
 def replay_round(parsed: ParsedRound) -> ReplayResult:
@@ -77,6 +81,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             result.illegal_action = sub
             result.illegal_reason = "schupfen submission not legal"
             return result
+        result.pre_decision_states.append(state)
         state, _, _, _ = step(state, action)
         result.steps_taken += 1
         result.decisions.append((sub, action))
@@ -86,6 +91,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
         if parsed_action.kind in ("tichu", "grand_tichu"):
             # Engine doesn't model these yet — capture but skip stepping.
             result.decisions.append((parsed_action, _CallPassthrough(parsed_action.kind)))
+            result.pre_decision_states.append(None)
             continue
 
         # BSW emits liberal `passt.` lines that don't correspond to engine
@@ -98,6 +104,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             or PASS not in legal_actions(state)
         ):
             result.decisions.append((parsed_action, PASS))
+            result.pre_decision_states.append(None)
             continue
 
         # BSW often omits the trailing pass lines that precede a trick
@@ -119,9 +126,11 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
                 result.illegal_action = parsed_action
                 result.illegal_reason = str(exc)
                 return result
+            state_before_bomb = state
             state, _, _, _ = step(state, bomb_action)
             result.steps_taken += 1
             result.decisions.append((parsed_action, bomb_action))
+            result.pre_decision_states.append(state_before_bomb)
             continue
 
         try:
@@ -134,6 +143,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             result.illegal_action = parsed_action
             result.illegal_reason = f"engine action {engine_action!r} not in legal set"
             return result
+        result.pre_decision_states.append(state)
         state, _, _, _ = step(state, engine_action)
         result.steps_taken += 1
         result.decisions.append((parsed_action, engine_action))

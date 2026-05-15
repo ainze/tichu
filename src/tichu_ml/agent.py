@@ -19,3 +19,14 @@ class Agent(ABC):
     @abstractmethod
     def act(self, private_state: PrivateState) -> Action:
         """Choose one action given the player's private view of the game."""
+
+    def rank_actions(self, private_state: PrivateState) -> list[Action] | None:
+        """Return all legal actions ranked best-to-worst, or `None` if the agent
+        does not expose a ranking.
+
+        Used by the held-out move-prediction evaluator to compute top-k accuracy.
+        Baseline agents (random, rule) return `None`; learned agents that have a
+        head-logit distribution override this to return actions ordered by
+        predicted probability.
+        """
+        return None
