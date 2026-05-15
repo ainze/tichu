@@ -1,0 +1,18 @@
+# Production call-network scaffold. Not invoked in CI — the parquet path
+# requires negative-example synthesis that is a deferred follow-up.
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: artifacts/parquet
+  expected_featurizer_version: v1
+  expected_action_space_version: v1
+
+model:
+  hidden: 256
+  skill_dim: 64
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 4
+checkpoint_every: 5000
+seed: 0

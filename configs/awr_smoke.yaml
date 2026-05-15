@@ -1,0 +1,32 @@
+dataset: synthetic
+dataset_kwargs:
+  seed: 0
+  n_per_head: 32
+  feature_dim: 32
+
+model:
+  trunk_hidden: 32
+  trunk_depth: 1
+  trunk_out_dim: 16
+  skill_dim: 4
+  head_hidden: 16
+
+learning_rate: 5.0e-3
+batch_size: 8
+epochs: 6
+head_weights:
+  play: 1.0
+  pass_card: 1.0
+  wish_rank: 1.0
+  dragon_give: 1.0
+
+checkpoint_every: 1000
+seed: 0
+
+awr:
+  beta: 1.0
+  max_weight: 20.0
+  baseline_hidden: 32
+  baseline_epochs: 5
+  baseline_lr: 1.0e-3
+  held_out_fraction: 0.1
