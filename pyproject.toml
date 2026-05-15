@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tichu-ai"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+ml = ["torch>=2.0"]
+inference = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+dev = ["pytest>=8.0", "pip-tools>=7.0", "hypothesis>=6.0"]
+
+[project.scripts]
+parse_bsw        = "tichu_training.cli.parse_bsw:main"
+compute_trueskill = "tichu_training.cli.compute_trueskill:main"
+train_bc         = "tichu_training.cli.train_bc:main"
+train_calls      = "tichu_training.cli.train_calls:main"
+train_belief     = "tichu_training.cli.train_belief:main"
+eval_matrix      = "tichu_training.cli.eval_matrix:main"
+serve_inference  = "tichu_inference.cli.serve:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
