@@ -273,27 +273,32 @@ class Straight(_SameTypeSameLengthRankCompare):
         if len(set(self.cards)) != len(self.cards):
             raise ValueError("Straight cards must be distinct")
         for c in self.cards:
-            if isinstance(c, SpecialCard) and c is not PHOENIX:
+            if isinstance(c, SpecialCard) and c is not PHOENIX and c is not MAHJONG:
                 raise ValueError(f"Straight cannot contain special card {c.name}")
         has_phoenix = PHOENIX in self.cards
+        has_mahjong = MAHJONG in self.cards
         if has_phoenix and self.phoenix_as_rank is None:
             raise ValueError("phoenix_as_rank is required when Phoenix is in the straight")
         if not has_phoenix and self.phoenix_as_rank is not None:
             raise ValueError("phoenix_as_rank is only valid when Phoenix is in the straight")
         # Validate that the resulting rank sequence is consecutive and has no duplicates.
-        normal_ranks = sorted(c.rank for c in self.cards if isinstance(c, Card))
+        normal_ranks = [c.rank for c in self.cards if isinstance(c, Card)]
+        all_ranks = sorted(normal_ranks)
         if has_phoenix:
-            if self.phoenix_as_rank in normal_ranks:
+            if self.phoenix_as_rank in all_ranks:
                 raise ValueError(
                     f"phoenix_as_rank={self.phoenix_as_rank} duplicates an existing card rank"
                 )
-            all_ranks = sorted(normal_ranks + [self.phoenix_as_rank])
-        else:
-            all_ranks = normal_ranks
+            all_ranks = sorted(all_ranks + [self.phoenix_as_rank])
+        if has_mahjong:
+            # Mahjong has effective rank 1 (lowest in any straight).
+            if 1 in all_ranks:
+                raise ValueError("Straight cannot contain both Mahjong and a rank-1 card")
+            all_ranks = sorted(all_ranks + [1])
         for i in range(1, len(all_ranks)):
             if all_ranks[i] != all_ranks[i - 1] + 1:
                 raise ValueError(f"Straight requires consecutive ranks, got {all_ranks}")
-        # Canonicalize: normal cards in rank order, Phoenix at the slot it occupies.
+        # Canonicalize: normal cards in rank order, Phoenix/Mahjong at their slots.
         sorted_cards = self._canonical_card_order(all_ranks)
         object.__setattr__(self, "cards", sorted_cards)
 
@@ -304,6 +309,8 @@ class Straight(_SameTypeSameLengthRankCompare):
                 cards_by_rank[c.rank] = c
         if self.phoenix_as_rank is not None:
             cards_by_rank[self.phoenix_as_rank] = PHOENIX
+        if MAHJONG in self.cards:
+            cards_by_rank[1] = MAHJONG
         return tuple(cards_by_rank[r] for r in all_ranks)
 
     @property
@@ -311,6 +318,8 @@ class Straight(_SameTypeSameLengthRankCompare):
         first = self.cards[0]
         if isinstance(first, Card):
             return first.rank
+        if first is MAHJONG:
+            return 1
         # First slot is Phoenix at the low end.
         assert self.phoenix_as_rank is not None
         return self.phoenix_as_rank

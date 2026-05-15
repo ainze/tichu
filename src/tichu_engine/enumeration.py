@@ -1,7 +1,7 @@
 from collections import defaultdict
 from itertools import combinations, product
 
-from tichu_engine.cards import Card, PHOENIX, SpecialCard
+from tichu_engine.cards import Card, MAHJONG, PHOENIX, SpecialCard
 from tichu_engine.combinations import (
     CardOrSpecial,
     FourOfAKindBomb,
@@ -177,32 +177,44 @@ _MIN_STRAIGHT_LENGTH = 5
 
 
 def enumerate_straights(hand: frozenset[CardOrSpecial]) -> frozenset[Straight]:
-    """All Straight combinations (length >= 5), including Phoenix-bridged straights.
+    """All Straight combinations (length >= 5), including Phoenix-bridged and
+    Mahjong-led straights.
 
-    Phoenix may substitute for at most one rank slot.
+    Phoenix may substitute for at most one rank slot. Mahjong, when present,
+    occupies rank 1 — the lowest slot of any straight that includes it.
     """
     by_rank = _group_by_rank(hand)
     has_phoenix = PHOENIX in hand
+    has_mahjong = MAHJONG in hand
     straights: set[Straight] = set()
 
-    # Enumerate every (start_rank, length) window of length >= 5 across ranks 2..14.
-    for start in range(2, 15):
+    # Windows starting at rank 1 are only valid when Mahjong is in hand
+    # (Mahjong fills the rank-1 slot). Otherwise start at 2.
+    min_start = 1 if has_mahjong else 2
+    for start in range(min_start, 15):
         for length in range(_MIN_STRAIGHT_LENGTH, 15 - start + 1):
             window = list(range(start, start + length))
-            # Case 1: no Phoenix — every rank in window must have at least one card.
-            if all(by_rank.get(r) for r in window):
-                rank_choices = [by_rank[r] for r in window]
+            mahjong_in_window = start == 1
+            # For a rank-1 window the Mahjong takes that slot; remaining ranks
+            # must come from natural cards (or Phoenix).
+            ranks_to_fill = [r for r in window if r != 1]
+
+            # Case 1: no Phoenix — every non-Mahjong rank in window must have a card.
+            if all(by_rank.get(r) for r in ranks_to_fill):
+                rank_choices = [by_rank[r] for r in ranks_to_fill]
                 for picked in product(*rank_choices):
-                    straights.add(Straight(picked))
-            # Case 2: Phoenix substitutes for exactly one rank in the window.
+                    extra = (MAHJONG,) if mahjong_in_window else ()
+                    cards = tuple(picked) + extra
+                    straights.add(Straight(cards))
+            # Case 2: Phoenix substitutes for exactly one non-Mahjong rank.
             if has_phoenix:
-                for phoenix_rank in window:
-                    # Phoenix takes this slot; cannot also be a natural card of that rank in the straight.
-                    other_ranks = [r for r in window if r != phoenix_rank]
+                for phoenix_rank in ranks_to_fill:
+                    other_ranks = [r for r in ranks_to_fill if r != phoenix_rank]
                     if not all(by_rank.get(r) for r in other_ranks):
                         continue
                     rank_choices = [by_rank[r] for r in other_ranks]
                     for picked in product(*rank_choices):
-                        cards = tuple(list(picked) + [PHOENIX])
+                        extra = (MAHJONG,) if mahjong_in_window else ()
+                        cards = tuple(picked) + (PHOENIX,) + extra
                         straights.add(Straight(cards, phoenix_as_rank=phoenix_rank))
     return frozenset(straights)

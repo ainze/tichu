@@ -51,11 +51,13 @@ class Trick:
         return self.plays[-1].combination if self.plays else None
 
     def add_play(self, player: int, combination: object) -> "Trick":
-        # A player playing clears their pass status (relevant only for bomb interrupts).
+        # Any new play opens a fresh response cycle — previously-passed players
+        # may react. This matches BSW's behaviour (and avoids stranding the
+        # trick when a passed player later has a chance to beat a new top).
         return Trick(
             plays=self.plays + (Play(player=player, combination=combination),),
             leader=player,
-            passes=self.passes - {player},
+            passes=frozenset(),
         )
 
     def add_pass(self, player: int) -> "Trick":
@@ -100,6 +102,11 @@ class PublicState:
     trick: Trick
     mahjong_wish: int | None = None
     pending_decision: PendingDecision | None = None
+    # Round-only state, reset at the start of each round.
+    round_points_by_player: tuple[int, int, int, int] = (0, 0, 0, 0)
+    out_order: tuple[int, ...] = ()
+    tichu_callers: frozenset[int] = frozenset()
+    grand_tichu_callers: frozenset[int] = frozenset()
 
     def __post_init__(self) -> None:
         if not 0 <= self.current_player < NUM_PLAYERS:
