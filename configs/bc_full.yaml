@@ -1,0 +1,27 @@
+# Production BC run scaffold. Not invoked in CI — point to real artifact dirs
+# and run manually after #007 produces the parquet shards.
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: artifacts/parquet
+  expected_featurizer_version: v1
+  expected_action_space_version: v1
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 4
+head_weights:
+  play: 1.0
+  pass_card: 0.5
+  wish_rank: 0.3
+  dragon_give: 0.2
+
+checkpoint_every: 5000
+seed: 0
