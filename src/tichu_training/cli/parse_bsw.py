@@ -24,7 +24,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--input", required=True, metavar="DIR", help="Directory containing BSW .tch log files")
     p.add_argument("--output", required=True, metavar="DIR", help="Output directory for Parquet shards")
     p.add_argument("--subset", type=int, default=None, metavar="N", help="Limit to first N games")
-    p.add_argument("--trueskill", metavar="FILE", help="TrueSkill ratings Parquet to join (reserved)")
+    p.add_argument("--trueskill", metavar="FILE",
+                   help="TrueSkill ratings Parquet to join `skill_decile` from (by player_handle)")
+    p.add_argument("--recency-cutoff-game-id", type=int, default=1855844, metavar="N",
+                   help="Games with game_id >= N get sample_weight 1.0; below get --recency-weight (default 1855844 = first 2015 game)")
+    p.add_argument("--recency-weight", type=float, default=0.5, metavar="W",
+                   help="Sample weight for pre-cutoff games (default 0.5)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -77,7 +82,13 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(f"{parse_failed}\n")
     log.info("wrote known_bad_games.txt with %d entries", len(stats.failed_game_ids) + len(parse_failures))
 
-    counts = write_parquet_shards(games, output_dir)
+    counts = write_parquet_shards(
+        games,
+        output_dir,
+        ratings_path=args.trueskill,
+        recency_cutoff_game_id=args.recency_cutoff_game_id,
+        recency_weight=args.recency_weight,
+    )
     for decision_type, n in counts.items():
         log.info("shard %s.parquet: %d rows", decision_type, n)
 

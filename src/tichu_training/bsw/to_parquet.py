@@ -1,11 +1,22 @@
 """Emit per-decision training records as Parquet, sharded by `decision_type`.
 
 Each row corresponds to one decision a BSW player made during a game. The
-fields are the ones listed in the project PRD; `state` and `legal_actions_mask`
-are reserved for the featurizer (issue #006) and currently emitted as `null`.
+columns follow the v1 PRD schema:
 
-Output layout: one Parquet file per decision type under the given directory,
-e.g. `output/play.parquet`, `output/pass_card.parquet`, ...
+  decision_type, game_id, round_id, timestamp, player_handle, action_taken,
+  state, legal_actions_mask, round_outcome, round_won,
+  featurizer_version, action_space_version, skill_decile, sample_weight
+
+`state` and `legal_actions_mask` are reserved (filled at training-loop load
+time, not at parse time). `featurizer_version` / `action_space_version` are
+stamped from the live module constants. `skill_decile` is joined from a
+ratings table if one is provided. `sample_weight` is `1.0` for games whose
+`game_id >= recency_cutoff_game_id` (default `1855844`, first game of 2015),
+else `recency_weight` (default `0.5`).
+
+Output layout: one shard per decision type, deterministically named
+`{decision_type}_00000.parquet` so training jobs can glob shards without a
+manifest. (Multi-shard splits can fill in higher suffixes later.)
 """
 
 from dataclasses import dataclass
@@ -17,8 +28,10 @@ import pyarrow.parquet as pq
 
 from tichu_engine.cards import Card, SpecialCard
 from tichu_engine.combinations import CardOrSpecial
+from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bsw.records import ParsedAction, ParsedGame
 from tichu_training.bsw.replay import replay_round
+from tichu_training.featurizer import FEATURIZER_VERSION
 
 
 # Map ParsedAction.kind -> decision_type emitted to Parquet.
@@ -35,6 +48,10 @@ _DECISION_TYPE_BY_KIND: dict[str, str] = {
 
 _KNOWN_DECISION_TYPES = ("play", "pass_card", "call_tichu", "call_grand_tichu", "wish_rank", "dragon_give")
 
+# First BSW game id of 2015. Games at or after this id are post-2015.
+_DEFAULT_RECENCY_CUTOFF: int = 1855844
+_DEFAULT_RECENCY_WEIGHT: float = 0.5
+
 
 @dataclass
 class _Record:
@@ -50,27 +67,63 @@ class _Record:
     round_won: bool         # did the acting player's team have the higher score this round?
     featurizer_version: str | None
     action_space_version: str | None
+    skill_decile: int | None
+    sample_weight: float
 
 
 def write_parquet_shards(
-    games: Iterable[ParsedGame], output_dir: Path
+    games: Iterable[ParsedGame],
+    output_dir: Path,
+    *,
+    ratings_path: str | Path | None = None,
+    recency_cutoff_game_id: int = _DEFAULT_RECENCY_CUTOFF,
+    recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
 ) -> dict[str, int]:
     """Write per-decision-type Parquet shards. Returns row counts per type."""
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    skill_lookup = _load_skill_lookup(ratings_path) if ratings_path else {}
     buckets: dict[str, list[_Record]] = {t: [] for t in _KNOWN_DECISION_TYPES}
-    for record in _emit_records(games):
+    for record in _emit_records(
+        games,
+        skill_lookup=skill_lookup,
+        recency_cutoff_game_id=recency_cutoff_game_id,
+        recency_weight=recency_weight,
+    ):
         buckets[record.decision_type].append(record)
     counts: dict[str, int] = {}
     for decision_type, records in buckets.items():
-        path = output_dir / f"{decision_type}.parquet"
+        path = output_dir / f"{decision_type}_00000.parquet"
         table = _to_table(records)
         pq.write_table(table, path)
         counts[decision_type] = len(records)
     return counts
 
 
-def _emit_records(games: Iterable[ParsedGame]):
+def _load_skill_lookup(ratings_path: str | Path) -> dict[str, int | None]:
+    table = pq.read_table(ratings_path, columns=["player_handle", "skill_decile"])
+    handles = table.column("player_handle").to_pylist()
+    deciles = table.column("skill_decile").to_pylist()
+    return {h: d for h, d in zip(handles, deciles)}
+
+
+def _sample_weight_for(game_id: str, cutoff: int, low_weight: float) -> float:
+    try:
+        gid = int(game_id)
+    except (TypeError, ValueError):
+        return 1.0
+    return 1.0 if gid >= cutoff else low_weight
+
+
+def _emit_records(
+    games: Iterable[ParsedGame],
+    *,
+    skill_lookup: dict[str, int | None],
+    recency_cutoff_game_id: int,
+    recency_weight: float,
+):
     for game in games:
+        weight = _sample_weight_for(game.game_id or "", recency_cutoff_game_id, recency_weight)
         for parsed_round in game.rounds:
             replay = replay_round(parsed_round)
             team_outcome = parsed_round.ergebnis[0] - parsed_round.ergebnis[1]
@@ -79,7 +132,6 @@ def _emit_records(games: Iterable[ParsedGame]):
                 if decision_type is None:
                     continue
                 player = parsed_action.player
-                # `player` is the seat (0..3). Handle is in game.handles[player].
                 if 0 <= player < 4:
                     handle = game.handles[player]
                 else:
@@ -95,12 +147,14 @@ def _emit_records(games: Iterable[ParsedGame]):
                     timestamp=None,
                     player_handle=handle,
                     action_taken=_serialise_action(parsed_action),
-                    state=None,                # filled by featurizer (issue #006)
-                    legal_actions_mask=None,   # filled by action-space module (#006)
+                    state=None,
+                    legal_actions_mask=None,
                     round_outcome=team_outcome,
                     round_won=round_won,
-                    featurizer_version=None,
-                    action_space_version=None,
+                    featurizer_version=FEATURIZER_VERSION,
+                    action_space_version=ACTION_SPACE_VERSION,
+                    skill_decile=skill_lookup.get(handle),
+                    sample_weight=weight,
                 )
 
 
@@ -154,6 +208,8 @@ def _to_table(records: list[_Record]) -> pa.Table:
         ("round_won", pa.bool_()),
         ("featurizer_version", pa.string()),
         ("action_space_version", pa.string()),
+        ("skill_decile", pa.int32()),
+        ("sample_weight", pa.float32()),
     ])
     columns: dict[str, list] = {f.name: [] for f in schema}
     for r in records:
@@ -169,4 +225,6 @@ def _to_table(records: list[_Record]) -> pa.Table:
         columns["round_won"].append(r.round_won)
         columns["featurizer_version"].append(r.featurizer_version)
         columns["action_space_version"].append(r.action_space_version)
+        columns["skill_decile"].append(r.skill_decile)
+        columns["sample_weight"].append(r.sample_weight)
     return pa.Table.from_pydict(columns, schema=schema)
