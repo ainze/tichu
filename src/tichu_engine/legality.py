@@ -35,9 +35,11 @@ from tichu_engine.enumeration import (
     enumerate_triples,
 )
 from tichu_engine.state import (
+    NUM_PLAYERS,
     DragonGivePending,
     GameState,
     MahjongWishPending,
+    PrivateState,
     SchupfenPending,
 )
 
@@ -236,6 +238,20 @@ def legal_actions(state: GameState) -> frozenset[Action]:
         if PHOENIX in hand and top.card is not DRAGON:
             actions.add(Single.phoenix_following(top_rank=top.rank))
     return _apply_wish(actions, wish, can_pass=True)
+
+
+def legal_actions_for(private_state: PrivateState) -> frozenset[Action]:
+    """Legal actions for the player owning `private_state`.
+
+    `legal_actions` requires the full `GameState`, but an `Agent` only sees its
+    own `PrivateState`. For the player's own turn, the legal-action set depends
+    only on their hand and the public state, so this helper synthesises a
+    placeholder `GameState` to reuse the same logic.
+    """
+    hands: list = [frozenset() for _ in range(NUM_PLAYERS)]
+    hands[private_state.player] = private_state.hand
+    synthetic = GameState(hands=tuple(hands), public=private_state.public)
+    return legal_actions(synthetic)
 
 
 def _apply_wish(actions: set[Action], wish: int | None, *, can_pass: bool) -> frozenset[Action]:
