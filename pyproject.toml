@@ -8,6 +8,8 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "pyarrow>=15.0",
+    "trueskill>=0.4",
+    "zstandard>=0.22",
 ]
 
 [project.optional-dependencies]
