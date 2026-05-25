@@ -650,6 +650,30 @@ def test_round_end_with_dragon_during_slam_nets_to_slam_bonus_only():
     assert next_state.public.pending_decision is None
 
 
+def test_bomb_interrupt_legal_on_empty_trick():
+    # When the previous trick has just resolved and the winner (current_player)
+    # hasn't led yet, a non-current player holding a bomb can preempt-bomb to
+    # seize the lead. BSW allows this; the engine must too.
+    from tichu_engine.legality import legal_bomb_interrupts
+    bomb_cards = (_c(Suit.JADE, 5), _c(Suit.SWORD, 5), _c(Suit.PAGODA, 5), _c(Suit.STAR, 5))
+    state = _state(
+        {
+            0: frozenset({_c(Suit.JADE, 14)}),
+            1: frozenset({_c(Suit.JADE, 11)}),
+            2: frozenset({_c(Suit.JADE, 12)}),
+            3: frozenset(bomb_cards),
+        },
+        current_player=0,  # player 0 has the lead, hasn't played yet
+    )
+    # Player 3 should be able to bomb-interrupt the empty trick.
+    bombs = legal_bomb_interrupts(state, player=3)
+    assert FourOfAKindBomb(*bomb_cards) in bombs
+    # And the actual step should succeed and make the bomb the new top.
+    next_state, _, _, _ = step(state, BombInterrupt(player=3, bomb=FourOfAKindBomb(*bomb_cards)))
+    assert next_state.public.trick.top_combination == FourOfAKindBomb(*bomb_cards)
+    assert next_state.public.trick.leader == 3
+
+
 def test_round_end_via_bomb_interrupt_credits_bombed_trick_to_bomber_team():
     # Players 1 (team 1) and 2 (team 0) already out. Trick contains player 2's
     # final play (Single 9, leader=2). Current is player 3. Player 0 (team 0)

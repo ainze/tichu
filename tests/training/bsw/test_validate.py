@@ -88,6 +88,21 @@ def test_game_1_replays_cleanly_with_in_progress_trick_fix():
     assert by_index[9].actual == (110, 90) == by_index[9].expected
 
 
+def test_game_10078_bomb_as_lead_via_interrupt_replays_cleanly():
+    """Regression guard for the empty-trick bomb-interrupt fix. In round 10
+    of game 10078, the previous trick winner (p2) had just resolved and not
+    yet led when p3 preempted with a 5-card straight-flush bomb (B9–BK). The
+    pre-fix engine rejected this because legal_bomb_interrupts returned an
+    empty set when top is None. The fix allows preempt-bombs on empty
+    tricks; the round must now match BSW (195, 105)."""
+    fixture = Path(__file__).resolve().parent / "data" / "game_10078.tch"
+    game = parse_tch(fixture.read_text(encoding="utf-8"), game_id="10078")
+    result = validate_game(game)
+    round_10 = next(r for r in result.rounds if r.round_index == 10)
+    assert not round_10.illegal_action, f"round 10 still illegal: {round_10}"
+    assert round_10.actual == (195, 105) == round_10.expected
+
+
 def test_game_10022_replays_cleanly_when_bsw_omits_drache_an():
     """Regression guard for the omitted-Drache-an fix. Game 10022 round 11
     contains a sequence where the Dragon-winner plays again immediately
