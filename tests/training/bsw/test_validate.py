@@ -86,3 +86,18 @@ def test_game_1_replays_cleanly_with_in_progress_trick_fix():
     assert by_index[6].actual == (55, 145) == by_index[6].expected
     assert by_index[7].actual == (90, 10) == by_index[7].expected
     assert by_index[9].actual == (110, 90) == by_index[9].expected
+
+
+def test_game_10022_replays_cleanly_when_bsw_omits_drache_an():
+    """Regression guard for the omitted-Drache-an fix. Game 10022 round 11
+    contains a sequence where the Dragon-winner plays again immediately
+    without an explicit "Drache an:" line in the BSW log. The replay layer
+    must synthesise the missing DragonGive (defaulting to the left opponent,
+    which is the BSW majority preference) so the rest of the round can be
+    executed and the final Ergebnis (265, 35) matches."""
+    fixture = Path(__file__).resolve().parent / "data" / "game_10022.tch"
+    game = parse_tch(fixture.read_text(encoding="utf-8"), game_id="10022")
+    result = validate_game(game)
+    round_11 = next(r for r in result.rounds if r.round_index == 11)
+    assert not round_11.illegal_action, f"round 11 still illegal: {round_11}"
+    assert round_11.actual == (265, 35) == round_11.expected

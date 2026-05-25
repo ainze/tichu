@@ -126,6 +126,24 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             result.pre_decision_states.append(None)
             continue
 
+        # BSW sometimes omits the "Drache an:" line after a Dragon-winning
+        # trick — typically when the winner is about to play again
+        # immediately. The engine is then stuck in DragonGivePending and
+        # rejects the next play as "no legal combination matches". Synthesise
+        # the missing DragonGive (defaulting to the left opponent, which is
+        # the BSW majority preference at ~63% across logged dragon-gives) so
+        # replay can proceed. Skipped when the next parsed action IS a
+        # dragon_give (use the parsed target instead).
+        while (
+            isinstance(state.public.pending_decision, DragonGivePending)
+            and parsed_action.kind != "dragon_give"
+        ):
+            winner = state.public.pending_decision.winner
+            synthetic_target = (winner + 3) % NUM_PLAYERS  # left opponent
+            synthetic = DragonGive(target=synthetic_target)
+            state, _, _, _ = step(state, synthetic)
+            result.steps_taken += 1
+
         # BSW often omits the trailing pass lines that precede a trick
         # resolution or pending decision. Insert synthetic PASSes to bring the
         # engine to the state where the parsed action can be applied.
