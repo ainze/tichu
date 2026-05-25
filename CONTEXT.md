@@ -227,8 +227,12 @@ _Avoid_: advantage weight, exp-adv.
 **Belief Model**:
 A standalone network predicting each opponent's remaining cards from public history. Trained on the BSW corpus using post-game-visible hidden hands as labels. **Not used in Phase 1 inference** — built now because the data scale supports it cheaply, and it bridges to Phase 2 search methods.
 
+**BSW Corpus**:
+The full set of `.tch` game logs scraped from brettspielwelt.de. The raw input to the training pipeline. Physically packaged as a zstd archive (see [tools/README.md](tools/README.md)) but logically a flat collection of ~2.4M Games keyed by `game_id`. The Held-out Game Set is a slice of this; everything else feeds BC Training and AWR Refine. Ingested into per-decision parquet shards by `parse_bsw` — see [ADR-0009](docs/adr/0009-bsw-ingest-streaming-pipeline.md).
+_Avoid_: BSW data, BSW logs, the dataset.
+
 **Replay Validation**:
-The corpus-scale check that every parsed BSW game can be re-played action-by-action through the rules engine and reaches BSW's reported final scores. Games that fail are excluded from training. See [ADR-0008](docs/adr/0008-bsw-replay-validation.md).
+The corpus-scale check that every parsed BSW round can be re-played action-by-action through the rules engine and reaches BSW's reported final scores. Granularity is the Round: only rounds whose engine-computed Ergebnis matches BSW's contribute training records. A game with at least one failing round is logged to `known_bad_games.txt` for monitoring, but its matching rounds still appear in the parquet shards. See [ADR-0008](docs/adr/0008-bsw-replay-validation.md).
 _Avoid_: parse check, sanity check, score check.
 
 **Call Network Checkpoint**:

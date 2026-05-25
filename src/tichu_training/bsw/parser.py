@@ -133,12 +133,19 @@ def _parse_round(lines: list[str], start: int, *, round_index: int) -> tuple[_Ro
             )
         builder.start[seat] = frozenset(cards)
 
-    # Optional Grosses Tichu and Schupfen header.
+    # Optional Grosses Tichu / Tichu calls, then the Schupfen header.
+    # A regular `Tichu:` call is legal here — a player who's just seen their
+    # 14-card hand may declare Tichu before passing.
     while i < len(lines):
         line = lines[i].rstrip()
         m = _GROSSES_TICHU_RE.match(line)
         if m:
             builder.grand_tichu_callers.add(int(m.group(1)))
+            i += 1
+            continue
+        m = _TICHU_RE.match(line)
+        if m:
+            builder.tichu_callers.add(int(m.group(1)))
             i += 1
             continue
         if line.startswith("Schupfen:"):
@@ -219,9 +226,16 @@ def _parse_schupfen_line(
     if seat_in_line != seat:
         raise ValueError(f"schupfen seat {seat_in_line} out of order, expected {seat}")
     body = m.group(3)
-    # Body looks like "handleA: cardX - handleB: cardY - handleC: cardZ - "
+    # Body looks like "handleA: cardX - handleB: cardY - handleC: cardZ - ".
+    # The real recipient separator is " - " (space-dash-space) — splitting on
+    # bare "-" over-splits handles that contain a hyphen (e.g. "raf-4").
+    # Peel the trailing " -" sentinel first so the split yields exactly the
+    # three recipient strings.
+    body = body.rstrip()
+    if body.endswith("-"):
+        body = body[:-1].rstrip()
     # Recipients appear in seat order: (seat+1) % 4, (seat+2) % 4, (seat+3) % 4.
-    parts = [p.strip() for p in body.split("-") if p.strip()]
+    parts = [p.strip() for p in body.split(" - ") if p.strip()]
     if len(parts) != 3:
         raise ValueError(f"schupfen line should have 3 recipients, got {parts}")
     cards: list[CardOrSpecial] = []

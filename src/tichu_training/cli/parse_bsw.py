@@ -1,19 +1,29 @@
 """`parse_bsw` CLI.
 
-Reads `.tch` files from --input, replays each through the rules engine,
-emits Parquet shards by decision_type to --output, and writes the IDs of any
-games whose engine score does not match BSW's recorded `Ergebnis` to a
-`known_bad_games.txt` in the output directory.
+Streams `.tch` game logs into per-decision Parquet shards. Two ingest modes:
+
+* `--input DIR` reads loose `.tch` files from a directory.
+* `--archive FILE` streams `.tch` payloads out of a zstd archive produced by
+  `tools/compress.py` (no scratch directory needed).
+
+Each game is replayed exactly once through the engine; records are emitted at
+Round granularity (see [ADR-0009](../../../docs/adr/0009-bsw-ingest-streaming-pipeline.md)).
+Games with at least one failing round are recorded in `known_bad_games.txt`;
+their matching rounds still contribute training rows.
 """
 
 import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Iterator
 
+from tqdm import tqdm
+
+from tichu_training.bsw.archive import count_entries, iter_archive, list_game_ids
 from tichu_training.bsw.parser import parse_tch
-from tichu_training.bsw.to_parquet import write_parquet_shards
-from tichu_training.bsw.validate import validate_corpus
+from tichu_training.bsw.records import ParsedGame
+from tichu_training.bsw.to_parquet import StreamStats, stream_to_parquet
 
 
 log = logging.getLogger("parse_bsw")
@@ -21,9 +31,14 @@ log = logging.getLogger("parse_bsw")
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Parse raw BSW log files into training Parquet shards.")
-    p.add_argument("--input", required=True, metavar="DIR", help="Directory containing BSW .tch log files")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input", metavar="DIR", help="Directory containing BSW .tch log files")
+    source.add_argument("--archive", metavar="FILE", help="Zstd archive (.zst) of .tch files; index sidecar must sit alongside")
     p.add_argument("--output", required=True, metavar="DIR", help="Output directory for Parquet shards")
-    p.add_argument("--subset", type=int, default=None, metavar="N", help="Limit to first N games")
+    p.add_argument("--subset", type=int, default=None, metavar="N", help="Limit to first N games (sorted by game_id)")
+    p.add_argument("--game-id", action="append", default=None, metavar="ID", dest="game_ids",
+                   help="Process only this game_id (repeatable). Also dumps the raw .tch text to "
+                        "<output>/<game_id>.tch for inspection. Useful for debugging parse/replay failures.")
     p.add_argument("--trueskill", metavar="FILE",
                    help="TrueSkill ratings Parquet to join `skill_decile` from (by player_handle)")
     p.add_argument("--recency-cutoff-game-id", type=int, default=1855844, metavar="N",
@@ -38,61 +53,147 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s %(message)s",
     )
 
-    input_dir = Path(args.input)
     output_dir = Path(args.output)
-    if not input_dir.is_dir():
-        log.error("input directory %s does not exist", input_dir)
-        return 2
+    targeted_ids: set[str] | None = set(args.game_ids) if args.game_ids else None
 
-    paths = sorted(input_dir.glob("*.tch"))
-    if args.subset is not None:
-        paths = paths[: args.subset]
-    if not paths:
-        log.error("no .tch files found under %s", input_dir)
-        return 2
-    log.info("found %d .tch files", len(paths))
-
-    games = []
-    parse_failures: list[str] = []
-    for path in paths:
-        game_id = path.stem
-        try:
-            game = parse_tch(path.read_text(encoding="utf-8"), game_id=game_id)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("skipping %s: parse failed: %s", path.name, exc)
-            parse_failures.append(game_id)
-            continue
-        games.append(game)
-
-    log.info("parsed %d games successfully (%d skipped)", len(games), len(parse_failures))
+    if args.input is not None:
+        input_dir = Path(args.input)
+        if not input_dir.is_dir():
+            log.error("input directory %s does not exist", input_dir)
+            return 2
+        source_pairs = _iter_dir(input_dir, subset=args.subset, game_ids=targeted_ids)
+        total = _count_dir(input_dir, subset=args.subset, game_ids=targeted_ids)
+    else:
+        archive_path = Path(args.archive)
+        if not archive_path.is_file():
+            log.error("archive %s does not exist", archive_path)
+            return 2
+        source_pairs = _iter_archive_pairs(archive_path, subset=args.subset, game_ids=targeted_ids)
+        total = _count_archive(archive_path, subset=args.subset, game_ids=targeted_ids)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    stats = validate_corpus(games)
+    if targeted_ids is not None:
+        # Debug mode: dump the raw .tch text of each targeted game next to the
+        # parquet output so the user can read what the parser was given.
+        source_pairs = _dumping(source_pairs, output_dir)
+
+    parse_failures: list[str] = []
+    bar = tqdm(total=total, unit="game", dynamic_ncols=True)
+
+    def _refresh_postfix(stats: StreamStats | None) -> None:
+        bar.set_postfix(
+            valid=stats.games_fully_matched if stats else 0,
+            failed=(stats.games_with_failed_rounds if stats else 0) + len(parse_failures),
+            rows=sum(stats.row_counts.values()) if stats else 0,
+            refresh=False,
+        )
+
+    def parsed_games() -> Iterator[ParsedGame]:
+        for game_id, text in source_pairs:
+            try:
+                yield parse_tch(text, game_id=game_id)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("skipping %s: parse failed: %s", game_id, exc)
+                parse_failures.append(game_id)
+                bar.update(1)
+                _refresh_postfix(None)
+
+    def _on_game_done(stats: StreamStats) -> None:
+        bar.update(1)
+        _refresh_postfix(stats)
+
+    try:
+        stats = stream_to_parquet(
+            parsed_games(),
+            output_dir,
+            ratings_path=args.trueskill,
+            recency_cutoff_game_id=args.recency_cutoff_game_id,
+            recency_weight=args.recency_weight,
+            on_game_done=_on_game_done,
+        )
+    finally:
+        bar.close()
+
     log.info(
-        "replay validation: %d/%d games match BSW Ergebnis (pass rate %.3f%%)",
-        stats.games_matched, stats.games_total, stats.pass_rate * 100,
+        "replay validation: %d/%d rounds matched (%.3f%%); %d games fully matched, %d games had at least one failing round, %d parse failures",
+        stats.rounds_matched, stats.rounds_total,
+        (stats.rounds_matched / stats.rounds_total * 100) if stats.rounds_total else 0.0,
+        stats.games_fully_matched, stats.games_with_failed_rounds, len(parse_failures),
     )
 
     known_bad_path = output_dir / "known_bad_games.txt"
     with known_bad_path.open("w", encoding="utf-8") as fh:
         for failed_id in stats.failed_game_ids:
             fh.write(f"{failed_id}\n")
+    log.info("wrote known_bad_games.txt with %d entries", len(stats.failed_game_ids))
+
+    parse_failures_path = output_dir / "parse_failures.txt"
+    with parse_failures_path.open("w", encoding="utf-8") as fh:
         for parse_failed in parse_failures:
             fh.write(f"{parse_failed}\n")
-    log.info("wrote known_bad_games.txt with %d entries", len(stats.failed_game_ids) + len(parse_failures))
+    log.info("wrote parse_failures.txt with %d entries", len(parse_failures))
 
-    counts = write_parquet_shards(
-        games,
-        output_dir,
-        ratings_path=args.trueskill,
-        recency_cutoff_game_id=args.recency_cutoff_game_id,
-        recency_weight=args.recency_weight,
-    )
-    for decision_type, n in counts.items():
+    for decision_type, n in stats.row_counts.items():
         log.info("shard %s.parquet: %d rows", decision_type, n)
 
     return 0
+
+
+def _iter_dir(
+    input_dir: Path, *, subset: int | None, game_ids: set[str] | None,
+) -> Iterator[tuple[str, str]]:
+    paths = sorted(input_dir.glob("*.tch"))
+    if game_ids is not None:
+        paths = [p for p in paths if p.stem in game_ids]
+    elif subset is not None:
+        paths = paths[:subset]
+    for path in paths:
+        yield path.stem, path.read_text(encoding="utf-8")
+
+
+def _count_dir(
+    input_dir: Path, *, subset: int | None, game_ids: set[str] | None,
+) -> int:
+    if game_ids is not None:
+        return sum(1 for p in input_dir.glob("*.tch") if p.stem in game_ids)
+    n = len(list(input_dir.glob("*.tch")))
+    return min(n, subset) if subset is not None else n
+
+
+def _iter_archive_pairs(
+    archive_path: Path, *, subset: int | None, game_ids: set[str] | None,
+) -> Iterator[tuple[str, str]]:
+    if game_ids is not None:
+        yield from iter_archive(archive_path, game_ids=game_ids)
+        return
+    if subset is None:
+        yield from iter_archive(archive_path)
+        return
+    # `--subset N` in dir mode is "first N by sorted game_id". Match that —
+    # picking the names from the cheap sidecar listing so we never decompress
+    # entries we'll discard. (A naive `sorted(iter_archive(...))[:N]` would
+    # decompress every payload in the archive — ~50 GB on the full corpus.)
+    keepers = set(sorted(list_game_ids(archive_path))[:subset])
+    yield from iter_archive(archive_path, game_ids=keepers)
+
+
+def _count_archive(
+    archive_path: Path, *, subset: int | None, game_ids: set[str] | None,
+) -> int:
+    if game_ids is not None:
+        return len(game_ids & set(list_game_ids(archive_path)))
+    n = count_entries(archive_path)
+    return min(n, subset) if subset is not None else n
+
+
+def _dumping(
+    pairs: Iterator[tuple[str, str]], output_dir: Path,
+) -> Iterator[tuple[str, str]]:
+    """Write each tch_text to <output_dir>/<game_id>.tch as it streams past."""
+    for game_id, text in pairs:
+        (output_dir / f"{game_id}.tch").write_bytes(text.encode("utf-8"))
+        yield game_id, text
 
 
 if __name__ == "__main__":

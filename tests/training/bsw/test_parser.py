@@ -28,6 +28,45 @@ def game_01() -> ParsedGame:
 
 # ---- Game-level shape ----
 
+def test_schupfen_handles_hyphenated_recipient_names():
+    """Player handles may contain `-` (e.g. `raf-4`). The schupfen body uses
+    ` - ` (space-dash-space) as the recipient separator, so a bare `-` split
+    over-splits hyphenated handles. The parser must use the real separator."""
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    # Replace seat-1's handle `1David` with `raf-4` everywhere in round 0.
+    # The end of round 0 is the first `Ergebnis:` line; only edit before that.
+    ergebnis_idx = raw.index("Ergebnis:")
+    head = raw[:ergebnis_idx].replace("1David", "raf-4")
+    tail = raw[ergebnis_idx:]
+    spliced = head + tail
+
+    game = parse_tch(spliced, game_id="hyphen")
+
+    # Seat 1's handle in round 0 is the renamed value.
+    assert game.rounds[0].pre_deal_hands is not None  # round parsed
+    # Every schupfen submission references valid cards (no card-decode crash).
+    for sub in game.rounds[0].schupfen:
+        assert sub is not None
+        assert sub.schupfen_to_next is not None
+
+
+def test_pre_schupfen_tichu_call_is_accepted(tmp_path):
+    """A regular `Tichu:` line may appear between Startkarten and Schupfen
+    (a player who's just seen their 14-card hand can declare Tichu before
+    passing). The parser must accept it and record the caller."""
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    # Inject a pre-Schupfen Tichu call into round 0. Find the Schupfen header
+    # for the first round and insert the line just before it.
+    lines = raw.splitlines()
+    schupfen_idx = next(i for i, line in enumerate(lines) if line.startswith("Schupfen:"))
+    lines.insert(schupfen_idx, "Tichu: (2)evdokia!!")
+    spliced = "\n".join(lines) + "\n"
+
+    game = parse_tch(spliced, game_id="spliced")
+
+    assert 2 in game.rounds[0].tichu_callers
+
+
 def test_parsed_game_has_four_seat_handles(game_00):
     assert game_00.handles == ("evi_sea", "1David", "evdokia!!", "Lisaaaaaaa")
 

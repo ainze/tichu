@@ -41,8 +41,9 @@ def test_cli_subset_flag_limits_inputs(tmp_path):
     ])
     assert rc == 0
     pass_card = pq.read_table(output / "schupfen_00000.parquet")
-    # Only one game processed → 10 rounds × 4 schupfen = 40 rows.
-    assert pass_card.num_rows == 40
+    # Per-round filtering (ADR-0009): one game × matching_rounds × 4 schupfen.
+    # Sample 2417500 has 7 matching rounds out of 10 today.
+    assert pass_card.num_rows == 7 * 4
 
 
 def test_cli_rejects_missing_input_dir(tmp_path):
