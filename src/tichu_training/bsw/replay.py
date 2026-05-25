@@ -70,6 +70,25 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
     state = _build_initial_state(parsed)
     result = ReplayResult(final_state=None, steps_taken=0)
 
+    # Round-scoped cache for legal_actions. Within one parsed action we hit
+    # legal_actions(state) at 2-4 sites (validation, sync_for, match_play);
+    # state changes only via step(), so id(state) is a sufficient key. We
+    # anchor each cached state in `_anchors` to prevent CPython from reusing
+    # its id() after GC — otherwise a freshly-allocated state could land at
+    # the dropped state's address and inherit stale entries. Both fall out of
+    # scope when this function returns. The full-enumeration cost was 86% of
+    # pipeline runtime in profiling — see ADR-0009.
+    cache: dict[int, frozenset] = {}
+    _anchors: list[GameState] = []
+
+    def legal(s: GameState) -> frozenset:
+        actions = cache.get(id(s))
+        if actions is None:
+            actions = legal_actions(s)
+            cache[id(s)] = actions
+            _anchors.append(s)
+        return actions
+
     # 1) Schupfen submissions (in seat order).
     for sub in parsed.schupfen:
         action = SchupfenPass(
@@ -77,7 +96,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             to_partner=sub.schupfen_to_partner,
             to_previous=sub.schupfen_to_previous,
         )
-        if action not in legal_actions(state):
+        if action not in legal(state):
             result.illegal_action = sub
             result.illegal_reason = "schupfen submission not legal"
             return result
@@ -101,7 +120,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
         # player isn't the engine's current player, or PASS isn't legal.
         if parsed_action.kind == "pass" and (
             parsed_action.player != state.public.current_player
-            or PASS not in legal_actions(state)
+            or PASS not in legal(state)
         ):
             result.decisions.append((parsed_action, PASS))
             result.pre_decision_states.append(None)
@@ -110,7 +129,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
         # BSW often omits the trailing pass lines that precede a trick
         # resolution or pending decision. Insert synthetic PASSes to bring the
         # engine to the state where the parsed action can be applied.
-        synced = _sync_for(parsed_action, state)
+        synced = _sync_for(parsed_action, state, legal_fn=legal)
         if synced is not None:
             state, n_inserted = synced
             result.steps_taken += n_inserted
@@ -134,12 +153,12 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             continue
 
         try:
-            engine_action = _to_engine_action(parsed_action, state)
+            engine_action = _to_engine_action(parsed_action, state, legal_fn=legal)
         except ValueError as exc:
             result.illegal_action = parsed_action
             result.illegal_reason = str(exc)
             return result
-        if engine_action not in legal_actions(state):
+        if engine_action not in legal(state):
             result.illegal_action = parsed_action
             result.illegal_reason = f"engine action {engine_action!r} not in legal set"
             return result
@@ -177,7 +196,9 @@ def _build_initial_state(parsed: ParsedRound) -> GameState:
     return GameState(hands=parsed.start_hands, public=public)
 
 
-def _to_engine_action(parsed: ParsedAction, state: GameState) -> ConcreteAction:
+def _to_engine_action(
+    parsed: ParsedAction, state: GameState, *, legal_fn=legal_actions,
+) -> ConcreteAction:
     """Convert a ParsedAction into the matching engine `ConcreteAction` for `state`."""
     if parsed.kind == "pass":
         return PASS
@@ -188,12 +209,12 @@ def _to_engine_action(parsed: ParsedAction, state: GameState) -> ConcreteAction:
             raise ValueError("dragon_give without target")
         return DragonGive(target=parsed.dragon_target)
     if parsed.kind == "play":
-        return _match_play(parsed.cards, state)
+        return _match_play(parsed.cards, state, legal_fn=legal_fn)
     raise ValueError(f"cannot translate parsed kind {parsed.kind!r} to engine action")
 
 
 def _sync_for(
-    parsed: ParsedAction, state: GameState, *, max_steps: int = 4
+    parsed: ParsedAction, state: GameState, *, max_steps: int = 4, legal_fn=legal_actions,
 ) -> tuple[GameState, int] | None:
     """Insert synthetic PASSes to bring the engine to a state where `parsed`
     can be applied.
@@ -229,7 +250,7 @@ def _sync_for(
             state, _, _, _ = step(state, MahjongWish(rank=None))
             inserted += 1
             continue
-        if PASS not in legal_actions(state):
+        if PASS not in legal_fn(state):
             return None
         state, _, _, _ = step(state, PASS)
         inserted += 1
@@ -249,14 +270,16 @@ def _match_bomb_interrupt(parsed: ParsedAction, state: GameState) -> BombInterru
     return BombInterrupt(player=parsed.player, bomb=candidates[0])
 
 
-def _match_play(cards: tuple[CardOrSpecial, ...], state: GameState) -> ConcreteAction:
+def _match_play(
+    cards: tuple[CardOrSpecial, ...], state: GameState, *, legal_fn=legal_actions,
+) -> ConcreteAction:
     """Find the engine combination from `legal_actions(state)` whose constituent
     cards match `cards` as a set. If multiple match (Phoenix-rank ambiguity),
     pick the lowest-rank candidate.
     """
     target = frozenset(cards)
     candidates = []
-    for a in legal_actions(state):
+    for a in legal_fn(state):
         if isinstance(a, (Pass, MahjongWish, DragonGive, SchupfenPass, BombInterrupt)):
             continue
         if frozenset(_cards_in(a)) == target:  # type: ignore[arg-type]
