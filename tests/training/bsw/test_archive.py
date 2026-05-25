@@ -208,7 +208,6 @@ def test_failure_details_tsv_categorises_per_round_failures(tmp_path):
 
     # score_mismatch rows carry the engine/bsw deltas in the detail string.
     score_rows = [row for row in rows if row[2] == "score_mismatch"]
-    assert score_rows, "samples should produce at least one score_mismatch"
     for row in score_rows:
         assert "engine=" in row[3] and "bsw=" in row[3], row
 
@@ -218,12 +217,29 @@ def test_parse_failures_go_to_parse_failures_txt_not_known_bad(tmp_path):
        - known_bad_games.txt — games that parsed but had ≥1 replay-failed round
        - parse_failures.txt — games whose .tch couldn't be tokenised at all
     """
-    # Build a dir input where one file is a real sample (replay-fails) and one
-    # is unparseable garbage (parse-fails).
+    # Build a dir input with three files: one real sample (parses + replays
+    # cleanly), one with a tampered Ergebnis line (parses but replay-fails on
+    # score mismatch), and one unparseable garbage file (parse-fails).
     src = tmp_path / "mixed"
     src.mkdir()
     real_sample = next(_SAMPLES.glob("*.tch"))
     (src / real_sample.name).write_bytes(real_sample.read_bytes())
+
+    # Tamper the first Ergebnis line so its scores no longer match what the
+    # engine will compute from the recorded play sequence.
+    raw = real_sample.read_bytes().decode("utf-8")
+    import re
+    tampered_text = re.sub(
+        r"^Ergebnis: \d+ - \d+",
+        "Ergebnis: 999 - -999",
+        raw,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    assert tampered_text != raw, "tampering did not change the Ergebnis line"
+    tampered_id = "88888888"
+    (src / f"{tampered_id}.tch").write_text(tampered_text, encoding="utf-8")
+
     (src / "99999999.tch").write_text("this is not a tichu log file\n", encoding="utf-8")
 
     output = tmp_path / "out"
@@ -233,9 +249,10 @@ def test_parse_failures_go_to_parse_failures_txt_not_known_bad(tmp_path):
     known_bad = (output / "known_bad_games.txt").read_text().split()
     parse_failures = (output / "parse_failures.txt").read_text().split()
 
-    # The real sample parsed but its rounds don't fully match — known-bad.
-    assert real_sample.stem in known_bad
-    assert real_sample.stem not in parse_failures
+    # The tampered sample parsed but its first round's Ergebnis no longer matches
+    # — known-bad.
+    assert tampered_id in known_bad
+    assert tampered_id not in parse_failures
     # The garbage file failed to tokenise — parse-failure.
     assert "99999999" in parse_failures
     assert "99999999" not in known_bad
@@ -322,9 +339,15 @@ def test_only_matching_rounds_contribute_records_and_failed_games_logged(tmp_pat
         v = validate_game(game)
         matching_by_game[path.stem] = {r.round_index for r in v.rounds if r.matches}
 
-    # Both samples have at least one failing round → both in known_bad_games.txt.
+    # Games with ≥1 failing round → in known_bad_games.txt; games whose every
+    # round matches → not in known_bad_games.txt.
+    all_rounds_by_game = {
+        path.stem: {r.round_index for r in validate_game(parse_tch(path.read_bytes().decode("utf-8"), game_id=path.stem)).rounds}
+        for path in sorted(_SAMPLES.glob("*.tch"))
+    }
+    expected_known_bad = {g for g in matching_by_game if matching_by_game[g] != all_rounds_by_game[g]}
     known_bad = (output / "known_bad_games.txt").read_text().split()
-    assert set(known_bad) == set(matching_by_game.keys())
+    assert set(known_bad) == expected_known_bad
 
     # Every parquet shard's (game_id, round_id) pairs must be a subset of the
     # matching set for the parent game.

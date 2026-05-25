@@ -113,6 +113,21 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             result.pre_decision_states.append(None)
             continue
 
+        # Auto-decline a pending MahjongWish when the next BSW action is not
+        # a "wish". BSW emits passes by other players BEFORE the optional
+        # "Wunsch:" line, but the engine pins current_player to the wisher
+        # until the wish is resolved — which would mis-classify those passes
+        # as phantom. Decline first so passes can apply against the advanced
+        # state. (Dragon-give is the opposite case: the passes between the
+        # Dragon-trick and the "Drache an:" line ARE phantom and should be
+        # filtered out first — handled below after the phantom-pass check.)
+        if (
+            isinstance(state.public.pending_decision, MahjongWishPending)
+            and parsed_action.kind != "wish"
+        ):
+            state, _, _, _ = step(state, MahjongWish(rank=None))
+            result.steps_taken += 1
+
         # BSW emits liberal `passt.` lines that don't correspond to engine
         # decisions — for already-passed players, for players whose turn it
         # isn't, and even trailing passes from the trick winner before they
@@ -125,6 +140,24 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             result.decisions.append((parsed_action, PASS))
             result.pre_decision_states.append(None)
             continue
+
+        # BSW sometimes omits the "Drache an:" line after a Dragon-winning
+        # trick — typically when the winner is about to play again
+        # immediately. The engine is then stuck in DragonGivePending and
+        # rejects the next play as "no legal combination matches". Synthesise
+        # the missing DragonGive (defaulting to the left opponent, which is
+        # the BSW majority preference at ~63% across logged dragon-gives) so
+        # replay can proceed. Skipped when the next parsed action IS a
+        # dragon_give (use the parsed target instead).
+        while (
+            isinstance(state.public.pending_decision, DragonGivePending)
+            and parsed_action.kind != "dragon_give"
+        ):
+            winner = state.public.pending_decision.winner
+            synthetic_target = (winner + 3) % NUM_PLAYERS  # left opponent
+            synthetic = DragonGive(target=synthetic_target)
+            state, _, _, _ = step(state, synthetic)
+            result.steps_taken += 1
 
         # BSW often omits the trailing pass lines that precede a trick
         # resolution or pending decision. Insert synthetic PASSes to bring the
@@ -166,6 +199,13 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
         state, _, _, _ = step(state, engine_action)
         result.steps_taken += 1
         result.decisions.append((parsed_action, engine_action))
+
+    # End-of-round normalisation: BSW may end the round with a Mahjong-last-
+    # card play and no following "Wunsch:" line, leaving the engine stuck in
+    # MahjongWishPending. Auto-decline so the MahjongWish handler can finalise.
+    if isinstance(state.public.pending_decision, MahjongWishPending):
+        state, _, _, _ = step(state, MahjongWish(rank=None))
+        result.steps_taken += 1
 
     result.final_state = state
     return result
