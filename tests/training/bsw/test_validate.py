@@ -88,6 +88,23 @@ def test_game_1_replays_cleanly_with_in_progress_trick_fix():
     assert by_index[9].actual == (110, 90) == by_index[9].expected
 
 
+def test_game_100021_mahjong_wish_auto_decline_does_not_eat_subsequent_passes():
+    """Regression guard for the pending-normalisation ordering fix. In round 6
+    of game 100021, player 2 plays a 5-card Mahjong straight as their last
+    cards. The trick has top=Straight, leader=p2, pending=MahjongWishPending.
+    The next three BSW lines are passes by p3, p0, p1 — but pre-fix the
+    phantom-pass check fired first (player != current_player because current
+    was still p2 awaiting a wish), eating those passes. The trick never
+    resolved and the next play failed. The fix hoists pending-normalisation
+    above the phantom-pass check."""
+    fixture = Path(__file__).resolve().parent / "data" / "game_100021.tch"
+    game = parse_tch(fixture.read_text(encoding="utf-8"), game_id="100021")
+    result = validate_game(game)
+    round_6 = next(r for r in result.rounds if r.round_index == 6)
+    assert not round_6.illegal_action, f"round 6 still illegal: {round_6}"
+    assert round_6.actual == (200, 0) == round_6.expected
+
+
 def test_game_10078_bomb_as_lead_via_interrupt_replays_cleanly():
     """Regression guard for the empty-trick bomb-interrupt fix. In round 10
     of game 10078, the previous trick winner (p2) had just resolved and not

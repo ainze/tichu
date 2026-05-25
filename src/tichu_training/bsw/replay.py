@@ -113,6 +113,21 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             result.pre_decision_states.append(None)
             continue
 
+        # Auto-decline a pending MahjongWish when the next BSW action is not
+        # a "wish". BSW emits passes by other players BEFORE the optional
+        # "Wunsch:" line, but the engine pins current_player to the wisher
+        # until the wish is resolved — which would mis-classify those passes
+        # as phantom. Decline first so passes can apply against the advanced
+        # state. (Dragon-give is the opposite case: the passes between the
+        # Dragon-trick and the "Drache an:" line ARE phantom and should be
+        # filtered out first — handled below after the phantom-pass check.)
+        if (
+            isinstance(state.public.pending_decision, MahjongWishPending)
+            and parsed_action.kind != "wish"
+        ):
+            state, _, _, _ = step(state, MahjongWish(rank=None))
+            result.steps_taken += 1
+
         # BSW emits liberal `passt.` lines that don't correspond to engine
         # decisions — for already-passed players, for players whose turn it
         # isn't, and even trailing passes from the trick winner before they

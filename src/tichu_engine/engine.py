@@ -131,12 +131,21 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     next_hand_sizes = tuple(len(h) for h in next_hands)
 
     # A play that contains Mahjong defers turn advancement: the player owes a
-    # wish-rank declaration (or decline) before anyone else acts.
+    # wish-rank declaration (or decline) before anyone else acts. The Mahjong
+    # can be the player's last card (e.g., in a closing straight ending in
+    # Mahjong), so we still need to track out_order here — otherwise a slam
+    # whose first-out completed it via a Mahjong-play goes undetected.
     if not isinstance(action, Pass) and MAHJONG in _cards_in(action):
+        new_out_order = state.public.out_order
+        prev_sizes = state.public.hand_sizes
+        for p in range(NUM_PLAYERS):
+            if prev_sizes[p] > 0 and next_hand_sizes[p] == 0 and p not in new_out_order:
+                new_out_order = new_out_order + (p,)
         next_public = replace(
             state.public,
             hand_sizes=next_hand_sizes,  # type: ignore[arg-type]
             trick=next_trick,
+            out_order=new_out_order,
             pending_decision=MahjongWishPending(player=current),
         )
         return GameState(hands=next_hands, public=next_public), 0.0, _round_done(next_hand_sizes), {}  # type: ignore[arg-type]
