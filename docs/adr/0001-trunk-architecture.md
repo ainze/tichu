@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-15
-- **Issue:** [#008 Trunk architecture decision](../../issues/008-trunk-architecture-decision.md)
 
 ## Context
 

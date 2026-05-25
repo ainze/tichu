@@ -21,8 +21,8 @@ def test_cli_runs_end_to_end_on_samples(tmp_path):
     # All six decision-type shards should be written.
     written = {p.stem for p in output.glob("*.parquet")}
     assert written == {
-        "play_00000", "pass_card_00000", "call_tichu_00000",
-        "call_grand_tichu_00000", "wish_rank_00000", "dragon_give_00000",
+        "play_00000", "schupfen_00000", "call_tichu_00000",
+        "call_grand_tichu_00000", "wish_00000", "dragon_assignment_00000",
     }
     assert (output / "known_bad_games.txt").exists()
 
@@ -40,7 +40,7 @@ def test_cli_subset_flag_limits_inputs(tmp_path):
         "--subset", "1",
     ])
     assert rc == 0
-    pass_card = pq.read_table(output / "pass_card_00000.parquet")
+    pass_card = pq.read_table(output / "schupfen_00000.parquet")
     # Only one game processed → 10 rounds × 4 schupfen = 40 rows.
     assert pass_card.num_rows == 40
 

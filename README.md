@@ -45,8 +45,8 @@ Here is the entire flow, from raw human game logs on the left to a running infer
         v
 Parquet shards
    (one per decision type:
-    play / pass_card /
-    wish_rank / dragon_give)
+    play / schupfen /
+    wish / dragon_assignment)
         |
         |  compute_trueskill          (optional but recommended)
         v
@@ -133,7 +133,7 @@ parse_bsw \
 
 The recency flags exist because Tichu's strategic landscape has shifted over the years; downweighting older games stops the model from over-fitting to obsolete play.
 
-**Outputs:** `play_00000.parquet`, `pass_card_00000.parquet`, `wish_rank_00000.parquet`, `dragon_give_00000.parquet` in the output directory.
+**Outputs:** `play_00000.parquet`, `schupfen_00000.parquet`, `wish_00000.parquet`, `dragon_assignment_00000.parquet` in the output directory.
 
 ---
 
@@ -156,7 +156,7 @@ compute_trueskill \
 
 ### `train_bc`
 
-**What it does:** Trains the main policy network using **behavioral cloning** — i.e. it learns to predict what a human did, given the same game state. The network has a shared "trunk" (a deep residual MLP) feeding four heads, one per decision type (play, pass_card, wish_rank, dragon_give). It also conditions on the acting player's skill decile so it can learn "what would a strong player do here?" specifically.
+**What it does:** Trains the main policy network using **behavioral cloning** — i.e. it learns to predict what a human did, given the same game state. The network has a shared "trunk" (a deep residual MLP) feeding four heads, one per decision type (play, schupfen, wish, dragon_assignment). It also conditions on the acting player's skill decile so it can learn "what would a strong player do here?" specifically.
 
 **When you'd run it:** After parquet shards exist. Two modes:
 
@@ -456,8 +456,8 @@ src/
 
 tests/                      # mirrors the src/ layout — one test dir per package
 configs/                    # example YAML configs (each command has a *_smoke.yaml)
-issues/                     # vertical-slice issue files used during development
 documentation/              # the PRD and rulebook
+docs/adr/                   # Architecture Decision Records — read these to understand non-obvious design choices
 sample/                     # two sample .tch games used by the tests
 ```
 
@@ -493,13 +493,13 @@ Every CLI has a smoke test that does the full thing on a tiny synthetic dataset.
 
 ## Known limitations and deferred work
 
-The following items are documented but not yet implemented. They live as comments in the relevant modules and as scope-note paragraphs in the per-issue slice files under `issues/`.
+The following items are documented but not yet implemented. They live as comments in the relevant modules.
 
 - **Parquet → BC example materialisation.** The Parquet shards store the parsed action records, but reconstructing the featurized training example from a row requires replaying the round from the `.tch` source. The smoke configs use `SyntheticBCDataset` for now; the parquet path is wired up to validate versions but raises `NotImplementedError` when you try to iterate it. A future follow-up will add a featurization cache so the parquet path becomes usable.
 - **Negative call examples.** The BSW parser only emits positive Tichu / Grand Tichu calls. Negative examples (a player at a call-decision point who chose not to call) need to be synthesized — also deferred to a follow-up.
 - **Trunk sharing between BC and value baseline.** The AWR value baseline is its own small MLP rather than sharing the BC trunk. Cleaner from a wiring standpoint at this stage; trunk sharing is a possible optimization later.
 - **ONNX export.** TorchScript is the primary target. The `--format onnx` flag is reserved but currently rejected with a clear message.
-- **Schupfen / wish_rank / dragon_give head decoding.** The BC model has heads for all four decision types, but only the `play` head is wired into `MLAgent` end-to-end. For pending decisions (schupfen, wish, dragon-give) the ML agent currently delegates to `RuleAgent` heuristics. Wiring the other heads through to concrete engine actions is the largest of the documented follow-ups.
+- **Schupfen / wish / dragon_assignment head decoding.** The BC model has heads for all four decision types, but only the `play` head is wired into `MLAgent` end-to-end. For pending decisions (schupfen, wish, dragon-give) the ML agent currently delegates to `RuleAgent` heuristics. Wiring the other heads through to concrete engine actions is the largest of the documented follow-ups.
 - **BombInterrupt in tournament play.** The tournament harness exercises only in-turn actions because `legal_actions_for` doesn't enumerate out-of-turn bomb interrupts. Engine support exists; surfacing it through the harness is a follow-up.
 - **Tichu calling composed onto play agents.** The play and call models exist as separate networks; a thin wrapper that uses the call models to decide whether to announce Tichu before play begins is a follow-up.
 

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from tichu_engine.legality import PASS, Action
+from tichu_engine.legality import PASS, ConcreteAction
 from tichu_engine.state import PrivateState
 
 from tichu_eval.move_prediction import EvalDecision, evaluate_move_prediction
@@ -21,7 +21,7 @@ class _DummyState:
 class _ConstantAgent(Agent):
     """Always returns `action`. Implements ranking by reporting `top_k`."""
 
-    def __init__(self, *, action: Action, top_k: list[Action] | None = None):
+    def __init__(self, *, action: ConcreteAction, top_k: list[ConcreteAction] | None = None):
         self._action = action
         self._top_k = top_k
 
@@ -89,13 +89,13 @@ def test_aggregates_by_decision_type():
     decisions = [
         EvalDecision("play", _DummyState(0), PASS),
         EvalDecision("play", _DummyState(1), "X"),
-        EvalDecision("wish_rank", _DummyState(2), PASS),
+        EvalDecision("wish", _DummyState(2), PASS),
     ]
     out = evaluate_move_prediction(agent, decisions)
     assert out["play"]["n"] == 2
     assert out["play"]["top1"] == 0.5
-    assert out["wish_rank"]["n"] == 1
-    assert out["wish_rank"]["top1"] == 1.0
+    assert out["wish"]["n"] == 1
+    assert out["wish"]["top1"] == 1.0
 
 
 def test_max_decisions_caps_evaluation():
@@ -122,7 +122,7 @@ def test_decisions_from_game_yields_decisions_from_a_sample_game():
     seen_types = {d.decision_type for d in decisions}
     # At minimum every game has play decisions and schupfen pass_card decisions.
     assert "play" in seen_types
-    assert "pass_card" in seen_types
+    assert "schupfen" in seen_types
 
     # RuleAgent runs end-to-end without crashing on every decision.
     from tichu_ml.rule_agent import RuleAgent

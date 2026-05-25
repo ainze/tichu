@@ -19,9 +19,9 @@ batch_size: 1024
 epochs: 4
 head_weights:
   play: 1.0
-  pass_card: 0.5
-  wish_rank: 0.3
-  dragon_give: 0.2
+  schupfen: 0.5
+  wish: 0.3
+  dragon_assignment: 0.2
 
 checkpoint_every: 5000
 seed: 0

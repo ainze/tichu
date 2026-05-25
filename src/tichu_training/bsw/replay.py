@@ -25,7 +25,7 @@ from tichu_engine.cards import MAHJONG, PHOENIX
 from tichu_engine.combinations import CardOrSpecial
 from tichu_engine.engine import step
 from tichu_engine.legality import (
-    Action,
+    ConcreteAction,
     BombInterrupt,
     DragonGive,
     MahjongWish,
@@ -58,7 +58,7 @@ class ReplayResult:
     illegal_reason: str | None = None
     # Decision records produced during replay (one per Parsed action that we
     # successfully fed to the engine, in execution order):
-    decisions: list[tuple[ParsedAction, Action]] = field(default_factory=list)
+    decisions: list[tuple[ParsedAction, ConcreteAction]] = field(default_factory=list)
     # Engine state observed immediately before each decision was applied, in
     # lockstep with `decisions`. `None` for pseudo-decisions (Tichu/Grand-Tichu
     # call passthroughs and phantom passes) where no engine step happened.
@@ -177,8 +177,8 @@ def _build_initial_state(parsed: ParsedRound) -> GameState:
     return GameState(hands=parsed.start_hands, public=public)
 
 
-def _to_engine_action(parsed: ParsedAction, state: GameState) -> Action:
-    """Convert a ParsedAction into the matching engine `Action` for `state`."""
+def _to_engine_action(parsed: ParsedAction, state: GameState) -> ConcreteAction:
+    """Convert a ParsedAction into the matching engine `ConcreteAction` for `state`."""
     if parsed.kind == "pass":
         return PASS
     if parsed.kind == "wish":
@@ -249,7 +249,7 @@ def _match_bomb_interrupt(parsed: ParsedAction, state: GameState) -> BombInterru
     return BombInterrupt(player=parsed.player, bomb=candidates[0])
 
 
-def _match_play(cards: tuple[CardOrSpecial, ...], state: GameState) -> Action:
+def _match_play(cards: tuple[CardOrSpecial, ...], state: GameState) -> ConcreteAction:
     """Find the engine combination from `legal_actions(state)` whose constituent
     cards match `cards` as a set. If multiple match (Phoenix-rank ambiguity),
     pick the lowest-rank candidate.

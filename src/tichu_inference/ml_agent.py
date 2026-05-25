@@ -4,8 +4,8 @@ Wraps a TorchScript-exported BCModel and presents the standard `Agent`
 interface. The model is used for ordinary play decisions where the
 canonical action space directly maps to engine actions; for pending
 decisions (schupfen / mahjong wish / dragon give) the agent currently
-falls through to `RuleAgent` heuristics. Wiring the pass_card /
-wish_rank / dragon_give heads through to concrete engine actions is a
+falls through to `RuleAgent` heuristics. Wiring the schupfen /
+wish / dragon_assignment heads through to concrete engine actions is a
 follow-up — see the FIXME-style comment in `_act_on_play`.
 
 Fallback contract: any exception inside the inference path, NaN/inf
@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from tichu_engine.legality import (
-    Action,
+    ConcreteAction,
     DragonGivePending,
     MahjongWishPending,
     SchupfenPending,
@@ -61,7 +61,7 @@ class MLAgent(Agent):
         self._rng = fallback_rng or random.Random(0)
         self.last_fallback_used: bool = False
 
-    def act(self, private_state: PrivateState) -> Action:
+    def act(self, private_state: PrivateState) -> ConcreteAction:
         self.last_fallback_used = False
         pending = private_state.public.pending_decision
         if isinstance(pending, (SchupfenPending, DragonGivePending, MahjongWishPending)):
@@ -78,7 +78,7 @@ class MLAgent(Agent):
             self.last_fallback_used = True
             return self._random_legal(private_state)
 
-    def rank_actions(self, private_state: PrivateState) -> list[Action] | None:
+    def rank_actions(self, private_state: PrivateState) -> list[ConcreteAction] | None:
         pending = private_state.public.pending_decision
         if isinstance(pending, (SchupfenPending, DragonGivePending, MahjongWishPending)):
             return None  # head-specific ranking not implemented yet.
@@ -92,7 +92,7 @@ class MLAgent(Agent):
     # Play-head inference.
     # ------------------------------------------------------------
 
-    def _act_on_play(self, private_state: PrivateState) -> Action:
+    def _act_on_play(self, private_state: PrivateState) -> ConcreteAction:
         legal = list(legal_actions_for(private_state))
         if not legal:
             raise RuntimeError("no legal actions available")
@@ -105,7 +105,7 @@ class MLAgent(Agent):
             raise RuntimeError("no legal action mapped into the action space")
         return ranked[0]
 
-    def _rank_play_actions(self, private_state: PrivateState) -> list[Action]:
+    def _rank_play_actions(self, private_state: PrivateState) -> list[ConcreteAction]:
         legal = list(legal_actions_for(private_state))
         play_logits = self._play_logits(private_state)
         if not _is_finite(play_logits):
@@ -123,7 +123,7 @@ class MLAgent(Agent):
         play = out["play"][0]
         return play.detach().cpu().numpy()
 
-    def _random_legal(self, private_state: PrivateState) -> Action:
+    def _random_legal(self, private_state: PrivateState) -> ConcreteAction:
         legal = list(legal_actions_for(private_state))
         if not legal:
             raise RuntimeError("no legal actions for fallback")
@@ -134,11 +134,11 @@ def _is_finite(logits: np.ndarray) -> bool:
     return bool(np.isfinite(logits).all())
 
 
-def _rank_legal_by_logits(legal: list[Action], play_logits: np.ndarray) -> list[Action]:
+def _rank_legal_by_logits(legal: list[ConcreteAction], play_logits: np.ndarray) -> list[ConcreteAction]:
     """Order legal actions by descending policy logit. Actions that don't map to
     a canonical action-space index are placed at the end in their original order."""
-    scored: list[tuple[float, int, Action]] = []
-    unmapped: list[Action] = []
+    scored: list[tuple[float, int, ConcreteAction]] = []
+    unmapped: list[ConcreteAction] = []
     for i, action in enumerate(legal):
         idx = _combination_to_action_index(action)
         if idx is None or not (0 <= idx < play_logits.shape[0]):

@@ -7,7 +7,7 @@ A fixed seed makes its behaviour reproducible across runs.
 
 import random
 
-from tichu_engine.legality import Action, legal_actions_for
+from tichu_engine.legality import ConcreteAction, legal_actions_for
 from tichu_engine.state import PrivateState
 
 from tichu_ml.agent import Agent
@@ -19,6 +19,6 @@ class RandomAgent(Agent):
     def __init__(self, seed: int | None = None) -> None:
         self._rng = random.Random(seed)
 
-    def act(self, private_state: PrivateState) -> Action:
+    def act(self, private_state: PrivateState) -> ConcreteAction:
         options = list(legal_actions_for(private_state))
         return self._rng.choice(options)

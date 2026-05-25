@@ -11,7 +11,7 @@ from tichu_training.bsw.to_parquet import write_parquet_shards
 
 _SAMPLES = Path(__file__).resolve().parents[3] / "sample"
 _EXPECTED_DECISION_TYPES = {
-    "play", "pass_card", "call_tichu", "call_grand_tichu", "wish_rank", "dragon_give"
+    "play", "schupfen", "call_tichu", "call_grand_tichu", "wish", "dragon_assignment"
 }
 _EXPECTED_COLUMNS = {
     "decision_type", "game_id", "round_id", "timestamp", "player_handle",
@@ -55,9 +55,9 @@ def test_play_shard_contains_play_and_pass_rows(tmp_path, games):
     assert any(a.startswith("play:") for a in actions)
 
 
-def test_pass_card_shard_contains_schupfen_rows(tmp_path, games):
+def test_schupfen_shard_contains_schupfen_rows(tmp_path, games):
     write_parquet_shards(games, tmp_path)
-    table = pq.read_table(tmp_path / "pass_card_00000.parquet")
+    table = pq.read_table(tmp_path / "schupfen_00000.parquet")
     # Each round has 4 schupfen submissions; both samples have 10 rounds.
     assert table.num_rows == 4 * 10 * 2
     actions = table.column("action_taken").to_pylist()

@@ -1,4 +1,4 @@
-"""JSON codec for `PrivateState` and engine `Action`s.
+"""JSON codec for `PrivateState` and engine `ConcreteAction`s.
 
 The HTTP `POST /act` body uses exactly this shape:
   {

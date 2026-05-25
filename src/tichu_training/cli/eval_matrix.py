@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
-from tichu_eval.deal_pool import load_deal_pool
+from tichu_eval.starting_position_pool import load_starting_position_pool
 from tichu_eval.move_prediction import (
     decisions_from_game,
     evaluate_move_prediction,
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_tournament_mode(agents, config, output_path: Path) -> int:
-    deals = load_deal_pool(Path(config["deal_pool"]))
+    deals = load_starting_position_pool(Path(config["starting_position_pool"]))
     n_deals = int(config.get("n_deals", len(deals)))
     deals = deals[:n_deals]
     result = run_tournament(

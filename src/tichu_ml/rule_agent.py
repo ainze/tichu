@@ -32,7 +32,7 @@ from tichu_engine.combinations import (
 )
 from tichu_engine.legality import (
     PASS,
-    Action,
+    ConcreteAction,
     DragonGive,
     MahjongWish,
     Pass,
@@ -92,7 +92,7 @@ def _combo_cost(combo) -> tuple[int, float]:
 
 @register_agent("rule")
 class RuleAgent(Agent):
-    def act(self, private_state: PrivateState) -> Action:
+    def act(self, private_state: PrivateState) -> ConcreteAction:
         legal = legal_actions_for(private_state)
         assert legal, "RuleAgent received empty legal-action set"
 
@@ -143,13 +143,13 @@ class RuleAgent(Agent):
 
     # ---- Play decisions ----
 
-    def _lead(self, legal) -> Action:
+    def _lead(self, legal) -> ConcreteAction:
         # Every action is a combination (no PASS when leading).
         candidates = [a for a in legal if not isinstance(a, Pass)]
         candidates.sort(key=_combo_cost)
         return candidates[0]
 
-    def _follow(self, legal) -> Action:
+    def _follow(self, legal) -> ConcreteAction:
         plays = [a for a in legal if not isinstance(a, Pass)]
         non_bombs = [
             a for a in plays

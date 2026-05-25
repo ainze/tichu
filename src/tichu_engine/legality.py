@@ -92,7 +92,7 @@ class SchupfenPass:
 Combination = Union[
     Single, Pair, Triple, FullHouse, Straight, PairStep, FourOfAKindBomb, StraightFlushBomb
 ]
-Action = Union[Combination, Pass, DragonGive, MahjongWish, BombInterrupt, SchupfenPass]
+ConcreteAction = Union[Combination, Pass, DragonGive, MahjongWish, BombInterrupt, SchupfenPass]
 
 
 def _enumerate_all(hand) -> frozenset[Combination]:
@@ -185,7 +185,7 @@ def legal_bomb_interrupts(state: GameState, player: int) -> frozenset[Bomb]:
     return frozenset(b for b in bombs if _beats(b, top))  # type: ignore[arg-type]
 
 
-def legal_actions(state: GameState) -> frozenset[Action]:
+def legal_actions(state: GameState) -> frozenset[ConcreteAction]:
     """Legal actions for the current player in `state`.
 
     When leading (no top combination), every enumerated combination is legal and
@@ -199,15 +199,15 @@ def legal_actions(state: GameState) -> frozenset[Action]:
     if isinstance(pending, DragonGivePending):
         # Winner gives the trick to one of the two opponents.
         opponents = {p for p in range(4) if p % 2 != pending.winner % 2}
-        return frozenset[Action]({DragonGive(target=t) for t in opponents})
+        return frozenset[ConcreteAction]({DragonGive(target=t) for t in opponents})
     if isinstance(pending, MahjongWishPending):
-        return frozenset[Action](
+        return frozenset[ConcreteAction](
             {MahjongWish(rank=r) for r in range(2, 15)} | {MahjongWish(rank=None)}
         )
     if isinstance(pending, SchupfenPending):
         # Every permutation of 3 distinct cards from hand is a valid schupfen pass.
         hand = list(state.hands[state.public.current_player])
-        passes: set[Action] = set()
+        passes: set[ConcreteAction] = set()
         for a in hand:
             for b in hand:
                 if b == a:
@@ -224,10 +224,10 @@ def legal_actions(state: GameState) -> frozenset[Action]:
     wish = state.public.mahjong_wish
 
     if top is None:
-        leading: set[Action] = set(all_combos)  # type: ignore[arg-type]
+        leading: set[ConcreteAction] = set(all_combos)  # type: ignore[arg-type]
         return _apply_wish(leading, wish, can_pass=False)
 
-    actions: set[Action] = {c for c in all_combos if _beats(c, top)}  # type: ignore[arg-type]
+    actions: set[ConcreteAction] = {c for c in all_combos if _beats(c, top)}  # type: ignore[arg-type]
     if isinstance(top, Single):
         # The leading-rank Phoenix single (rank 1.5) is only valid when leading.
         # When following, Phoenix must declare its following rank explicitly.
@@ -240,7 +240,7 @@ def legal_actions(state: GameState) -> frozenset[Action]:
     return _apply_wish(actions, wish, can_pass=True)
 
 
-def legal_actions_for(private_state: PrivateState) -> frozenset[Action]:
+def legal_actions_for(private_state: PrivateState) -> frozenset[ConcreteAction]:
     """Legal actions for the player owning `private_state`.
 
     `legal_actions` requires the full `GameState`, but an `Agent` only sees its
@@ -254,7 +254,7 @@ def legal_actions_for(private_state: PrivateState) -> frozenset[Action]:
     return legal_actions(synthetic)
 
 
-def _apply_wish(actions: set[Action], wish: int | None, *, can_pass: bool) -> frozenset[Action]:
+def _apply_wish(actions: set[ConcreteAction], wish: int | None, *, can_pass: bool) -> frozenset[ConcreteAction]:
     """If a Mahjong wish is active and any action fulfills it, restrict to those
     actions (Pass is also forbidden). Otherwise, return actions plus Pass when allowed."""
     if wish is not None:
