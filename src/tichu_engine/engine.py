@@ -149,11 +149,21 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     )
 
     # If the trick just resolved, award its points to the leader's team —
-    # or defer the decision when the trick was won by the Dragon.
+    # or defer the decision when the trick was won by the Dragon. The trick
+    # "resolves" either via the normal pass-around (resolved_trick.leader is
+    # None) or because the round ends mid-trick: when 3 of 4 players are out,
+    # no further plays are possible and BSW credits the trick to whoever holds
+    # the current top combination.
     new_scores = state.public.scores
     new_round_points = state.public.round_points_by_player
     new_pending: object | None = None
-    if next_trick.leader is not None and resolved_trick.leader is None:
+    trick_resolved = next_trick.leader is not None and resolved_trick.leader is None
+    round_ends_mid_trick = (
+        next_trick.leader is not None
+        and resolved_trick.leader is not None
+        and _round_done(next_hand_sizes)  # type: ignore[arg-type]
+    )
+    if trick_resolved or round_ends_mid_trick:
         winner = next_trick.leader
         points = _trick_points(next_trick)
         top = next_trick.top_combination
@@ -162,6 +172,8 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         else:
             new_scores = _add_to_team(new_scores, _team_of(winner), points)
             new_round_points = _add_to_player(new_round_points, winner, points)
+        if round_ends_mid_trick:
+            resolved_trick = Trick.empty()
 
     # Clear an active Mahjong wish once any play fulfils it (contains a
     # natural card of the wished rank).
@@ -394,11 +406,19 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
     new_scores = state.public.scores
     new_round_points = state.public.round_points_by_player
     new_pending: object | None = None
-    if bombed_trick.leader is not None and resolved_trick.leader is None:
+    trick_resolved = bombed_trick.leader is not None and resolved_trick.leader is None
+    round_ends_mid_trick = (
+        bombed_trick.leader is not None
+        and resolved_trick.leader is not None
+        and _round_done(next_hand_sizes)  # type: ignore[arg-type]
+    )
+    if trick_resolved or round_ends_mid_trick:
         winner = bombed_trick.leader
         points = _trick_points(bombed_trick)
         new_scores = _add_to_team(new_scores, _team_of(winner), points)
         new_round_points = _add_to_player(new_round_points, winner, points)
+        if round_ends_mid_trick:
+            resolved_trick = Trick.empty()
 
     new_out_order = state.public.out_order
     prev_sizes = state.public.hand_sizes

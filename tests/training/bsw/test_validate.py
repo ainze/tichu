@@ -64,6 +64,25 @@ def test_validate_corpus_aggregates_per_game_results():
     stats = validate_corpus(games)
     assert stats.games_total == 2
     assert stats.games_with_illegal_actions == 0
-    # Failed = whole-game mismatch. Both samples have at least one mismatching
-    # round each, so both currently land on the failed list.
+    # Failed = whole-game mismatch.
     assert len(stats.failed_game_ids) <= 2
+
+
+def test_game_1_replays_cleanly_with_in_progress_trick_fix():
+    """Regression guard for the in-progress-trick fix. Before the fix, game 1
+    had four rounds (5, 6, 7, 9) failing with |delta|=10 score mismatches
+    because the 3rd-out's final-play trick was being dropped at _finalise_round.
+    The fix credits in-progress tricks at round-end. All ten rounds of game 1
+    must now match BSW's Ergebnis exactly."""
+    fixture = Path(__file__).resolve().parent / "data" / "game_1.tch"
+    game = parse_tch(fixture.read_text(encoding="utf-8"), game_id="1")
+    result = validate_game(game)
+    failures = [(r.round_index, r.actual, r.expected) for r in result.rounds if not r.matches]
+    assert failures == [], f"unexpected failing rounds in game 1: {failures}"
+    # Pin the specific BSW scores for the formerly-failing rounds so a future
+    # engine change that only "looks correct" can't silently revert these.
+    by_index = {r.round_index: r for r in result.rounds}
+    assert by_index[5].actual == (85, 15) == by_index[5].expected
+    assert by_index[6].actual == (55, 145) == by_index[6].expected
+    assert by_index[7].actual == (90, 10) == by_index[7].expected
+    assert by_index[9].actual == (110, 90) == by_index[9].expected

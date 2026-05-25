@@ -54,7 +54,12 @@ def test_step_play_removes_cards_from_hand():
 def test_step_play_records_combination_on_trick():
     seven = _c(Suit.JADE, 7)
     state = _state(
-        {0: frozenset({seven}), 1: frozenset({_c(Suit.STAR, 10)})},
+        {
+            0: frozenset({seven, _c(Suit.SWORD, 3)}),
+            1: frozenset({_c(Suit.STAR, 10)}),
+            2: frozenset({_c(Suit.PAGODA, 11)}),
+            3: frozenset({_c(Suit.SWORD, 12)}),
+        },
     )
     next_state, _, _, _ = step(state, Single(seven))
     assert next_state.public.trick.top_combination == Single(seven)
@@ -538,6 +543,138 @@ def test_round_done_when_three_players_are_out():
     )
     _, _, done, _ = step(state, Single(_c(Suit.JADE, 7)))
     assert done is True
+
+
+def test_round_end_credits_in_progress_trick_to_leader_team():
+    # Players 1 (team 1) and 2 (team 0) already out; player 0 (team 0) leads the
+    # final trick with a Single 10 as their last card and becomes 3rd-out. Player
+    # 3 (team 1) is last-in. BSW credits the in-progress trick to the leader's
+    # team (10 -> team 0); the engine must too.
+    state = GameState(
+        hands=(
+            frozenset({_c(Suit.JADE, 10)}),
+            frozenset(),
+            frozenset(),
+            frozenset({_c(Suit.SWORD, 4)}),
+        ),
+        public=PublicState(
+            current_player=0,
+            hand_sizes=(1, 0, 0, 1),
+            scores=(0, 0),
+            trick=Trick.empty(),
+            out_order=(1, 2),
+        ),
+    )
+    next_state, _, done, _ = step(state, Single(_c(Suit.JADE, 10)))
+    assert done is True
+    assert next_state.public.scores == (10, 0)
+
+
+def test_round_end_credits_whole_in_progress_trick_not_just_last_play():
+    # Players 2 (team 0) and 3 (team 1) already out. Trick history: player 0 led
+    # with Single 5, player 1 beat with Single 7, player 0 now plays Single K
+    # (their last card -> 3rd-out, makes player 0 the new trick leader). Trick
+    # values: 5 + 7 + K = 5 + 0 + 10 = 15 points, credited to team 0.
+    state = GameState(
+        hands=(
+            frozenset({_c(Suit.JADE, 13)}),  # King
+            frozenset({_c(Suit.STAR, 9)}),
+            frozenset(),
+            frozenset(),
+        ),
+        public=PublicState(
+            current_player=0,
+            hand_sizes=(1, 1, 0, 0),
+            scores=(0, 0),
+            trick=Trick.empty()
+                .add_play(player=0, combination=Single(_c(Suit.JADE, 5)))
+                .add_play(player=1, combination=Single(_c(Suit.STAR, 7))),
+            out_order=(2, 3),
+        ),
+    )
+    next_state, _, done, _ = step(state, Single(_c(Suit.JADE, 13)))
+    assert done is True
+    assert next_state.public.scores == (15, 0)
+
+
+def test_round_end_with_dragon_as_last_card_sets_dragon_give_pending():
+    # Players 1 (team 1) and 2 (team 0) already out; player 0 plays Single Dragon
+    # as their last card -> 3rd-out. Round must NOT finalise yet: we owe a
+    # Dragon-give decision. Then DragonGive(target=3) routes 25 to team 1.
+    state = GameState(
+        hands=(
+            frozenset({DRAGON}),
+            frozenset(),
+            frozenset(),
+            frozenset({_c(Suit.SWORD, 4)}),
+        ),
+        public=PublicState(
+            current_player=0,
+            hand_sizes=(1, 0, 0, 1),
+            scores=(0, 0),
+            trick=Trick.empty(),
+            out_order=(1, 2),
+        ),
+    )
+    after_play, _, _, _ = step(state, Single(DRAGON))
+    assert isinstance(after_play.public.pending_decision, DragonGivePending)
+    assert after_play.public.pending_decision.winner == 0
+    assert after_play.public.pending_decision.points == 25
+    assert after_play.public.scores == (0, 0)
+    final, _, done, _ = step(after_play, DragonGive(target=3))
+    assert done is True
+    assert final.public.scores == (0, 25)
+
+
+def test_round_end_with_dragon_during_slam_nets_to_slam_bonus_only():
+    # Player 0 (team 0) is 1st-out. Player 2 (team 0, partner) plays Single
+    # Dragon as their last card -> 2nd-out -> SLAM. The Dragon's +25 must NOT
+    # leak: slam pays exactly +200 to team 0.
+    state = GameState(
+        hands=(
+            frozenset(),
+            frozenset({_c(Suit.STAR, 9)}),
+            frozenset({DRAGON}),
+            frozenset({_c(Suit.SWORD, 4)}),
+        ),
+        public=PublicState(
+            current_player=2,
+            hand_sizes=(0, 1, 1, 1),
+            scores=(0, 0),
+            trick=Trick.empty(),
+            out_order=(0,),
+        ),
+    )
+    next_state, _, _, _ = step(state, Single(DRAGON))
+    assert next_state.public.scores == (200, 0)
+    assert next_state.public.pending_decision is None
+
+
+def test_round_end_via_bomb_interrupt_credits_bombed_trick_to_bomber_team():
+    # Players 1 (team 1) and 2 (team 0) already out. Trick contains player 2's
+    # final play (Single 9, leader=2). Current is player 3. Player 0 (team 0)
+    # bomb-interrupts with FourOfAKindBomb(10s) as their last cards -> 3rd-out.
+    # Without the fix the bombed trick (40 points) is dropped; with the fix it
+    # credits to team 0.
+    bomb_cards = [_c(s, 10) for s in (Suit.JADE, Suit.STAR, Suit.PAGODA, Suit.SWORD)]
+    bomb = FourOfAKindBomb(*bomb_cards)
+    state = GameState(
+        hands=(
+            frozenset(bomb_cards),
+            frozenset(),
+            frozenset(),
+            frozenset({_c(Suit.SWORD, 4)}),
+        ),
+        public=PublicState(
+            current_player=3,
+            hand_sizes=(4, 0, 0, 1),
+            scores=(0, 0),
+            trick=Trick.empty().add_play(player=2, combination=Single(_c(Suit.JADE, 9))),
+            out_order=(1, 2),
+        ),
+    )
+    next_state, _, _, _ = step(state, BombInterrupt(player=0, bomb=bomb))
+    assert next_state.public.scores == (40, 0)
 
 
 def test_round_done_persists_after_dragon_give():
