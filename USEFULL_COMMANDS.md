@@ -7,6 +7,11 @@ python -m tichu_training.cli.parse_bsw `
     --workers 8
 
 
+python -m tichu_training.cli.parse_bsw `
+    --archive C:\workbench\tichu\data\archive.zst `
+    --output C:\workbench\tichu\data\parquet_1 `
+    --subset 100 --workers 12 -v
+
 # Quick group-by-mode count
 Get-Content C:/workbench/tichu/data/parquet_smoke/failure_details.tsv `
   | Select-Object -Skip 1 `
