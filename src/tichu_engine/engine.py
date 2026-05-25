@@ -15,7 +15,7 @@ from dataclasses import replace
 from tichu_engine.cards import Card, DOG, DRAGON, MAHJONG, PHOENIX, SpecialCard
 from tichu_engine.combinations import CardOrSpecial, Single
 from tichu_engine.legality import (
-    Action,
+    ConcreteAction,
     BombInterrupt,
     Combination,
     DragonGive,
@@ -39,7 +39,7 @@ from tichu_engine.state import (
 )
 
 
-def step(state: GameState, action: Action) -> tuple[GameState, float, bool, dict]:
+def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bool, dict]:
     """Apply an action; return (next_state, reward, done, info).
 
     Raises ValueError if the action is not legal in the given state.

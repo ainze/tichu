@@ -1,7 +1,7 @@
 """The Agent interface.
 
 An `Agent` is an inference-only policy: given a `PrivateState`, it returns one
-`Action`. This is the single integration point between the engine and any
+`ConcreteAction`. This is the single integration point between the engine and any
 concrete strategy — random, rule-based, or learned.
 
 The interface intentionally carries no training state and no environment
@@ -11,16 +11,16 @@ from the player's `PrivateState`.
 
 from abc import ABC, abstractmethod
 
-from tichu_engine.legality import Action
+from tichu_engine.legality import ConcreteAction
 from tichu_engine.state import PrivateState
 
 
 class Agent(ABC):
     @abstractmethod
-    def act(self, private_state: PrivateState) -> Action:
+    def act(self, private_state: PrivateState) -> ConcreteAction:
         """Choose one action given the player's private view of the game."""
 
-    def rank_actions(self, private_state: PrivateState) -> list[Action] | None:
+    def rank_actions(self, private_state: PrivateState) -> list[ConcreteAction] | None:
         """Return all legal actions ranked best-to-worst, or `None` if the agent
         does not expose a ranking.
 

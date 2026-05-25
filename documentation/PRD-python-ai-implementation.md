@@ -99,8 +99,8 @@ Phase 1 deliberately omits online self-play training (PPO and similar). At the d
 state               : serialized PrivateState
 legal_actions_mask  : bitmask over the canonical action space
 action_taken        : canonical action index
-decision_type       : one of {play, pass_card, call_tichu, call_grand_tichu,
-                              wish_rank, dragon_give}
+decision_type       : one of {play, schupfen, call_tichu, call_grand_tichu,
+                              wish, dragon_assignment}
 player_handle       : string, stable across the BSW corpus
 round_outcome       : final point delta for this player's team
 round_won           : bool

@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Iterator
 
-from tichu_engine.legality import Action
+from tichu_engine.legality import ConcreteAction
 from tichu_engine.state import PrivateState
 from tichu_ml.agent import Agent
 from tichu_training.bsw.records import ParsedAction, ParsedGame
@@ -20,9 +20,9 @@ from tichu_training.bsw.replay import replay_round
 _PARSED_KIND_TO_DECISION_TYPE: dict[str, str] = {
     "play": "play",
     "pass": "play",
-    "schupfen": "pass_card",
-    "wish": "wish_rank",
-    "dragon_give": "dragon_give",
+    "schupfen": "schupfen",
+    "wish": "wish",
+    "dragon_give": "dragon_assignment",
 }
 
 
@@ -33,13 +33,13 @@ _TOP_K = 5
 class EvalDecision:
     """One human decision state for move-prediction evaluation.
 
-    `decision_type` is one of 'play', 'pass_card', 'wish_rank', 'dragon_give' —
+    `decision_type` is one of 'play', 'schupfen', 'wish', 'dragon_assignment' —
     matching the BC model's heads.
     """
 
     decision_type: str
     private_state: PrivateState
-    human_action: Action
+    human_action: ConcreteAction
 
 
 def evaluate_move_prediction(

@@ -24,8 +24,8 @@ def _dummy_artifact(tmp_path: Path, name: str) -> Path:
             self.dg = torch.nn.Linear(FEATURIZER_OUTPUT_DIM, 2)
 
         def forward(self, features, skill):
-            return {"play": self.f(features), "pass_card": self.pc(features),
-                    "wish_rank": self.wr(features), "dragon_give": self.dg(features)}
+            return {"play": self.f(features), "schupfen": self.pc(features),
+                    "wish": self.wr(features), "dragon_assignment": self.dg(features)}
 
     torch.manual_seed(0)
     out = tmp_path / f"{name}.pt"

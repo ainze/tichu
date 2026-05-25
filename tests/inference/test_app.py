@@ -31,8 +31,8 @@ def _dummy_policy_artifact(tmp_path: Path, name: str,
 
         def forward(self, features, skill_decile):
             return {
-                "play": self.fc(features), "pass_card": self.pc(features),
-                "wish_rank": self.wr(features), "dragon_give": self.dg(features),
+                "play": self.fc(features), "schupfen": self.pc(features),
+                "wish": self.wr(features), "dragon_assignment": self.dg(features),
             }
 
     torch.manual_seed(0)

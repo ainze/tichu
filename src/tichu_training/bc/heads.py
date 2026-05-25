@@ -1,7 +1,7 @@
 """Multi-head BC model: shared trunk + per-decision-type linear heads.
 
 Heads are kept in deterministic order keyed by `decision_type`:
-  play → pass_card → wish_rank → dragon_give
+  play → schupfen → wish → dragon_assignment
 """
 
 from collections import OrderedDict
@@ -15,9 +15,9 @@ from tichu_training.bc.model import SkillEmbedding, TichuTrunk
 
 HEAD_LOGIT_DIMS: "OrderedDict[str, int]" = OrderedDict([
     ("play", ACTION_SPACE_SIZE),
-    ("pass_card", 3),
-    ("wish_rank", 14),
-    ("dragon_give", 2),
+    ("schupfen", 3),
+    ("wish", 14),
+    ("dragon_assignment", 2),
 ])
 
 

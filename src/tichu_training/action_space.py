@@ -20,7 +20,7 @@ ACTION_SPACE_VERSION: str = "v1"
 
 
 # ---------------------------------------------------------------------------
-# Action sum type.
+# Intent sum type.
 # ---------------------------------------------------------------------------
 
 
@@ -115,7 +115,7 @@ class DragonGive:
     side: str  # "left" | "right"
 
 
-Action = Union[
+Intent = Union[
     PlaySingle, PlayPair, PlayTriple, PlayFullHouse, PlayPairStep,
     PlayStraight, PlayFourBomb, PlayStraightFlushBomb,
     Pass, CallTichu, CallGrandTichu, SchupfenDirection, WishRank, DragonGive,
@@ -131,8 +131,8 @@ _SUITS = ("jade", "sword", "pagoda", "star")  # deterministic order
 _SPECIALS = ("mahjong", "dog", "dragon", "phoenix")
 
 
-def _enumerate_singles() -> list[Action]:
-    out: list[Action] = []
+def _enumerate_singles() -> list[Intent]:
+    out: list[Intent] = []
     for rank in range(2, 15):
         for suit in _SUITS:
             out.append(PlaySingle(suit=suit, rank=rank))
@@ -143,16 +143,16 @@ def _enumerate_singles() -> list[Action]:
     return out
 
 
-def _enumerate_pairs() -> list[Action]:
+def _enumerate_pairs() -> list[Intent]:
     return [PlayPair(rank=r, with_phoenix=ph) for r in range(2, 15) for ph in (False, True)]
 
 
-def _enumerate_triples() -> list[Action]:
+def _enumerate_triples() -> list[Intent]:
     return [PlayTriple(rank=r, with_phoenix=ph) for r in range(2, 15) for ph in (False, True)]
 
 
-def _enumerate_full_houses() -> list[Action]:
-    out: list[Action] = []
+def _enumerate_full_houses() -> list[Intent]:
+    out: list[Intent] = []
     for tr in range(2, 15):
         for pr in range(2, 15):
             if tr == pr:
@@ -162,8 +162,8 @@ def _enumerate_full_houses() -> list[Action]:
     return out
 
 
-def _enumerate_pair_steps() -> list[Action]:
-    out: list[Action] = []
+def _enumerate_pair_steps() -> list[Intent]:
+    out: list[Intent] = []
     for length in range(2, 14):  # 2..13 pair-steps; 13-pair-step spans ranks 2..14
         for start in range(2, 14 - length + 2):
             if start + length - 1 > 14:
@@ -174,8 +174,8 @@ def _enumerate_pair_steps() -> list[Action]:
     return out
 
 
-def _enumerate_straights() -> list[Action]:
-    out: list[Action] = []
+def _enumerate_straights() -> list[Intent]:
+    out: list[Intent] = []
     for start in range(1, 11):       # 1..10 (1 = mahjong-led)
         for length in range(5, 15):
             if start + length - 1 > 14:
@@ -190,12 +190,12 @@ def _enumerate_straights() -> list[Action]:
     return out
 
 
-def _enumerate_four_bombs() -> list[Action]:
+def _enumerate_four_bombs() -> list[Intent]:
     return [PlayFourBomb(rank=r) for r in range(2, 15)]
 
 
-def _enumerate_straight_flush_bombs() -> list[Action]:
-    out: list[Action] = []
+def _enumerate_straight_flush_bombs() -> list[Intent]:
+    out: list[Intent] = []
     for suit in _SUITS:
         for start in range(2, 11):
             for length in range(5, 15):
@@ -205,8 +205,8 @@ def _enumerate_straight_flush_bombs() -> list[Action]:
     return out
 
 
-def _enumerate_non_play_actions() -> list[Action]:
-    out: list[Action] = []
+def _enumerate_non_play_actions() -> list[Intent]:
+    out: list[Intent] = []
     out.append(Pass())
     out.append(CallTichu())
     out.append(CallGrandTichu())
@@ -220,8 +220,8 @@ def _enumerate_non_play_actions() -> list[Action]:
     return out
 
 
-def _build_canonical() -> tuple[Action, ...]:
-    sections: list[tuple[str, list[Action]]] = [
+def _build_canonical() -> tuple[Intent, ...]:
+    sections: list[tuple[str, list[Intent]]] = [
         ("singles", _enumerate_singles()),
         ("pairs", _enumerate_pairs()),
         ("triples", _enumerate_triples()),
@@ -232,7 +232,7 @@ def _build_canonical() -> tuple[Action, ...]:
         ("sf_bombs", _enumerate_straight_flush_bombs()),
         ("non_play", _enumerate_non_play_actions()),
     ]
-    all_actions: list[Action] = []
+    all_actions: list[Intent] = []
     for _, items in sections:
         all_actions.extend(items)
     _SECTION_SIZES.update({name: len(items) for name, items in sections})
@@ -240,18 +240,18 @@ def _build_canonical() -> tuple[Action, ...]:
 
 
 _SECTION_SIZES: dict[str, int] = {}
-CANONICAL_ACTIONS: tuple[Action, ...] = _build_canonical()
+CANONICAL_ACTIONS: tuple[Intent, ...] = _build_canonical()
 ACTION_SPACE_SIZE: int = len(CANONICAL_ACTIONS)
 
-_ACTION_TO_INDEX: dict[Action, int] = {a: i for i, a in enumerate(CANONICAL_ACTIONS)}
+_ACTION_TO_INDEX: dict[Intent, int] = {a: i for i, a in enumerate(CANONICAL_ACTIONS)}
 
 
-def encode(action: Action) -> int:
+def encode(action: Intent) -> int:
     """Return the canonical index for an action. KeyError if not in the space."""
     return _ACTION_TO_INDEX[action]
 
 
-def decode(index: int) -> Action:
+def decode(index: int) -> Intent:
     """Return the action at the given canonical index. IndexError if out of range."""
     if not 0 <= index < ACTION_SPACE_SIZE:
         raise IndexError(f"action index {index} out of range [0, {ACTION_SPACE_SIZE})")

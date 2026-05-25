@@ -46,9 +46,9 @@ def test_sample_weight_scales_loss():
 
 def test_head_logit_dims_match_spec():
     assert HEAD_LOGIT_DIMS["play"] == ACTION_SPACE_SIZE
-    assert HEAD_LOGIT_DIMS["pass_card"] == 3
-    assert HEAD_LOGIT_DIMS["wish_rank"] == 14
-    assert HEAD_LOGIT_DIMS["dragon_give"] == 2
+    assert HEAD_LOGIT_DIMS["schupfen"] == 3
+    assert HEAD_LOGIT_DIMS["wish"] == 14
+    assert HEAD_LOGIT_DIMS["dragon_assignment"] == 2
 
 
 def test_bcmodel_forward_returns_all_heads():
@@ -72,8 +72,8 @@ def test_bcmodel_forward_returns_all_heads():
 def test_bcmodel_heads_have_deterministic_order():
     model = BCModel(feature_dim=8, skill_buckets=10, skill_dim=2,
                     trunk_hidden=4, trunk_depth=1, trunk_out_dim=4)
-    # Always in the canonical order play → pass_card → wish_rank → dragon_give.
-    assert list(model.heads.keys()) == ["play", "pass_card", "wish_rank", "dragon_give"]
+    # Always in the canonical order play → schupfen → wish → dragon_assignment.
+    assert list(model.heads.keys()) == ["play", "schupfen", "wish", "dragon_assignment"]
 
 
 def test_bcmodel_accepts_default_dims():

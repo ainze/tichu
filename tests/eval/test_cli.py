@@ -5,19 +5,19 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from tichu_eval.deal_pool import generate_deal_pool, save_deal_pool
+from tichu_eval.starting_position_pool import generate_starting_position_pool, save_starting_position_pool
 from tichu_training.cli.eval_matrix import main
 
 
 def _write_pool(tmp_path: Path, *, n: int = 10) -> Path:
     pool_path = tmp_path / "pool.parquet"
-    save_deal_pool(generate_deal_pool(seed=0, n=n), pool_path)
+    save_starting_position_pool(generate_starting_position_pool(seed=0, n=n), pool_path)
     return pool_path
 
 
 def _write_config(tmp_path: Path, *, pool_path: Path, n_deals: int, output: Path) -> Path:
     config = textwrap.dedent(f"""\
-        deal_pool: {pool_path.as_posix()}
+        starting_position_pool: {pool_path.as_posix()}
         n_deals: {n_deals}
         agents:
           - name: random

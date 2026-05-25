@@ -1,4 +1,4 @@
-"""Single-deal runner.
+"""Single-Round runner.
 
 Drives one round from a starting `GameState` to round-end by repeatedly
 asking the seated agent for an action and applying `engine.step`. Returns
@@ -22,7 +22,7 @@ from tichu_ml.agent import Agent
 _MAX_STEPS = 10_000  # safety net against an infinite-loop bug.
 
 
-def play_deal(agents: Sequence[Agent], initial_state: GameState) -> tuple[int, int]:
+def play_round(agents: Sequence[Agent], initial_state: GameState) -> tuple[int, int]:
     if len(agents) != 4:
         raise ValueError(f"expected 4 agents (one per seat), got {len(agents)}")
     initial_scores = initial_state.public.scores
@@ -37,7 +37,7 @@ def play_deal(agents: Sequence[Agent], initial_state: GameState) -> tuple[int, i
         state, _, done, _ = step(state, action)
     else:
         raise RuntimeError(
-            f"play_deal exceeded {_MAX_STEPS} steps without resolving — "
+            f"play_round exceeded {_MAX_STEPS} steps without resolving — "
             "likely an infinite loop in agent or engine."
         )
     final = state.public.scores

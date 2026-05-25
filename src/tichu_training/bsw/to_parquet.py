@@ -38,15 +38,15 @@ from tichu_training.featurizer import FEATURIZER_VERSION
 _DECISION_TYPE_BY_KIND: dict[str, str] = {
     "play": "play",
     "pass": "play",
-    "schupfen": "pass_card",
+    "schupfen": "schupfen",
     "tichu": "call_tichu",
     "grand_tichu": "call_grand_tichu",
-    "wish": "wish_rank",
-    "dragon_give": "dragon_give",
+    "wish": "wish",
+    "dragon_give": "dragon_assignment",
 }
 
 
-_KNOWN_DECISION_TYPES = ("play", "pass_card", "call_tichu", "call_grand_tichu", "wish_rank", "dragon_give")
+_KNOWN_DECISION_TYPES = ("play", "schupfen", "call_tichu", "call_grand_tichu", "wish", "dragon_assignment")
 
 # First BSW game id of 2015. Games at or after this id are post-2015.
 _DEFAULT_RECENCY_CUTOFF: int = 1855844

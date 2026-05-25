@@ -1,9 +1,9 @@
-"""Fixed seeded deal pool.
+"""Fixed seeded Starting-Position Pool.
 
-A "deal" is the post-schupfen starting `GameState` for one Tichu round:
-all 56 cards dealt 14-per-player, current player set to the Mahjong holder,
-no points or trick state yet. Schupfen is intentionally skipped — the
-harness measures play strength, not schupfen heuristics.
+A "Starting Position" is the post-schupfen starting `GameState` for one
+Tichu round: all 56 cards dealt 14-per-player, current player set to the
+Mahjong holder, no points or trick state yet. Schupfen is intentionally
+skipped — the harness measures play strength, not schupfen heuristics.
 
 The pool's identity is exactly `(seed, n)`: same inputs across two
 processes produce identical hands, identical starting players, and
@@ -25,7 +25,7 @@ _CARD_TO_ID: dict = {card: i for i, card in enumerate(_DECK)}
 _ID_TO_CARD: tuple = tuple(_DECK)
 
 
-def generate_deal_pool(seed: int, n: int) -> list[GameState]:
+def generate_starting_position_pool(seed: int, n: int) -> list[GameState]:
     """Deterministic post-schupfen starting deals.
 
     Each deal `i` is `deal_initial_state(seed + i)`. Same `(seed, n)` ⇒
@@ -36,7 +36,7 @@ def generate_deal_pool(seed: int, n: int) -> list[GameState]:
     return [deal_initial_state(seed + i) for i in range(n)]
 
 
-def save_deal_pool(deals: Sequence[GameState], path: Path) -> None:
+def save_starting_position_pool(deals: Sequence[GameState], path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     deal_indices = []
@@ -59,7 +59,7 @@ def save_deal_pool(deals: Sequence[GameState], path: Path) -> None:
     pq.write_table(table, path)
 
 
-def load_deal_pool(path: Path) -> list[GameState]:
+def load_starting_position_pool(path: Path) -> list[GameState]:
     table = pq.read_table(Path(path))
     starters = table.column("starting_player").to_pylist()
     hands_by_player = [

@@ -31,9 +31,9 @@ class _DummyPolicy(torch.nn.Module):
     def forward(self, features, skill_decile):
         return {
             "play": self.fc(features),
-            "pass_card": self.pass_card_head(features),
-            "wish_rank": self.wish_head(features),
-            "dragon_give": self.dragon_head(features),
+            "schupfen": self.pass_card_head(features),
+            "wish": self.wish_head(features),
+            "dragon_assignment": self.dragon_head(features),
         }
 
 
@@ -112,9 +112,9 @@ def test_fallback_fires_on_nan_logits(tmp_path):
             n = features.shape[0]
             return {
                 "play": torch.full((n, nan_size), float("nan")),
-                "pass_card": torch.zeros(n, 3),
-                "wish_rank": torch.zeros(n, 14),
-                "dragon_give": torch.zeros(n, 2),
+                "schupfen": torch.zeros(n, 3),
+                "wish": torch.zeros(n, 14),
+                "dragon_assignment": torch.zeros(n, 2),
             }
     agent._module = NanModel()
 

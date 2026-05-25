@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from tichu_engine.state import GameState
-from tichu_eval.play import play_deal
+from tichu_eval.play import play_round
 from tichu_ml.agent import Agent
 
 
@@ -83,10 +83,10 @@ def _play_pair(agent_a: Agent, agent_b: Agent, deals: list[GameState]) -> np.nda
     deltas: list[float] = []
     for deal in deals:
         # Arrangement 1: A on team 0 (seats 0, 2), B on team 1 (seats 1, 3).
-        s0, s1 = play_deal((agent_a, agent_b, agent_a, agent_b), deal)
+        s0, s1 = play_round((agent_a, agent_b, agent_a, agent_b), deal)
         deltas.append(float(s0 - s1))
         # Arrangement 2: rotated — A on team 1, B on team 0.
-        s0, s1 = play_deal((agent_b, agent_a, agent_b, agent_a), deal)
+        s0, s1 = play_round((agent_b, agent_a, agent_b, agent_a), deal)
         deltas.append(float(s1 - s0))
     return np.array(deltas, dtype=np.float64)
 
