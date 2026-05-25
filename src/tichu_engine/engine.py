@@ -92,7 +92,13 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             mahjong_wish=action.rank,
             pending_decision=None,
         )
-        return GameState(hands=state.hands, public=next_public), 0.0, _round_done(state.public.hand_sizes), {}
+        new_state = GameState(hands=state.hands, public=next_public)
+        # If the Mahjong play ended the round (wisher went out via the last
+        # play), finalise now — the wish is moot but Tichu/Grand-Tichu bonuses
+        # still need to be applied.
+        if _round_done_state(new_state):
+            new_state = _finalise_round(new_state)
+        return new_state, 0.0, _round_done_state(new_state), {}
 
     current = state.public.current_player
 
@@ -134,7 +140,10 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     # wish-rank declaration (or decline) before anyone else acts. The Mahjong
     # can be the player's last card (e.g., in a closing straight ending in
     # Mahjong), so we still need to track out_order here — otherwise a slam
-    # whose first-out completed it via a Mahjong-play goes undetected.
+    # whose first-out completed it via a Mahjong-play goes undetected. We do
+    # NOT call _finalise_round even when the round is done: BSW sometimes logs
+    # a "Wunsch:X" line after a Mahjong-last-card play, and the MahjongWish
+    # handler takes responsibility for finalising in that case.
     if not isinstance(action, Pass) and MAHJONG in _cards_in(action):
         new_out_order = state.public.out_order
         prev_sizes = state.public.hand_sizes

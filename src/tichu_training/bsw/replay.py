@@ -200,6 +200,13 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
         result.steps_taken += 1
         result.decisions.append((parsed_action, engine_action))
 
+    # End-of-round normalisation: BSW may end the round with a Mahjong-last-
+    # card play and no following "Wunsch:" line, leaving the engine stuck in
+    # MahjongWishPending. Auto-decline so the MahjongWish handler can finalise.
+    if isinstance(state.public.pending_decision, MahjongWishPending):
+        state, _, _, _ = step(state, MahjongWish(rank=None))
+        result.steps_taken += 1
+
     result.final_state = state
     return result
 

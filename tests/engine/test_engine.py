@@ -355,7 +355,12 @@ def test_dragon_give_cannot_target_partner():
 # ---- Mahjong wish (G4) ----
 
 def test_playing_mahjong_sets_wish_pending():
-    state = _state({0: frozenset({MAHJONG, _c(Suit.JADE, 7)})})
+    state = _state({
+        0: frozenset({MAHJONG, _c(Suit.JADE, 7)}),
+        1: frozenset({_c(Suit.STAR, 10)}),
+        2: frozenset({_c(Suit.PAGODA, 11)}),
+        3: frozenset({_c(Suit.SWORD, 12)}),
+    })
     next_state, _, _, _ = step(state, Single(MAHJONG))
     assert next_state.public.pending_decision == MahjongWishPending(player=0)
     # Turn has not advanced yet.
@@ -363,7 +368,12 @@ def test_playing_mahjong_sets_wish_pending():
 
 
 def test_wish_pending_legal_actions_are_ranks_2_through_14_and_none():
-    state = _state({0: frozenset({MAHJONG, _c(Suit.JADE, 7)})})
+    state = _state({
+        0: frozenset({MAHJONG, _c(Suit.JADE, 7)}),
+        1: frozenset({_c(Suit.STAR, 10)}),
+        2: frozenset({_c(Suit.PAGODA, 11)}),
+        3: frozenset({_c(Suit.SWORD, 12)}),
+    })
     after_mahjong, _, _, _ = step(state, Single(MAHJONG))
     options = legal_actions(after_mahjong)
     expected = {MahjongWish(rank=r) for r in range(2, 15)} | {MahjongWish(rank=None)}

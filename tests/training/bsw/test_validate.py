@@ -88,6 +88,22 @@ def test_game_1_replays_cleanly_with_in_progress_trick_fix():
     assert by_index[9].actual == (110, 90) == by_index[9].expected
 
 
+def test_game_100750_tichu_bonus_applies_when_mahjong_is_last_card():
+    """Regression guard for the Mahjong-as-last-card fix. In round 5 of
+    game 100750, player 2 called Tichu and ended the round by playing the
+    Mahjong alone as their last card. Pre-fix, step() set MahjongWishPending
+    and returned early; _finalise_round was never reached, so the Tichu
+    +100 bonus never applied. The fix detects that the play would end the
+    round and falls through to normal trick resolution + finalise instead
+    of setting the pending. Round must now match BSW (160, 40)."""
+    fixture = Path(__file__).resolve().parent / "data" / "game_100750.tch"
+    game = parse_tch(fixture.read_text(encoding="utf-8"), game_id="100750")
+    result = validate_game(game)
+    round_5 = next(r for r in result.rounds if r.round_index == 5)
+    assert not round_5.illegal_action, f"round 5 still illegal: {round_5}"
+    assert round_5.actual == (160, 40) == round_5.expected
+
+
 def test_game_100021_mahjong_wish_auto_decline_does_not_eat_subsequent_passes():
     """Regression guard for the pending-normalisation ordering fix. In round 6
     of game 100021, player 2 plays a 5-card Mahjong straight as their last
