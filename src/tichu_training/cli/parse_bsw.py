@@ -142,6 +142,18 @@ def main(argv: list[str] | None = None) -> int:
             fh.write(f"{parse_failed}\n")
     log.info("wrote parse_failures.txt with %d entries", len(parse_failures))
 
+    details_path = output_dir / "failure_details.tsv"
+    with details_path.open("w", encoding="utf-8") as fh:
+        fh.write("game_id\tround_id\tmode\tdetail\n")
+        for f in stats.round_failures:
+            fh.write(f"{f.game_id}\t{f.round_id}\t{f.mode}\t{f.detail}\n")
+    n_illegal = sum(1 for f in stats.round_failures if f.mode == "illegal_action")
+    n_score = sum(1 for f in stats.round_failures if f.mode == "score_mismatch")
+    log.info(
+        "wrote failure_details.tsv with %d entries (%d illegal_action, %d score_mismatch)",
+        len(stats.round_failures), n_illegal, n_score,
+    )
+
     for decision_type, n in stats.row_counts.items():
         log.info("shard %s.parquet: %d rows", decision_type, n)
 

@@ -100,6 +100,17 @@ class _Record:
 
 
 @dataclass
+class RoundFailure:
+    """One round that failed replay validation. Surfaced via `StreamStats`
+    and `failure_details.tsv` so engine-fix iteration can group failures by
+    category and pick the highest-leverage targets."""
+    game_id: str
+    round_id: int
+    mode: str   # "illegal_action" | "score_mismatch"
+    detail: str
+
+
+@dataclass
 class _GameResult:
     """Per-game output of the replay+emit step. Picklable so it can cross
     a process boundary when stream_to_parquet runs with workers > 1."""
@@ -107,6 +118,7 @@ class _GameResult:
     records: list["_Record"]
     rounds_total: int
     rounds_matched: int
+    failures: list[RoundFailure]
 
     @property
     def had_failure(self) -> bool:
@@ -127,12 +139,16 @@ def _process_game(
         game.game_id or "", recency_cutoff_game_id, recency_weight,
     )
     records: list[_Record] = []
+    failures: list[RoundFailure] = []
     rounds_total = 0
     rounds_matched = 0
+    game_id = game.game_id or "<unknown>"
     for parsed_round in game.rounds:
         replay = replay_round(parsed_round)
         rounds_total += 1
-        if not _round_replay_matches(replay, parsed_round):
+        failure = _classify_round_failure(game_id, parsed_round, replay)
+        if failure is not None:
+            failures.append(failure)
             continue
         rounds_matched += 1
         records.extend(_emit_records_for_round(
@@ -141,11 +157,36 @@ def _process_game(
             sample_weight=sample_weight,
         ))
     return _GameResult(
-        game_id=game.game_id or "<unknown>",
+        game_id=game_id,
         records=records,
         rounds_total=rounds_total,
         rounds_matched=rounds_matched,
+        failures=failures,
     )
+
+
+def _classify_round_failure(
+    game_id: str, parsed: ParsedRound, replay: ReplayResult,
+) -> RoundFailure | None:
+    """Return a RoundFailure if the replay disagrees with BSW, else None."""
+    if replay.final_state is None:
+        kind = (replay.illegal_action.kind if replay.illegal_action else "unknown")
+        reason = replay.illegal_reason or "no reason recorded"
+        return RoundFailure(
+            game_id=game_id,
+            round_id=parsed.round_index,
+            mode="illegal_action",
+            detail=f"{kind}: {reason}",
+        )
+    actual = replay.final_state.public.scores
+    if actual != parsed.ergebnis:
+        return RoundFailure(
+            game_id=game_id,
+            round_id=parsed.round_index,
+            mode="score_mismatch",
+            detail=f"engine={actual} bsw={parsed.ergebnis}",
+        )
+    return None
 
 
 @dataclass
@@ -159,6 +200,7 @@ class StreamStats:
     rounds_matched: int = 0
     row_counts: dict[str, int] = field(default_factory=lambda: {t: 0 for t in _KNOWN_DECISION_TYPES})
     failed_game_ids: list[str] = field(default_factory=list)
+    round_failures: list[RoundFailure] = field(default_factory=list)
 
 
 def stream_to_parquet(
@@ -210,6 +252,7 @@ def stream_to_parquet(
             stats.failed_game_ids.append(result.game_id)
         else:
             stats.games_fully_matched += 1
+        stats.round_failures.extend(result.failures)
         for record in result.records:
             buffers[record.decision_type].append(record)
             stats.row_counts[record.decision_type] += 1
@@ -243,12 +286,6 @@ def stream_to_parquet(
         for w in writers.values():
             w.close()
     return stats
-
-
-def _round_replay_matches(replay: ReplayResult, parsed: ParsedRound) -> bool:
-    if replay.final_state is None:
-        return False
-    return replay.final_state.public.scores == parsed.ergebnis
 
 
 def _emit_records_for_round(

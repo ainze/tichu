@@ -171,6 +171,48 @@ def test_archive_mode_subset_takes_first_n_by_sorted_game_id(tmp_path):
         assert ids <= {first_id}, f"{shard.name} has unexpected game_ids: {ids}"
 
 
+def test_failure_details_tsv_categorises_per_round_failures(tmp_path):
+    """`failure_details.tsv` lists every replay-failed round with its category
+    (illegal_action vs score_mismatch) and a human-readable detail string.
+    Engine-fix iteration uses this to group failures by category."""
+    output = tmp_path / "out"
+    rc = main(["--input", str(_SAMPLES), "--output", str(output)])
+    assert rc == 0
+
+    details_path = output / "failure_details.tsv"
+    assert details_path.exists()
+    lines = details_path.read_text(encoding="utf-8").splitlines()
+
+    # Header + N row lines.
+    assert lines[0].split("\t") == ["game_id", "round_id", "mode", "detail"]
+    rows = [line.split("\t") for line in lines[1:]]
+
+    # Cross-check with validate_game: every (game_id, round_id) that fails
+    # validation should appear here exactly once.
+    from tichu_training.bsw.parser import parse_tch
+    from tichu_training.bsw.validate import validate_game
+    expected_failures: set[tuple[str, int]] = set()
+    for path in sorted(_SAMPLES.glob("*.tch")):
+        game = parse_tch(path.read_bytes().decode("utf-8"), game_id=path.stem)
+        v = validate_game(game)
+        for r in v.rounds:
+            if not r.matches:
+                expected_failures.add((path.stem, r.round_index))
+
+    actual = {(row[0], int(row[1])) for row in rows}
+    assert actual == expected_failures
+
+    # All modes are one of the two known categories.
+    for row in rows:
+        assert row[2] in {"illegal_action", "score_mismatch"}, row
+
+    # score_mismatch rows carry the engine/bsw deltas in the detail string.
+    score_rows = [row for row in rows if row[2] == "score_mismatch"]
+    assert score_rows, "samples should produce at least one score_mismatch"
+    for row in score_rows:
+        assert "engine=" in row[3] and "bsw=" in row[3], row
+
+
 def test_parse_failures_go_to_parse_failures_txt_not_known_bad(tmp_path):
     """Two failure modes are separated on disk:
        - known_bad_games.txt — games that parsed but had ≥1 replay-failed round
