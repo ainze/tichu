@@ -45,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Games with game_id >= N get sample_weight 1.0; below get --recency-weight (default 1855844 = first 2015 game)")
     p.add_argument("--recency-weight", type=float, default=0.5, metavar="W",
                    help="Sample weight for pre-cutoff games (default 0.5)")
+    p.add_argument("--workers", type=int, default=1, metavar="N",
+                   help="Number of replay worker processes (default 1 = single-threaded). "
+                        "Forced to 1 when --game-id is set so debug output remains in-process.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -103,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
         bar.update(1)
         _refresh_postfix(stats)
 
+    # Debug mode (--game-id) keeps everything in-process so verbose logs and
+    # the .tch dump live next to the parquet output.
+    effective_workers = 1 if targeted_ids is not None else max(1, args.workers)
+
     try:
         stats = stream_to_parquet(
             parsed_games(),
@@ -110,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             ratings_path=args.trueskill,
             recency_cutoff_game_id=args.recency_cutoff_game_id,
             recency_weight=args.recency_weight,
+            workers=effective_workers,
             on_game_done=_on_game_done,
         )
     finally:

@@ -21,6 +21,16 @@ def test_higher_rank_beats_lower_rank_different_suit():
     assert nine_sword > seven_jade
 
 
+def test_special_cards_survive_pickle_as_singletons():
+    """Engine + featurizer use `is` comparisons against module-level singletons
+    (DRAGON / PHOENIX / MAHJONG / DOG). multiprocessing pickle-roundtrips state
+    across worker processes; without singleton pickling the identity checks
+    silently fail and replay produces wrong results."""
+    import pickle
+    for sing in (DRAGON, PHOENIX, MAHJONG, DOG):
+        assert pickle.loads(pickle.dumps(sing)) is sing
+
+
 def test_four_special_cards_are_distinct():
     specials = [DRAGON, PHOENIX, MAHJONG, DOG]
     assert len(set(specials)) == 4

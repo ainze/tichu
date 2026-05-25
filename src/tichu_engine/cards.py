@@ -25,8 +25,25 @@ class Card:
 class SpecialCard:
     name: str
 
+    def __reduce__(self):
+        # Engine and featurizer use `is` comparisons against the module-level
+        # singletons (DRAGON / PHOENIX / MAHJONG / DOG). Without this, pickle
+        # would round-trip to fresh instances and identity-based checks would
+        # silently fail across process boundaries (e.g. ProcessPoolExecutor
+        # workers). Pickle back to the singleton lookup so identity is
+        # preserved.
+        return (_special_by_name, (self.name,))
+
 
 DRAGON = SpecialCard("dragon")
 PHOENIX = SpecialCard("phoenix")
 MAHJONG = SpecialCard("mahjong")
 DOG = SpecialCard("dog")
+
+_SPECIALS_BY_NAME: dict[str, SpecialCard] = {
+    "dragon": DRAGON, "phoenix": PHOENIX, "mahjong": MAHJONG, "dog": DOG,
+}
+
+
+def _special_by_name(name: str) -> SpecialCard:
+    return _SPECIALS_BY_NAME[name]

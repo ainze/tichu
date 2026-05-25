@@ -27,7 +27,9 @@ ratings table if one is provided. `sample_weight` is `1.0` for games whose
 else `recency_weight` (default `0.5`).
 """
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -98,6 +100,55 @@ class _Record:
 
 
 @dataclass
+class _GameResult:
+    """Per-game output of the replay+emit step. Picklable so it can cross
+    a process boundary when stream_to_parquet runs with workers > 1."""
+    game_id: str
+    records: list["_Record"]
+    rounds_total: int
+    rounds_matched: int
+
+    @property
+    def had_failure(self) -> bool:
+        return self.rounds_matched < self.rounds_total
+
+
+def _process_game(
+    game: ParsedGame,
+    *,
+    skill_lookup: dict[str, int | None],
+    recency_cutoff_game_id: int,
+    recency_weight: float,
+) -> _GameResult:
+    """Replay every round of `game` and emit per-decision records for the
+    rounds whose engine Ergebnis matches BSW's. Module-level (picklable) so it
+    runs in ProcessPoolExecutor workers."""
+    sample_weight = _sample_weight_for(
+        game.game_id or "", recency_cutoff_game_id, recency_weight,
+    )
+    records: list[_Record] = []
+    rounds_total = 0
+    rounds_matched = 0
+    for parsed_round in game.rounds:
+        replay = replay_round(parsed_round)
+        rounds_total += 1
+        if not _round_replay_matches(replay, parsed_round):
+            continue
+        rounds_matched += 1
+        records.extend(_emit_records_for_round(
+            game, parsed_round, replay,
+            skill_lookup=skill_lookup,
+            sample_weight=sample_weight,
+        ))
+    return _GameResult(
+        game_id=game.game_id or "<unknown>",
+        records=records,
+        rounds_total=rounds_total,
+        rounds_matched=rounds_matched,
+    )
+
+
+@dataclass
 class StreamStats:
     """Output of `stream_to_parquet` — counts and the games with at least
     one replay-failed round (for `known_bad_games.txt`)."""
@@ -118,6 +169,8 @@ def stream_to_parquet(
     recency_cutoff_game_id: int = _DEFAULT_RECENCY_CUTOFF,
     recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
     rows_per_flush: int = _DEFAULT_ROWS_PER_FLUSH,
+    workers: int = 1,
+    chunksize: int = 16,
     on_game_done: Callable[["StreamStats"], None] | None = None,
 ) -> StreamStats:
     """Stream parsed games to per-decision Parquet shards, filtering at the
@@ -148,37 +201,39 @@ def stream_to_parquet(
         writers[decision_type].write_table(table)
         records.clear()
 
+    def _apply(result: _GameResult) -> None:
+        stats.games_total += 1
+        stats.rounds_total += result.rounds_total
+        stats.rounds_matched += result.rounds_matched
+        if result.had_failure:
+            stats.games_with_failed_rounds += 1
+            stats.failed_game_ids.append(result.game_id)
+        else:
+            stats.games_fully_matched += 1
+        for record in result.records:
+            buffers[record.decision_type].append(record)
+            stats.row_counts[record.decision_type] += 1
+        for decision_type, buf in buffers.items():
+            if len(buf) >= rows_per_flush:
+                _flush(decision_type)
+        if on_game_done is not None:
+            on_game_done(stats)
+
+    worker = partial(
+        _process_game,
+        skill_lookup=skill_lookup,
+        recency_cutoff_game_id=recency_cutoff_game_id,
+        recency_weight=recency_weight,
+    )
+
     try:
-        for game in games:
-            stats.games_total += 1
-            sample_weight = _sample_weight_for(
-                game.game_id or "", recency_cutoff_game_id, recency_weight,
-            )
-            game_has_failure = False
-            for parsed_round in game.rounds:
-                replay = replay_round(parsed_round)
-                stats.rounds_total += 1
-                if not _round_replay_matches(replay, parsed_round):
-                    game_has_failure = True
-                    continue
-                stats.rounds_matched += 1
-                for record in _emit_records_for_round(
-                    game, parsed_round, replay,
-                    skill_lookup=skill_lookup,
-                    sample_weight=sample_weight,
-                ):
-                    buffers[record.decision_type].append(record)
-                    stats.row_counts[record.decision_type] += 1
-            if game_has_failure:
-                stats.games_with_failed_rounds += 1
-                stats.failed_game_ids.append(game.game_id or "<unknown>")
-            else:
-                stats.games_fully_matched += 1
-            for decision_type, buf in buffers.items():
-                if len(buf) >= rows_per_flush:
-                    _flush(decision_type)
-            if on_game_done is not None:
-                on_game_done(stats)
+        if workers <= 1:
+            for game in games:
+                _apply(worker(game))
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                for result in pool.map(worker, games, chunksize=chunksize):
+                    _apply(result)
         for decision_type in _KNOWN_DECISION_TYPES:
             _flush(decision_type)
             if decision_type not in writers:

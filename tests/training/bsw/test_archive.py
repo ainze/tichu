@@ -120,6 +120,34 @@ def test_cli_rejects_missing_archive(tmp_path):
     assert rc == 2
 
 
+def test_workers_path_produces_identical_shards_to_sequential(tmp_path):
+    """`--workers 2` must produce the same parquet rows as the sequential path
+    (modulo row ordering — workers complete out of order). Pins the
+    correctness invariant of the multiprocessing pool."""
+    seq_out = tmp_path / "seq"
+    rc = main(["--input", str(_SAMPLES), "--output", str(seq_out)])
+    assert rc == 0
+
+    par_out = tmp_path / "par"
+    rc = main(["--input", str(_SAMPLES), "--output", str(par_out), "--workers", "2"])
+    assert rc == 0
+
+    for shard in seq_out.glob("*.parquet"):
+        seq = pq.read_table(shard).to_pydict()
+        par = pq.read_table(par_out / shard.name).to_pydict()
+        # Same row count.
+        assert len(seq["game_id"]) == len(par["game_id"]), shard.name
+        # Same multiset of rows (sort by composite key to normalise order).
+        def _key(row_idx, columns):
+            return (
+                columns["game_id"][row_idx], columns["round_id"][row_idx],
+                columns["player_handle"][row_idx], columns["action_taken"][row_idx],
+            )
+        seq_rows = sorted(_key(i, seq) for i in range(len(seq["game_id"])))
+        par_rows = sorted(_key(i, par) for i in range(len(par["game_id"])))
+        assert seq_rows == par_rows, f"row multiset differs for {shard.name}"
+
+
 def test_archive_mode_subset_takes_first_n_by_sorted_game_id(tmp_path):
     """--subset N in archive mode mirrors dir-mode semantics: first N entries
     sorted by game_id."""
