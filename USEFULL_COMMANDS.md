@@ -1,3 +1,4 @@
+pip install -e . --force-reinstall --no-deps
 
 
 python -m tichu_training.cli.parse_bsw `
@@ -19,3 +20,14 @@ Get-Content C:/workbench/tichu/data/parquet_smoke/failure_details.tsv `
   | Group-Object | Sort-Object Count -Descending
 
 
+python -m tichu_training.cli.compute_trueskill `
+     --input C:\workbench\tichu\data\archive.zst `
+     --output C:\workbench\tichu\data\ratings_100k.parquet `
+     --subset 100000 `
+     --min-games 20 -v
+
+
+python -m tichu_training.cli.train_bc `
+    --config configs/bc_smoke_parquet.yaml `
+    --run-dir C:\workbench\tichu\data\runs\bc_smoke_100k_par `
+    --workers 11 -v
