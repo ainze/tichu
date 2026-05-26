@@ -1,0 +1,56 @@
+# BC training on a 1M-game subset with the bc_full architecture.
+#
+# Sized for an overnight run: at ~2200 ex/s on a CUDA-equipped machine
+# with --workers 11, one full epoch on 1M games (~640M decisions) is
+# roughly 80 hours. You won't finish a full epoch overnight — you'll
+# get ~10-15% through it in 8 hours. checkpoint_every_batches: 5000
+# saves every ~38 minutes so the partial run leaves ~12 mid-epoch
+# checkpoints to feed AWR experiments the next day.
+#
+# Prerequisites (run in order):
+#   python -m tichu_training.cli.parse_bsw \
+#     --archive C:\workbench\tichu\data\archive.zst \
+#     --output  C:\workbench\tichu\data\parquet_1m \
+#     --subset  1000000 --workers 12
+#
+#   python -m tichu_training.cli.compute_trueskill \
+#     --input    C:\workbench\tichu\data\archive.zst \
+#     --output   C:\workbench\tichu\data\ratings_1m.parquet \
+#     --subset   1000000 --min-games 20
+#
+# Then:
+#   python -m tichu_training.cli.train_bc \
+#     --config  configs/bc_full_1m.yaml \
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_1m \
+#     --workers 11 --device cuda -v
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_1m
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_1m.parquet
+  expected_featurizer_version: v1
+  expected_action_space_version: v1
+
+# bc_full architecture per configs/bc_full.yaml — 4-layer 1024-hidden
+# trunk, 256-hidden heads, 64-dim skill embedding. ~10x more capacity
+# than the smoke arch; same data-loading throughput on this dataset
+# size since CPU replay dominates.
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 100000          # won't fire — epochs=1
+checkpoint_every_batches: 5000    # ~38 min per save at ~2200 ex/s, ~12 ckpts overnight
+seed: 0
