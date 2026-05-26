@@ -245,8 +245,12 @@ Microsoft's rating algorithm. Run across the BSW corpus to produce per-handle `(
 _Avoid_: rating system, MMR.
 
 **Player Rating**:
-The per-handle record: `(handle, mu, sigma, n_games)`. Output of the TrueSkill sweep.
+The per-handle record: `(handle, mu, sigma, n_games)`. Output of the TrueSkill sweep. Games containing an Anonymous Seat, or where any seat's handle changes between rounds (mid-game player substitution), are excluded from the sweep — preserves per-identified-stable-game rating semantics. See [ADR-0010](docs/adr/0010-per-round-handles-with-asymmetric-tolerance.md).
 _Avoid_: rating row, skill record.
+
+**Anonymous Seat**:
+A seat in a BSW round whose handle is missing in the `.tch` log — recorded as the empty string `""` in `ParsedRound.handles[seat]`. Arises from guest / freshly-joined accounts at the deal-moment of a player substitution, and from occasional BSW serialiser quirks that drop the handle on a single line. Excluded from the TrueSkill sweep and the Tichu Success Rate counter; included in BC training rows with `skill_decile = None` → **Neutral Skill Decile**. See [ADR-0010](docs/adr/0010-per-round-handles-with-asymmetric-tolerance.md).
+_Avoid_: anonymous player, guest, unnamed seat.
 
 **Min-games Filter**:
 The eligibility cut applied to Player Ratings before quantile-slicing — drops handles with `n_games < threshold`. Prevents cold-start ratings from polluting the Skill Decile distribution.
@@ -257,7 +261,7 @@ Integer `0..9`, assigned by quantile-slicing `mu` across players who survived th
 _Avoid_: skill bucket, rank, percentile, tier.
 
 **Neutral Skill Decile**:
-The sentinel 10th bucket (index `10`) for players who did not survive the Min-games Filter, OR for inference-time requests where the player's identity is unknown. Has its own learned Skill Embedding row.
+The sentinel 10th bucket (index `10`) for players who did not survive the Min-games Filter, OR for training-time records from an **Anonymous Seat**, OR for inference-time requests where the player's identity is unknown. Has its own learned Skill Embedding row.
 
 **Skill Embedding**:
 The learned vector indexed by Skill Decile (`0..10` — eleven rows total). Concatenated with the Feature Vector before the Trunk.
@@ -395,3 +399,4 @@ _Avoid_: test set, eval set, held-out pool.
 - "checkpoint" used to imply payload kind (e.g., "this is a BC checkpoint") even though the file format does not encode it — resolved: Checkpoint kind is determined by the loader's expectation, not the file itself. See [ADR-0004](docs/adr/0004-payload-agnostic-checkpoint.md).
 - "skill weight" vs "skill conditioning" — resolved: the model is **conditioned** on Skill Decile via the Skill Embedding; **Sample Weight is unrelated to skill** in BC Training (always `1.0`).
 - "deal" used as a noun in `tichu_eval` for "the synthetic starting position" — resolved: **Starting Position** is the noun; "deal" stays verb-only per §Game-layer terms. Module renamed to `tichu_eval/starting_position_pool.py` and `play_deal()` → `play_round()` in session 2026-05-25.
+- "player handle" treated as game-stable (one tuple per `ParsedGame`) — resolved: handles are **per-round** (`ParsedRound.handles`), not per-game. Captures BSW mid-game player substitutions and **Anonymous Seats** correctly. `ParsedGame.handles` removed in session 2026-05-26. BC ingestion tolerates anonymous / substituted seats (Neutral Skill Decile); TrueSkill ingestion rejects them (per-identified-stable-game invariant). See [ADR-0010](docs/adr/0010-per-round-handles-with-asymmetric-tolerance.md).

@@ -43,9 +43,22 @@ def compute_ratings(
         return ratings[handle]
 
     for game in games:
-        handles = game.handles
-        if len(handles) != 4:
+        if not game.rounds:
             continue
+        # ADR-0010: TrueSkill demands per-identified-stable-game seating.
+        # Skip games where any round contains an Anonymous Seat (empty
+        # handle) OR where any seat's handle changes between rounds (BSW
+        # mid-game player substitution). Those games still feed BC training
+        # — substituted seats get the round's handle; anonymous seats get
+        # Neutral Skill Decile — but never update player ratings.
+        round_handles = [r.handles for r in game.rounds]
+        if any("" in r_h for r_h in round_handles):
+            continue
+        if any(r_h != round_handles[0] for r_h in round_handles[1:]):
+            continue
+        # Seating is stable across rounds (guarded above), so the round-0
+        # handles are the canonical identities for this game.
+        handles = round_handles[0]
         team_a_score = sum(r.ergebnis[0] for r in game.rounds)
         team_b_score = sum(r.ergebnis[1] for r in game.rounds)
         # Make sure every participant is registered even on a draw.

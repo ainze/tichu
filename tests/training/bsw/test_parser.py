@@ -14,6 +14,7 @@ from tichu_training.bsw.records import ParsedGame
 
 
 _SAMPLES = Path(__file__).resolve().parents[3] / "sample"
+_DATA = Path(__file__).resolve().parent / "data"
 
 
 @pytest.fixture(scope="module")
@@ -50,6 +51,174 @@ def test_schupfen_handles_hyphenated_recipient_names():
         assert sub.schupfen_to_next is not None
 
 
+def test_anonymous_seat_in_pre_deal_records_empty_handle():
+    """A `(N) <cards>` line with no handle (BSW guest / freshly-joined seat)
+    parses cleanly. The seat's handle for that round is recorded as ``""``."""
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    # Anonymise seat 1's pre-deal AND start-hand lines in round 0 only.
+    # Both lines start with "(1)1David " (handle followed by a space-then-cards).
+    # The schupfen / play / pass lines also start with "(1)1David" but with a
+    # different following char (`gibt:` / `:` / ` passt.`) — leave those named
+    # so this test isolates the pre-deal/start-hand case.
+    lines = raw.splitlines()
+    out: list[str] = []
+    in_round_zero = True
+    for line in lines:
+        if in_round_zero and line.startswith("(1)1David ") and not line.endswith("gibt:") and " gibt:" not in line and " passt." not in line:
+            # Pre-deal/start-hand: "(1)1David <cards trailing space>" — replace
+            # with "(1) <cards trailing space>".
+            out.append("(1) " + line[len("(1)1David "):])
+        else:
+            out.append(line)
+        if line.startswith("Ergebnis:"):
+            in_round_zero = False
+    spliced = "\n".join(out) + "\n"
+
+    game = parse_tch(spliced, game_id="anon")
+
+    # Seat-1 handle in round 0 is anonymous.
+    assert game.rounds[0].handles[1] == ""
+    # Other seats are unaffected.
+    assert game.rounds[0].handles[0] == "evi_sea"
+    assert game.rounds[0].handles[2] == "evdokia!!"
+    assert game.rounds[0].handles[3] == "Lisaaaaaaa"
+
+
+def test_dragon_assignment_line_tolerates_missing_handle():
+    """BSW occasionally drops the handle on a `Drache an: (N)` line even when
+    the player has a known handle elsewhere in the round. The parser must
+    accept the handle-less form and still record the dragon_give action with
+    the correct target seat."""
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    # Round 0 ends with "Drache an: (0)evi_sea". Drop the handle on that line.
+    assert "Drache an: (0)evi_sea" in raw  # guard the fixture
+    spliced = raw.replace("Drache an: (0)evi_sea", "Drache an: (0)", 1)
+
+    game = parse_tch(spliced, game_id="dragon_anon")
+
+    gives = [a for a in game.rounds[0].plays if a.kind == "dragon_give"]
+    assert len(gives) == 1
+    assert gives[0].dragon_target == 0
+
+
+@pytest.mark.parametrize("named_line,anon_line,verify", [
+    # Pass (round 0, seat 3 passes)
+    (
+        "(3)Lisaaaaaaa passt.",
+        "(3) passt.",
+        lambda g: any(a.kind == "pass" and a.player == 3 for a in g.rounds[0].plays),
+    ),
+    # Mid-round Tichu call (round 3 has "Tichu: (2)evdokia!!")
+    (
+        "Tichu: (2)evdokia!!",
+        "Tichu: (2)",
+        lambda g: 2 in g.rounds[2].tichu_callers,
+    ),
+    # Grand-tichu call (round 0 has "Grosses Tichu: (1)1David", pre-Schupfen)
+    (
+        "Grosses Tichu: (1)1David",
+        "Grosses Tichu: (1)",
+        lambda g: 1 in g.rounds[0].grand_tichu_callers,
+    ),
+    # Schupfen line with anonymous giver
+    (
+        "(0)evi_sea gibt:",
+        "(0) gibt:",
+        lambda g: g.rounds[0].schupfen[0] is not None and g.rounds[0].schupfen[0].kind == "schupfen",
+    ),
+    # Play line "(N): cards" with empty handle between `)` and `:`
+    (
+        "(3)Lisaaaaaaa: Ma",
+        "(3): Ma",
+        lambda g: any(a.kind == "play" and a.player == 3 for a in g.rounds[0].plays),
+    ),
+])
+def test_action_lines_tolerate_missing_handle(named_line, anon_line, verify):
+    """Defensive parser sweep: every line that names a seat by `(N)` may
+    appear with an empty handle. Handle is metadata; the seat index is the
+    canonical identity, and downstream attribution uses per-round handles
+    from the pre-deal section (see ADR-0010)."""
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    assert named_line in raw, f"fixture changed; {named_line!r} no longer present"
+    spliced = raw.replace(named_line, anon_line, 1)
+
+    game = parse_tch(spliced, game_id="anon_action")
+
+    assert verify(game), f"action not recorded after anonymising {named_line!r}"
+
+
+def test_parsed_round_records_per_round_handles_for_substituted_seat():
+    """When a seat's handle changes between rounds (player substitution
+    mid-game), each ParsedRound records the handle that was at the seat
+    *during that round*. See ADR-0010."""
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    # Simulate seat 1 being a different player from round 1 onwards.
+    # Round 0 keeps "1David"; later rounds replace every "(1)1David" /
+    # "1David:" reference with "NewPlayer".
+    lines = raw.splitlines()
+    out: list[str] = []
+    in_round_zero = True
+    for line in lines:
+        if in_round_zero:
+            out.append(line)
+        else:
+            out.append(line.replace("1David", "NewPlayer"))
+        if line.startswith("Ergebnis:") and in_round_zero:
+            in_round_zero = False
+    spliced = "\n".join(out) + "\n"
+
+    game = parse_tch(spliced, game_id="sub")
+
+    # Round 0 has the original handle at seat 1.
+    assert game.rounds[0].handles[1] == "1David"
+    # Subsequent rounds carry the substituted handle.
+    assert game.rounds[1].handles[1] == "NewPlayer"
+    assert game.rounds[-1].handles[1] == "NewPlayer"
+    # Unsubstituted seats stay stable across rounds.
+    for r in game.rounds:
+        assert r.handles[0] == "evi_sea"
+        assert r.handles[2] == "evdokia!!"
+        assert r.handles[3] == "Lisaaaaaaa"
+
+
+def test_real_corpus_game_with_mid_game_substitution_parses_cleanly():
+    """Regression: BSW game 100920 has a mid-game player substitution at
+    seat 1 — `alejandro_styl` plays rounds 0-3, then in round 4 the seat
+    is anonymous (handle dropped at the deal-moment), and from round 5
+    onwards `pöppi69` takes over. The legacy parser raised on round 4's
+    pre-deal line. After ADR-0010 the game parses cleanly and round 4's
+    seat-1 handle is recorded as ``""``."""
+    text = (_DATA / "game_100920.tch").read_text(encoding="utf-8")
+
+    game = parse_tch(text, game_id="100920")
+
+    assert len(game.rounds) > 4
+    # Round 4 has the anonymous seat.
+    assert game.rounds[4].handles[1] == ""
+    # Round 0 has the original handle; rounds after the substitution carry
+    # the new handle (the underlying byte for ö may render as mojibake, so
+    # we assert structurally — handle present and different from round 0).
+    assert game.rounds[0].handles[1] != ""
+    assert game.rounds[5].handles[1] != ""
+    assert game.rounds[5].handles[1] != game.rounds[0].handles[1]
+
+
+def test_real_corpus_game_with_dragon_an_handle_drop_parses_cleanly():
+    """Regression: BSW game 100952 round 8 has a `Drache an: (1)` line
+    where BSW's serialiser dropped the handle even though the player has
+    a known handle in surrounding lines. The legacy parser raised on it;
+    after ADR-0010 the parse succeeds."""
+    text = (_DATA / "game_100952.tch").read_text(encoding="utf-8")
+
+    game = parse_tch(text, game_id="100952")
+
+    # The game parses to a sensible round count and every round has an
+    # Ergebnis tuple.
+    assert len(game.rounds) > 0
+    for r in game.rounds:
+        assert isinstance(r.ergebnis, tuple) and len(r.ergebnis) == 2
+
+
 def test_pre_schupfen_tichu_call_is_accepted(tmp_path):
     """A regular `Tichu:` line may appear between Startkarten and Schupfen
     (a player who's just seen their 14-card hand can declare Tichu before
@@ -68,11 +237,12 @@ def test_pre_schupfen_tichu_call_is_accepted(tmp_path):
 
 
 def test_parsed_game_has_four_seat_handles(game_00):
-    assert game_00.handles == ("evi_sea", "1David", "evdokia!!", "Lisaaaaaaa")
+    # Handles are per-round (ADR-0010); round-0 captures the starting seating.
+    assert game_00.rounds[0].handles == ("evi_sea", "1David", "evdokia!!", "Lisaaaaaaa")
 
 
 def test_parsed_game_two_has_different_handles(game_01):
-    assert game_01.handles == ("evi_sea", "1David", "evdokia!!", "Steffi0722")
+    assert game_01.rounds[0].handles == ("evi_sea", "1David", "evdokia!!", "Steffi0722")
 
 
 def test_parsed_game_preserves_game_id(game_00):
