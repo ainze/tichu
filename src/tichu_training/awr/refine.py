@@ -44,6 +44,7 @@ def awr_refine_epoch(
     log_path: Path,
     held_out_subset: Sequence[BCExample] | None = None,
     head_weights: dict[str, float] | None = None,
+    features: np.ndarray | None = None,
 ) -> dict[str, float | None]:
     if beta <= 0:
         raise ValueError(f"beta must be > 0, got {beta}")
@@ -51,7 +52,9 @@ def awr_refine_epoch(
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    weighted_examples = _apply_awr_weights(examples, baseline, beta=beta, max_weight=max_weight)
+    weighted_examples = _apply_awr_weights(
+        examples, baseline, beta=beta, max_weight=max_weight, features=features,
+    )
     awr_weight_for = {id(orig): float(new.sample_weight / max(orig.sample_weight, 1e-12))
                       for orig, new in zip(examples, weighted_examples)}
 
@@ -115,13 +118,35 @@ def _apply_awr_weights(
     *,
     beta: float,
     max_weight: float,
+    features: np.ndarray | None = None,
+    chunk_size: int = 16_384,
 ) -> list[BCExample]:
+    """Compute per-example AWR weights and rewrap with new sample_weight.
+
+    `features` may be precomputed (e.g. the caller already stacked them
+    to fit the value baseline) — avoids a second np.stack pass over a
+    multi-GB dataset. When None, stacks from `examples`.
+
+    `chunk_size` bounds the baseline forward pass — predictions are
+    concatenated after the loop, so the downstream AWR math (max-subtract,
+    exp, clip) still sees the full advantage vector and is numerically
+    identical to the unchunked version. This is a memory-only knob; raise
+    it on machines with more GPU RAM.
+    """
     if not examples:
         return []
-    features = np.stack([e.features for e in examples])
+    if features is None:
+        features = np.stack([e.features for e in examples])
     outcomes = np.array([e.round_outcome for e in examples], dtype=np.float32)
+
+    feats_t = torch.from_numpy(features)
+    pred_chunks: list[np.ndarray] = []
     with torch.no_grad():
-        preds = baseline(torch.from_numpy(features)).cpu().numpy()
+        for start in range(0, len(feats_t), chunk_size):
+            chunk = feats_t[start : start + chunk_size]
+            pred_chunks.append(baseline(chunk).cpu().numpy())
+    preds = np.concatenate(pred_chunks) if pred_chunks else np.array([], dtype=np.float32)
+
     advantages = outcomes - preds
     w = awr_weights(advantages, beta=beta, max_weight=max_weight)
     out: list[BCExample] = []

@@ -179,6 +179,9 @@ def _run_awr_refinement(
     train_set = dataset_examples[:split]
     held_out = dataset_examples[split:] or None
 
+    # Stack features once and share with both fit_value_baseline and the
+    # per-epoch awr_refine_epoch calls — re-stacking is the dominant
+    # memory hit on multi-million-row training sets.
     features = np.stack([e.features for e in train_set])
     outcomes = np.array([e.round_outcome for e in train_set], dtype=np.float32)
     baseline_mse = fit_value_baseline(
@@ -206,6 +209,7 @@ def _run_awr_refinement(
                 log_path=log_path,
                 held_out_subset=held_out,
                 head_weights=head_weights or None,
+                features=features,
             )
             log.info(
                 "[awr] epoch %d loss=%.4f avg_weight=%.3f win_rate_proxy=%s",

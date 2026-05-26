@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 import torch
 
-from tichu_training.awr.refine import awr_refine_epoch
-from tichu_training.awr.value_baseline import ValueBaseline
+from tichu_training.awr.refine import _apply_awr_weights, awr_refine_epoch
+from tichu_training.awr.value_baseline import ValueBaseline, fit_value_baseline
 from tichu_training.bc.dataset import BCExample, SyntheticBCDataset
 from tichu_training.bc.heads import BCModel, HEAD_LOGIT_DIMS
 
@@ -208,6 +208,104 @@ def test_step_csv_survives_mid_epoch_exception(tmp_path, monkeypatch):
     assert log_path.exists()
     rows = list(csv.DictReader(log_path.open("r", encoding="utf-8")))
     assert len(rows) >= 1, "expected the row from the batch that fired before the crash"
+
+
+def test_apply_awr_weights_chunked_matches_full():
+    """Chunking the baseline forward pass must produce numerically
+    identical sample_weights to the unchunked version — chunking is a
+    memory-only optimisation; the AWR math (max-subtract, exp, clip) is
+    applied across the full advantage vector either way."""
+    torch.manual_seed(0)
+    feature_dim = 6
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=20, feature_dim=feature_dim))
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=8)
+
+    full = _apply_awr_weights(examples, baseline, beta=1.0, max_weight=20.0)
+    chunked = _apply_awr_weights(
+        examples, baseline, beta=1.0, max_weight=20.0, chunk_size=7,
+    )
+
+    assert len(full) == len(chunked) == len(examples)
+    for a, b in zip(full, chunked):
+        assert a.sample_weight == pytest.approx(b.sample_weight, rel=1e-6)
+
+
+def test_apply_awr_weights_calls_baseline_in_chunks():
+    """With chunk_size=10 over 25 examples, the baseline should see three
+    forward passes of size 10, 10, 5 — never the full 25 at once."""
+    torch.manual_seed(0)
+    feature_dim = 4
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=9, feature_dim=feature_dim))[:25]
+    assert len(examples) == 25
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=4)
+
+    seen_batch_sizes: list[int] = []
+    real_forward = baseline.forward
+
+    def spy(features):
+        seen_batch_sizes.append(int(features.shape[0]))
+        return real_forward(features)
+
+    baseline.forward = spy  # type: ignore[method-assign]
+    _apply_awr_weights(
+        examples, baseline, beta=1.0, max_weight=20.0, chunk_size=10,
+    )
+
+    assert seen_batch_sizes == [10, 10, 5], (
+        f"expected chunks 10,10,5 got {seen_batch_sizes}"
+    )
+
+
+def test_apply_awr_weights_accepts_precomputed_features():
+    """The caller often already has features as a stacked array (it just
+    fit the value baseline on them). Re-stacking inside _apply_awr_weights
+    doubles memory; passing them in must give the same result."""
+    torch.manual_seed(0)
+    feature_dim = 5
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=12, feature_dim=feature_dim))
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=6)
+
+    auto = _apply_awr_weights(examples, baseline, beta=1.0, max_weight=20.0)
+
+    features = np.stack([e.features for e in examples])
+    shared = _apply_awr_weights(
+        examples, baseline, beta=1.0, max_weight=20.0, features=features,
+    )
+
+    for a, b in zip(auto, shared):
+        assert a.sample_weight == pytest.approx(b.sample_weight, rel=1e-6)
+
+
+def test_fit_value_baseline_never_does_full_dataset_forward():
+    """The final MSE re-evaluation must also be chunked — otherwise a
+    multi-million-row training set OOMs the GPU on the last line of
+    fit_value_baseline, after training succeeded."""
+    torch.manual_seed(0)
+    feature_dim = 4
+    n = 73
+    features = np.random.RandomState(0).randn(n, feature_dim).astype(np.float32)
+    outcomes = np.random.RandomState(1).randn(n).astype(np.float32)
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=4)
+
+    max_batch_seen = {"n": 0}
+    real_forward = baseline.forward
+
+    def spy(features_t):
+        max_batch_seen["n"] = max(max_batch_seen["n"], int(features_t.shape[0]))
+        return real_forward(features_t)
+
+    baseline.forward = spy  # type: ignore[method-assign]
+    fit_value_baseline(
+        baseline, features, outcomes,
+        batch_size=16, epochs=1, lr=1e-3,
+    )
+
+    # batch_size=16 ⇒ no forward pass should ever see > 16 examples,
+    # including the final MSE re-evaluation. Without chunking the final
+    # pass would see all 73.
+    assert max_batch_seen["n"] <= 16, (
+        f"expected forward batches ≤ 16, saw a {max_batch_seen['n']}-example pass"
+    )
 
 
 def test_invalid_beta_propagates(tmp_path):

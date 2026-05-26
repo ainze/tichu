@@ -49,7 +49,13 @@ def fit_value_baseline(
             loss.backward()
             optimizer.step()
             final_mse = float(loss.detach())
-    # Re-evaluate full-batch MSE so the return value reflects the trained state.
+    # Re-evaluate MSE on the trained baseline in the same mini-batches
+    # used during training. The full-dataset forward pass would OOM the
+    # GPU on multi-million-row training sets.
     with torch.no_grad():
-        final_mse = float(F.mse_loss(baseline(feats_t), outcomes_t).detach())
+        sse = 0.0
+        for i in range(0, n, batch_size):
+            preds = baseline(feats_t[i : i + batch_size])
+            sse += float(((preds - outcomes_t[i : i + batch_size]) ** 2).sum())
+        final_mse = sse / max(1, n)
     return final_mse
