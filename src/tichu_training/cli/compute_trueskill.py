@@ -10,12 +10,18 @@ import logging
 import sys
 from pathlib import Path
 
+import trueskill
+from tqdm import tqdm
+
+from tichu_training.bsw.archive import count_entries
 from tichu_training.bsw.parser import parse_tch
-from tichu_training.ratings.calls import compute_call_stats
+from tichu_training.ratings import calls as ratings_calls
+from tichu_training.ratings import sweep as ratings_sweep
+from tichu_training.ratings.calls import CallStats
 from tichu_training.ratings.post import apply_min_games, assign_skill_deciles
 from tichu_training.ratings.source import iter_tch_sources
 from tichu_training.ratings.stats import spearman_rho
-from tichu_training.ratings.sweep import compute_ratings
+from tichu_training.ratings.sweep import PlayerRating
 from tichu_training.ratings.writer import write_ratings_parquet
 
 
@@ -33,6 +39,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="Output ratings Parquet file")
     p.add_argument("--min-games", type=int, default=20, metavar="N",
                    help="Minimum games required to appear in the output (default: 20)")
+    p.add_argument("--subset", type=int, default=None, metavar="N",
+                   help="Limit to first N games by sorted game_id (matches parse_bsw --subset)")
+    p.add_argument("--game-id", action="append", default=None, metavar="ID", dest="game_ids",
+                   help="Process only this game_id (repeatable). Useful for spot-checking.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -46,17 +56,45 @@ def main(argv: list[str] | None = None) -> int:
         log.error("input path %s does not exist", input_path)
         return 2
 
-    parsed_games = []
-    parse_failures = 0
-    for game_id, text in iter_tch_sources(input_path):
-        try:
-            parsed_games.append(parse_tch(text, game_id=str(game_id)))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("skipping game %s: parse failed: %s", game_id, exc)
-            parse_failures += 1
-    log.info("parsed %d games successfully (%d skipped)", len(parsed_games), parse_failures)
+    targeted_ids = set(args.game_ids) if args.game_ids else None
+    total = _count_games(input_path, subset=args.subset, game_ids=targeted_ids)
 
-    ratings = compute_ratings(parsed_games)
+    # Streaming pass: parse + TrueSkill update + call-stats update per game,
+    # then discard. Keeps peak RAM at one ParsedGame in flight + the
+    # accumulator dicts (sized by unique handles), instead of the previous
+    # materialise-then-three-pass shape that needed many GB at 100k.
+    env = trueskill.TrueSkill()
+    ratings: dict[str, PlayerRating] = {}
+    call_stats: dict[str, CallStats] = {}
+    parsed_ok = 0
+    parse_failures = 0
+    bar = tqdm(total=total, unit="game", dynamic_ncols=True, desc="sweep")
+    try:
+        for game_id, text in iter_tch_sources(
+            input_path, subset=args.subset, game_ids=targeted_ids,
+        ):
+            try:
+                game = parse_tch(text, game_id=str(game_id))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("skipping game %s: parse failed: %s", game_id, exc)
+                parse_failures += 1
+                bar.update(1)
+                bar.set_postfix(
+                    ok=parsed_ok, failed=parse_failures, handles=len(ratings),
+                    refresh=False,
+                )
+                continue
+            ratings_sweep.update_for_game(game, ratings, env)
+            ratings_calls.update_for_game(game, call_stats)
+            parsed_ok += 1
+            bar.update(1)
+            bar.set_postfix(
+                ok=parsed_ok, failed=parse_failures, handles=len(ratings),
+                refresh=False,
+            )
+    finally:
+        bar.close()
+    log.info("parsed %d games successfully (%d skipped)", parsed_ok, parse_failures)
     log.info("rated %d distinct player handles", len(ratings))
 
     surviving = apply_min_games(ratings, min_games=args.min_games)
@@ -66,7 +104,6 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     deciles = assign_skill_deciles(surviving)
-    call_stats = compute_call_stats(parsed_games)
     write_ratings_parquet(
         surviving,
         Path(args.output),
@@ -115,6 +152,33 @@ def _log_spearman(surviving, call_stats) -> None:
         "spearman rho(mu, tichu_success_rate) = %.3f over %d players (tichu_calls >= %d)",
         rho, len(mus), _RHO_MIN_TICHU_CALLS,
     )
+
+
+def _count_games(
+    input_path: Path,
+    *,
+    subset: int | None,
+    game_ids: set[str] | None,
+) -> int | None:
+    """Cheap upper-bound game count for the progress bar.
+
+    Returns None when the count is not obtainable without scanning (i.e. for
+    `.tar.zst` archives, which would require decompression). In that case
+    tqdm displays a count-up rather than a percentage bar.
+    """
+    if game_ids is not None:
+        return len(game_ids)
+    if input_path.is_dir():
+        n = sum(1 for _ in input_path.glob("*.tch"))
+        return min(n, subset) if subset is not None else n
+    name = input_path.name.lower()
+    if name.endswith(".zst") and not (name.endswith(".tar.zst") or name.endswith(".tzst")):
+        try:
+            n = count_entries(input_path)
+        except FileNotFoundError:
+            return None
+        return min(n, subset) if subset is not None else n
+    return None
 
 
 if __name__ == "__main__":
