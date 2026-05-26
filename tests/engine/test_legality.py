@@ -376,10 +376,15 @@ def _state_with_per_player_hands(
     return GameState(hands=tuple(hands), public=public)
 
 
-def test_bomb_interrupts_empty_when_trick_is_empty():
+def test_bomb_interrupts_on_empty_trick_returns_all_holder_bombs():
+    # BSW allows a non-current player to preempt-bomb when the previous trick
+    # has resolved and the trick winner has not yet led. The bomb seizes the
+    # lead. Default current_player is 0; the bomb-holder is player 1.
     bomb_cards = (_c(Suit.JADE, 7), _c(Suit.SWORD, 7), _c(Suit.PAGODA, 7), _c(Suit.STAR, 7))
     state = _state_with_per_player_hands({1: frozenset(bomb_cards)})
-    assert legal_bomb_interrupts(state, player=1) == frozenset()
+    assert legal_bomb_interrupts(state, player=1) == frozenset({FourOfAKindBomb(*bomb_cards)})
+    # The current player (player 0) gets their bombs via legal_actions, not interrupts.
+    assert legal_bomb_interrupts(state, player=0) == frozenset()
 
 
 def test_bomb_interrupts_returns_higher_bomb_for_non_current_player():

@@ -33,6 +33,9 @@ def test_cli_runs_end_to_end_on_samples(tmp_path):
 
 
 def test_cli_subset_flag_limits_inputs(tmp_path):
+    from tichu_training.bsw.parser import parse_tch
+    from tichu_training.bsw.validate import validate_game
+
     output = tmp_path / "out"
     rc = main([
         "--input", str(_SAMPLES),
@@ -42,8 +45,10 @@ def test_cli_subset_flag_limits_inputs(tmp_path):
     assert rc == 0
     pass_card = pq.read_table(output / "schupfen_00000.parquet")
     # Per-round filtering (ADR-0009): one game × matching_rounds × 4 schupfen.
-    # Sample 2417500 has 7 matching rounds out of 10 today.
-    assert pass_card.num_rows == 7 * 4
+    first_sample = sorted(_SAMPLES.glob("*.tch"))[0]
+    game = parse_tch(first_sample.read_bytes().decode("utf-8"), game_id=first_sample.stem)
+    matching_rounds = sum(1 for r in validate_game(game).rounds if r.matches)
+    assert pass_card.num_rows == matching_rounds * 4
 
 
 def test_cli_rejects_missing_input_dir(tmp_path):

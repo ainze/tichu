@@ -171,17 +171,20 @@ Bomb = Union[FourOfAKindBomb, StraightFlushBomb]
 def legal_bomb_interrupts(state: GameState, player: int) -> frozenset[Bomb]:
     """Bombs that `player` may play out-of-turn to interrupt the current trick.
 
-    Returns empty when the trick is empty (nothing to interrupt), when `player`
-    is the current player (their bombs are part of legal_actions instead), or
-    when no bomb in their hand beats the current top.
+    Returns empty when `player` is the current player (their bombs are part
+    of legal_actions instead) or when no bomb in their hand beats the current
+    top. When the trick is empty (previous trick just resolved, current
+    player hasn't led yet), any bomb in the player's hand is a legal preempt
+    — BSW logs treat preempt-bombs by non-current players as bomb interrupts
+    that seize the lead.
     """
     if player == state.public.current_player:
         return frozenset()
-    top = state.public.trick.top_combination
-    if top is None:
-        return frozenset()
     hand = state.hands[player]
     bombs: set[Bomb] = set(enumerate_four_of_a_kind_bombs(hand)) | set(enumerate_straight_flush_bombs(hand))
+    top = state.public.trick.top_combination
+    if top is None:
+        return frozenset(bombs)
     return frozenset(b for b in bombs if _beats(b, top))  # type: ignore[arg-type]
 
 

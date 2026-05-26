@@ -92,7 +92,13 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             mahjong_wish=action.rank,
             pending_decision=None,
         )
-        return GameState(hands=state.hands, public=next_public), 0.0, _round_done(state.public.hand_sizes), {}
+        new_state = GameState(hands=state.hands, public=next_public)
+        # If the Mahjong play ended the round (wisher went out via the last
+        # play), finalise now — the wish is moot but Tichu/Grand-Tichu bonuses
+        # still need to be applied.
+        if _round_done_state(new_state):
+            new_state = _finalise_round(new_state)
+        return new_state, 0.0, _round_done_state(new_state), {}
 
     current = state.public.current_player
 
@@ -131,12 +137,24 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     next_hand_sizes = tuple(len(h) for h in next_hands)
 
     # A play that contains Mahjong defers turn advancement: the player owes a
-    # wish-rank declaration (or decline) before anyone else acts.
+    # wish-rank declaration (or decline) before anyone else acts. The Mahjong
+    # can be the player's last card (e.g., in a closing straight ending in
+    # Mahjong), so we still need to track out_order here — otherwise a slam
+    # whose first-out completed it via a Mahjong-play goes undetected. We do
+    # NOT call _finalise_round even when the round is done: BSW sometimes logs
+    # a "Wunsch:X" line after a Mahjong-last-card play, and the MahjongWish
+    # handler takes responsibility for finalising in that case.
     if not isinstance(action, Pass) and MAHJONG in _cards_in(action):
+        new_out_order = state.public.out_order
+        prev_sizes = state.public.hand_sizes
+        for p in range(NUM_PLAYERS):
+            if prev_sizes[p] > 0 and next_hand_sizes[p] == 0 and p not in new_out_order:
+                new_out_order = new_out_order + (p,)
         next_public = replace(
             state.public,
             hand_sizes=next_hand_sizes,  # type: ignore[arg-type]
             trick=next_trick,
+            out_order=new_out_order,
             pending_decision=MahjongWishPending(player=current),
         )
         return GameState(hands=next_hands, public=next_public), 0.0, _round_done(next_hand_sizes), {}  # type: ignore[arg-type]
@@ -149,11 +167,21 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     )
 
     # If the trick just resolved, award its points to the leader's team —
-    # or defer the decision when the trick was won by the Dragon.
+    # or defer the decision when the trick was won by the Dragon. The trick
+    # "resolves" either via the normal pass-around (resolved_trick.leader is
+    # None) or because the round ends mid-trick: when 3 of 4 players are out,
+    # no further plays are possible and BSW credits the trick to whoever holds
+    # the current top combination.
     new_scores = state.public.scores
     new_round_points = state.public.round_points_by_player
     new_pending: object | None = None
-    if next_trick.leader is not None and resolved_trick.leader is None:
+    trick_resolved = next_trick.leader is not None and resolved_trick.leader is None
+    round_ends_mid_trick = (
+        next_trick.leader is not None
+        and resolved_trick.leader is not None
+        and _round_done(next_hand_sizes)  # type: ignore[arg-type]
+    )
+    if trick_resolved or round_ends_mid_trick:
         winner = next_trick.leader
         points = _trick_points(next_trick)
         top = next_trick.top_combination
@@ -162,6 +190,8 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         else:
             new_scores = _add_to_team(new_scores, _team_of(winner), points)
             new_round_points = _add_to_player(new_round_points, winner, points)
+        if round_ends_mid_trick:
+            resolved_trick = Trick.empty()
 
     # Clear an active Mahjong wish once any play fulfils it (contains a
     # natural card of the wished rank).
@@ -394,11 +424,19 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
     new_scores = state.public.scores
     new_round_points = state.public.round_points_by_player
     new_pending: object | None = None
-    if bombed_trick.leader is not None and resolved_trick.leader is None:
+    trick_resolved = bombed_trick.leader is not None and resolved_trick.leader is None
+    round_ends_mid_trick = (
+        bombed_trick.leader is not None
+        and resolved_trick.leader is not None
+        and _round_done(next_hand_sizes)  # type: ignore[arg-type]
+    )
+    if trick_resolved or round_ends_mid_trick:
         winner = bombed_trick.leader
         points = _trick_points(bombed_trick)
         new_scores = _add_to_team(new_scores, _team_of(winner), points)
         new_round_points = _add_to_player(new_round_points, winner, points)
+        if round_ends_mid_trick:
+            resolved_trick = Trick.empty()
 
     new_out_order = state.public.out_order
     prev_sizes = state.public.hand_sizes
