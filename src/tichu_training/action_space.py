@@ -472,7 +472,13 @@ def dragon_intent_index(dragon_give, winner_seat: int) -> int:
     )
 
 
-def legal_mask(decision_type: str, game_state, player: int):
+def legal_mask(
+    decision_type: str,
+    game_state,
+    player: int,
+    *,
+    cached_actions=None,
+):
     """Legal-action mask for a BC head, per ADR-0011 §3.
 
     Returns a 1-D bool ndarray of length K = HEAD_LOGIT_DIMS[decision_type]:
@@ -493,6 +499,13 @@ def legal_mask(decision_type: str, game_state, player: int):
     a Mahjong-wisher may declare any rank (or decline); a Dragon-trick
     winner may give to either opponent.
 
+    `cached_actions`: optional pre-computed `legal_actions(game_state)`
+    frozenset. When supplied AND the actor is the current player, the
+    cached set is used instead of re-enumerating — this is the hot path
+    when ParquetBCDataset feeds the cache it got back from
+    ``replay_round`` (ADR-0011 perf: avoid the duplicate enumeration that
+    otherwise happens once during replay and once again in legal_mask).
+
     Imports are deferred to avoid an action_space → tichu_engine cycle at
     module import time.
     """
@@ -510,18 +523,22 @@ def legal_mask(decision_type: str, game_state, player: int):
 
     if decision_type == "play":
         if player == game_state.public.current_player:
-            for action in legal_actions(game_state):
+            actions = cached_actions if cached_actions is not None else legal_actions(game_state)
+            for action in actions:
                 try:
                     idx = play_intent_index(action)
                 except ValueError:
                     # Engine produced an action shape the v1 Action Space
                     # cannot represent (e.g. FullHouse with Phoenix in
-                    # both triple and pair). Skip — the mask just doesn't
-                    # flag that slot legal; the trainer won't pick it.
+                    # both triple and pair, or Phoenix-following-Mahjong).
+                    # Skip — the mask just doesn't flag that slot legal;
+                    # the trainer won't pick it.
                     continue
                 if 0 <= idx < K:
                     mask[idx] = True
         else:
+            # Bomb interrupts: a different legality universe; the cached
+            # `legal_actions(state)` doesn't apply.
             for bomb in legal_bomb_interrupts(game_state, player):
                 try:
                     idx = play_intent_index(bomb)

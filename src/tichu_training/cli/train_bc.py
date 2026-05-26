@@ -39,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--resume", metavar="CHECKPOINT", help="Checkpoint to resume from")
     p.add_argument("--refine-from", metavar="CHECKPOINT",
                    help="BC checkpoint to refine with AWR")
+    p.add_argument("--max-examples", type=int, default=None, metavar="N",
+                   help="Cap each epoch to the first N examples yielded by the "
+                        "dataset. Useful for fast smoke runs against the full "
+                        "100k/2.4M parquet manifest without committing to a "
+                        "full sweep. Default: no cap.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -90,8 +95,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.refine_from:
         # AWR requires the full dataset materialised (value-baseline fit is
         # one-shot, not per-batch). Drain the iterable once and pass the
-        # list through.
-        dataset_examples = list(dataset)
+        # list through. Respect --max-examples here too — caller may want
+        # a quick AWR smoke without committing to the full sweep.
+        refine_iter = (
+            _capped(dataset, args.max_examples)
+            if args.max_examples is not None else dataset
+        )
+        dataset_examples = list(refine_iter)
         return _run_awr_refinement(
             model, optimizer, dataset_examples, config, run_dir,
             log_path=log_path, ckpt_dir=ckpt_dir,
@@ -100,9 +110,16 @@ def main(argv: list[str] | None = None) -> int:
 
     step = start_step
     for epoch in range(int(config["epochs"])):
+        # Cap the per-epoch example count if requested. islice gives a
+        # bounded iterable that preserves the streaming nature of the
+        # underlying dataset — no materialisation up front.
+        epoch_iter = (
+            _capped(dataset, args.max_examples)
+            if args.max_examples is not None else dataset
+        )
         loss = train_one_epoch(
             model,
-            dataset,
+            epoch_iter,
             optimizer,
             batch_size=int(config["batch_size"]),
             log_path=log_path,
@@ -184,6 +201,30 @@ def _run_awr_refinement(
     save_checkpoint(model, optimizer, step=step, path=ckpt_path)
     log.info("saved AWR checkpoint %s", ckpt_path)
     return 0
+
+
+class _CappedIterable:
+    """Bound an iterable to its first N items while preserving `n_rows`
+    so the trainer's tqdm bar shows the right total. `n_rows` is the
+    minimum of the underlying value (when present) and the cap.
+    """
+
+    def __init__(self, inner, cap: int) -> None:
+        self._inner = inner
+        self._cap = int(cap)
+        underlying_n_rows = getattr(inner, "n_rows", None)
+        self.n_rows = (
+            min(underlying_n_rows, self._cap)
+            if underlying_n_rows is not None else self._cap
+        )
+
+    def __iter__(self):
+        from itertools import islice
+        return islice(iter(self._inner), self._cap)
+
+
+def _capped(inner, cap: int):
+    return _CappedIterable(inner, cap)
 
 
 def _build_dataset(config):

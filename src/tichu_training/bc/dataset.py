@@ -255,8 +255,10 @@ class ParquetBCDataset(Iterable[BCExample]):
                 team_outcome = float(
                     parsed_round.ergebnis[0] - parsed_round.ergebnis[1],
                 )
-                for (parsed_action, concrete), pre_state in zip(
-                    replay.decisions, replay.pre_decision_states,
+                for (parsed_action, concrete), pre_state, cached_actions in zip(
+                    replay.decisions,
+                    replay.pre_decision_states,
+                    replay.legal_actions_at,
                 ):
                     if pre_state is None:
                         continue  # Tichu/Grand-Tichu passthrough or phantom pass
@@ -289,7 +291,14 @@ class ParquetBCDataset(Iterable[BCExample]):
                             )
                         except ValueError:
                             continue
-                    mask = legal_mask(decision_type, pre_state, player)
+                    # Reuse the legal-action frozenset that replay_round
+                    # already computed (and cached) for validating this
+                    # very decision — saves the duplicate enumeration that
+                    # would otherwise happen here.
+                    mask = legal_mask(
+                        decision_type, pre_state, player,
+                        cached_actions=cached_actions,
+                    )
                     if not mask[target]:
                         # Defensive: target must be in the legal set. If it's
                         # not, the engine/action-space disagree and we'd be
