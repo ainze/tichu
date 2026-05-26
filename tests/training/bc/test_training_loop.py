@@ -126,6 +126,59 @@ def test_step_csv_survives_dataset_exception_mid_iteration(tmp_path):
     assert len(rows) >= 1, "expected the row from the batch that fired before the crash"
 
 
+def test_train_one_epoch_invokes_checkpoint_fn_at_batch_cadence(tmp_path):
+    """A checkpoint callback fires every N batches so long epochs leave
+    intermediate checkpoints (otherwise the only save is at end-of-epoch
+    and a 2.5h epoch produces no resume / refine targets until it ends)."""
+    feature_dim = 16
+    model = _make_small_model(feature_dim)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    log_path = tmp_path / "step.csv"
+
+    # n_per_head=8, batch_size=2 ⇒ 4 batches × 3 heads = 12 total batches.
+    dataset = list(SyntheticBCDataset(seed=0, n_per_head=8, feature_dim=feature_dim))
+
+    seen_steps: list[int] = []
+
+    def on_checkpoint(step: int) -> None:
+        seen_steps.append(step)
+
+    train_one_epoch(
+        model, dataset, optimizer,
+        batch_size=2, log_path=log_path,
+        checkpoint_every_batches=3,
+        checkpoint_fn=on_checkpoint,
+        show_progress=False,
+    )
+
+    assert seen_steps == [3, 6, 9, 12], (
+        f"expected checkpoint at every 3rd batch (steps 3,6,9,12), got {seen_steps}"
+    )
+
+
+def test_train_one_epoch_skips_checkpoint_fn_when_cadence_unset(tmp_path):
+    """Backwards-compatible: omitting the knobs gives the legacy behavior
+    where train_one_epoch never calls back."""
+    feature_dim = 16
+    model = _make_small_model(feature_dim)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    dataset = list(SyntheticBCDataset(seed=0, n_per_head=4, feature_dim=feature_dim))
+
+    called = []
+
+    def boom(step: int) -> None:
+        called.append(step)
+
+    # checkpoint_fn passed but no cadence ⇒ never called.
+    train_one_epoch(
+        model, dataset, optimizer,
+        batch_size=2, log_path=tmp_path / "step.csv",
+        checkpoint_fn=boom,
+        show_progress=False,
+    )
+    assert called == []
+
+
 def test_checkpoint_round_trip(tmp_path):
     feature_dim = 16
     model = _make_small_model(feature_dim)

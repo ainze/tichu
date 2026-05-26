@@ -1,0 +1,69 @@
+# AWR offline-RL refinement against the 100k parquet manifest.
+# Refines a BC checkpoint (must have been trained with the matching
+# model architecture below).
+#
+# Run from the worktree:
+#
+#   python -m tichu_training.cli.train_bc `
+#     --config configs/awr_smoke_100k.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\awr_smoke_100k `
+#     --refine-from C:\workbench\tichu\data\runs\bc_smoke_100k\checkpoints\<latest>.bin `
+#     --max-examples 500000 `
+#     --device cuda -v
+#
+# IMPORTANT: --max-examples is effectively mandatory at this dataset size.
+# AWR currently materialises the entire training set into RAM (one big
+# np.stack of features for the value-baseline fit, plus all BCExample
+# objects). 500k examples ≈ a couple of GB; the full 64M would OOM.
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_100k
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
+  expected_featurizer_version: v1
+  expected_action_space_version: v1
+
+# MUST match the BC checkpoint's architecture exactly — the model is
+# instantiated from this config and the checkpoint weights loaded in.
+# These match configs/bc_smoke_parquet.yaml.
+model:
+  trunk_hidden: 256
+  trunk_depth: 2
+  trunk_out_dim: 128
+  skill_dim: 32
+  head_hidden: 64
+
+# Smaller LR than BC: AWR is refining an already-converged policy. A
+# large step would undo the BC pretraining before the gradient becomes
+# meaningful.
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+# Each "epoch" here is a single weighted-BC pass over the materialised
+# subset, so 4 epochs is plenty for a smoke. The final AWR checkpoint is
+# always written; mid-epoch saves aren't needed at this scale.
+checkpoint_every: 1
+seed: 0
+
+awr:
+  # exp(advantage / beta) — smaller beta = sharper reweighting, more
+  # aggressive policy improvement, higher risk of collapse. 1.0 is a
+  # safe starting point.
+  beta: 1.0
+  # Hard ceiling on per-example weight to stop one lucky round from
+  # dominating the gradient.
+  max_weight: 20.0
+  # Value-baseline MLP. Independent of BCModel (no trunk sharing in v1).
+  baseline_hidden: 128
+  baseline_epochs: 3
+  baseline_lr: 1.0e-3
+  # Slice held out from the materialised subset to compute the per-epoch
+  # win_rate_proxy (play-head top-1 on unseen examples). This is the
+  # only out-of-sample signal in the loop — watch epoch.csv for it.
+  held_out_fraction: 0.1

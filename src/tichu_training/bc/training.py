@@ -15,7 +15,7 @@ import csv
 import io
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 import numpy as np
 import torch
@@ -59,6 +59,8 @@ def train_one_epoch(
     log_path: Path,
     head_weights: dict[str, float] | None = None,
     show_progress: bool = True,
+    checkpoint_every_batches: int = 0,
+    checkpoint_fn: Callable[[int], None] | None = None,
 ) -> float:
     """Train for one epoch over `examples`. Returns the final total loss.
 
@@ -114,6 +116,12 @@ def train_one_epoch(
         last_total = row["loss_total"]
         head_batch_counts[head] = head_batch_counts.get(head, 0) + 1
         step += 1
+        if (
+            checkpoint_every_batches
+            and checkpoint_fn is not None
+            and step % checkpoint_every_batches == 0
+        ):
+            checkpoint_fn(step)
 
     total_known = getattr(examples, "n_rows", None) if show_progress else None
     bar = tqdm(

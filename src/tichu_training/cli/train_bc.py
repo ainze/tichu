@@ -102,6 +102,11 @@ def main(argv: list[str] | None = None) -> int:
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_every = int(config.get("checkpoint_every", 1000))
+    # Mid-epoch checkpointing: save every N fired batches inside an epoch.
+    # 0 disables, matching the legacy "only at epoch boundary" behaviour.
+    # Crucial for full-corpus epochs that take hours — otherwise AWR refine
+    # and --resume have no recent target.
+    checkpoint_every_batches = int(config.get("checkpoint_every_batches", 0))
     head_weights = {k: float(v) for k, v in config.get("head_weights", {}).items()}
 
     if args.refine_from:
@@ -129,6 +134,11 @@ def main(argv: list[str] | None = None) -> int:
             _capped(dataset, args.max_examples)
             if args.max_examples is not None else dataset
         )
+        def _save_mid_epoch(batch_step: int) -> None:
+            ckpt_path = ckpt_dir / f"step_e{epoch:03d}_b{batch_step:08d}.bin"
+            save_checkpoint(model, optimizer, step=batch_step, path=ckpt_path)
+            log.info("saved mid-epoch checkpoint %s", ckpt_path)
+
         loss = train_one_epoch(
             model,
             epoch_iter,
@@ -136,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=int(config["batch_size"]),
             log_path=log_path,
             head_weights=head_weights or None,
+            checkpoint_every_batches=checkpoint_every_batches,
+            checkpoint_fn=_save_mid_epoch if checkpoint_every_batches else None,
         )
         log.info("epoch %d final batch loss=%.4f", epoch, loss)
         # Conservative checkpoint cadence: one per epoch is fine for smoke.
