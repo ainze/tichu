@@ -82,9 +82,16 @@ def train_one_epoch(
     last_total = float("inf")
     step = _next_step(log_path)
 
+    # Snapshot the model's device once. Tensors built on the CPU side from
+    # numpy arrays must be moved here before the forward pass when the
+    # model is on CUDA.
+    model_device = next(model.parameters()).device
+
     def _fire(head: str, batch: Sequence[BCExample]) -> None:
         nonlocal last_total, step
         tensors = _to_tensors(batch)
+        if model_device.type != "cpu":
+            tensors = {k: v.to(model_device, non_blocking=True) for k, v in tensors.items()}
         out = model(tensors["features"], tensors["skill_decile"])
         logits = out[head]
         per_head_loss = masked_cross_entropy(

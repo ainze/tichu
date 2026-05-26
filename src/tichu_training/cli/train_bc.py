@@ -44,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
                         "dataset. Useful for fast smoke runs against the full "
                         "100k/2.4M parquet manifest without committing to a "
                         "full sweep. Default: no cap.")
+    p.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
+                   help="Where to run the model. `auto` picks cuda if "
+                        "torch.cuda.is_available() else cpu. (default: auto)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -76,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         feature_dim = FEATURIZER_OUTPUT_DIM
     model = _build_model(feature_dim, config)
+    device = _resolve_device(args.device)
+    log.info("using device: %s", device)
+    model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["learning_rate"]))
 
     start_step = 0
@@ -201,6 +207,25 @@ def _run_awr_refinement(
     save_checkpoint(model, optimizer, step=step, path=ckpt_path)
     log.info("saved AWR checkpoint %s", ckpt_path)
     return 0
+
+
+def _resolve_device(choice: str) -> torch.device:
+    """Resolve the `--device` flag to a torch.device.
+
+    `auto` picks `cuda` when `torch.cuda.is_available()`, else `cpu`.
+    Explicit `cuda` raises if CUDA isn't available, so silent CPU
+    fallback never confuses a user who asked for GPU.
+    """
+    if choice == "cpu":
+        return torch.device("cpu")
+    if choice == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "--device cuda requested but torch.cuda.is_available() is False"
+            )
+        return torch.device("cuda")
+    # auto
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class _CappedIterable:
