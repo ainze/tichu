@@ -341,8 +341,17 @@ def play_intent_index(combo_or_pass) -> int:
     play-head index in [0, 1809).
 
     Raises ``ValueError`` for shapes the v1 Action Space cannot represent
-    (e.g. a FullHouse with Phoenix in *both* the triple and the pair —
-    legal in the engine but not in the action space).
+    — uniformly, so callers can ``except ValueError: continue`` to skip
+    unrepresentable actions. Concretely:
+
+    * FullHouse with Phoenix in both triple and pair (legal in engine,
+      not enumerated in v1 action space).
+    * Phoenix-following Mahjong (engine ``as_rank=1.5`` → no
+      ``PlaySingle(phoenix_as_rank=1)`` in the v1 catalogue).
+    * Straight starting at rank 1 with Phoenix substituting at slot 0
+      (Mahjong owns slot 0 in a mahjong-led straight; the v1 catalogue
+      excludes ``PlayStraight(start_rank=1, phoenix_position=0)``).
+    * Any other intent the v1 catalogue does not list.
     """
     # Deferred imports to avoid the cycle with featurizer/engine.
     from tichu_engine.cards import Card, DOG, DRAGON, MAHJONG, PHOENIX
@@ -354,7 +363,7 @@ def play_intent_index(combo_or_pass) -> int:
 
     # Pass → the single Pass intent in the action space.
     if isinstance(combo_or_pass, _EnginePass):
-        return encode(Pass())
+        return _encode_or_value_error(Pass())
 
     # Bomb interrupts carry the underlying bomb; unwrap and recurse.
     if isinstance(combo_or_pass, BombInterrupt):
@@ -364,24 +373,28 @@ def play_intent_index(combo_or_pass) -> int:
     if isinstance(combo, Single):
         card = combo.card
         if isinstance(card, Card):
-            return encode(PlaySingle(suit=_intent_suit_name(card.suit), rank=card.rank))
+            return _encode_or_value_error(
+                PlaySingle(suit=_intent_suit_name(card.suit), rank=card.rank),
+            )
         if card is PHOENIX:
             if combo.as_rank is not None:
-                return encode(PlaySingle(phoenix_as_rank=int(combo.as_rank)))
-            return encode(PlaySingle(special="phoenix"))
+                return _encode_or_value_error(
+                    PlaySingle(phoenix_as_rank=int(combo.as_rank)),
+                )
+            return _encode_or_value_error(PlaySingle(special="phoenix"))
         if card is MAHJONG:
-            return encode(PlaySingle(special="mahjong"))
+            return _encode_or_value_error(PlaySingle(special="mahjong"))
         if card is DOG:
-            return encode(PlaySingle(special="dog"))
+            return _encode_or_value_error(PlaySingle(special="dog"))
         if card is DRAGON:
-            return encode(PlaySingle(special="dragon"))
+            return _encode_or_value_error(PlaySingle(special="dragon"))
         raise ValueError(f"Single with unrecognised card: {card!r}")
     if isinstance(combo, Pair):
-        return encode(PlayPair(
+        return _encode_or_value_error(PlayPair(
             rank=combo.rank, with_phoenix=_intent_has_phoenix(_intent_combo_cards(combo)),
         ))
     if isinstance(combo, Triple):
-        return encode(PlayTriple(
+        return _encode_or_value_error(PlayTriple(
             rank=combo.rank, with_phoenix=_intent_has_phoenix(_intent_combo_cards(combo)),
         ))
     if isinstance(combo, FullHouse):
@@ -390,14 +403,16 @@ def play_intent_index(combo_or_pass) -> int:
         if triple_has_phx and pair_has_phx:
             raise ValueError("FullHouse with Phoenix in both triple and pair is not in the v1 Action Space")
         pos = "triple" if triple_has_phx else ("pair" if pair_has_phx else "none")
-        return encode(PlayFullHouse(triple_rank=combo.triple.rank, pair_rank=combo.pair.rank, phoenix_position=pos))
+        return _encode_or_value_error(PlayFullHouse(
+            triple_rank=combo.triple.rank, pair_rank=combo.pair.rank, phoenix_position=pos,
+        ))
     if isinstance(combo, PairStep):
         pairs = combo.pairs
         phx_pos = next(
             (i for i, p in enumerate(pairs) if _intent_has_phoenix(_intent_combo_cards(p))),
             None,
         )
-        return encode(PlayPairStep(
+        return _encode_or_value_error(PlayPairStep(
             start_rank=pairs[0].rank, length=len(pairs), phoenix_position=phx_pos,
         ))
     if isinstance(combo, Straight):
@@ -407,15 +422,29 @@ def play_intent_index(combo_or_pass) -> int:
         phx_pos = combo.phoenix_as_rank - start if combo.phoenix_as_rank is not None else None
         if phx_pos is not None and not 0 <= phx_pos < len(cards):
             phx_pos = None
-        return encode(PlayStraight(start_rank=start, length=len(cards), phoenix_position=phx_pos))
+        return _encode_or_value_error(PlayStraight(
+            start_rank=start, length=len(cards), phoenix_position=phx_pos,
+        ))
     if isinstance(combo, FourOfAKindBomb):
-        return encode(PlayFourBomb(rank=combo.rank))
+        return _encode_or_value_error(PlayFourBomb(rank=combo.rank))
     if isinstance(combo, StraightFlushBomb):
-        return encode(PlayStraightFlushBomb(
+        return _encode_or_value_error(PlayStraightFlushBomb(
             suit=_intent_suit_name(combo.cards[0].suit),
             start_rank=combo.cards[0].rank, length=combo.length,
         ))
     raise ValueError(f"unknown engine action type: {type(combo_or_pass).__name__}")
+
+
+def _encode_or_value_error(intent) -> int:
+    """Wrap ``encode`` so callers see a uniform ``ValueError`` for any intent
+    not enumerated in v1. The catalogue is the canonical source of truth;
+    if a shape isn't in it, it isn't representable, regardless of why."""
+    try:
+        return encode(intent)
+    except KeyError as exc:
+        raise ValueError(
+            f"intent {intent!r} is not in the v1 Action Space"
+        ) from exc
 
 
 def wish_intent_index(mahjong_wish) -> int:

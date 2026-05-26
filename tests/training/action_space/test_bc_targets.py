@@ -152,6 +152,53 @@ def test_play_full_house_with_phoenix_in_both_raises():
     pytest.skip("engine FullHouse validation prevents the input shape from existing")
 
 
+def test_phoenix_following_mahjong_raises_value_error_not_key_error():
+    """Engine legitimately produces Single(PHOENIX, as_rank=1.5) when
+    Phoenix follows the Mahjong (rank 1). The v1 Action Space catalogue
+    does not enumerate `PlaySingle(phoenix_as_rank=1)` (truncated from
+    1.5) — so we must surface this as ValueError, not the bare KeyError
+    that `encode` would otherwise raise. The BC dataset relies on
+    uniformly catching ValueError to skip unrepresentable actions."""
+    phoenix_after_mahjong = Single(PHOENIX, as_rank=1.5)
+    with pytest.raises(ValueError, match="not in the v1 Action Space"):
+        play_intent_index(phoenix_after_mahjong)
+
+
+def test_legal_mask_tolerates_unrepresentable_legal_actions():
+    """When the engine produces a legal action the v1 catalogue cannot
+    represent (e.g. Phoenix-following-Mahjong), `legal_mask` must skip
+    that slot rather than crash. Pins the regression: pre-fix this
+    leaked a KeyError out of the dataset's iterator partway through a
+    100k-game run."""
+    from tichu_training.action_space import legal_mask
+    from tichu_engine.cards import Card, Suit, MAHJONG, PHOENIX
+    from tichu_engine.state import GameState, PublicState, Trick
+    # Construct a state where the leading combination is Single(MAHJONG)
+    # and the current player holds the Phoenix. legal_actions will then
+    # include Single.phoenix_following(top_rank=1) = as_rank=1.5, which
+    # play_intent_index cannot represent.
+    leader_play = __import__("tichu_engine.state", fromlist=["Play"]).Play(
+        player=1, combination=Single(MAHJONG),
+    )
+    trick = Trick(plays=(leader_play,), leader=1)
+    hand = frozenset([PHOENIX, Card(Suit.JADE, 5)])
+    public = PublicState(
+        current_player=0,
+        hand_sizes=(2, 0, 0, 0),
+        scores=(0, 0),
+        trick=trick,
+    )
+    state = GameState(
+        hands=(hand, frozenset(), frozenset(), frozenset()), public=public,
+    )
+    # Must not raise — Phoenix-following-Mahjong is silently skipped.
+    mask = legal_mask("play", state, player=0)
+    assert mask.shape == (1809,)
+    # The non-phoenix Single(JADE, 5) is representable and beats Mahjong.
+    from tichu_training.action_space import PlaySingle, encode
+    assert mask[encode(PlaySingle(suit="jade", rank=5))]
+
+
 # --- wish head -----------------------------------------------------------
 
 def test_wish_none_is_index_zero():
