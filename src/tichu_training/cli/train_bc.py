@@ -39,6 +39,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--resume", metavar="CHECKPOINT", help="Checkpoint to resume from")
     p.add_argument("--refine-from", metavar="CHECKPOINT",
                    help="BC checkpoint to refine with AWR")
+    p.add_argument("--max-examples", type=int, default=None, metavar="N",
+                   help="Cap each epoch to the first N examples yielded by the "
+                        "dataset. Useful for fast smoke runs against the full "
+                        "100k/2.4M parquet manifest without committing to a "
+                        "full sweep. Default: no cap.")
+    p.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
+                   help="Where to run the model. `auto` picks cuda if "
+                        "torch.cuda.is_available() else cpu. (default: auto)")
+    p.add_argument("--workers", type=int, default=0, metavar="N",
+                   help="Number of data-loader worker processes. 0 = "
+                        "single-threaded (the legacy path). N>=1 spawns "
+                        "ParallelParquetBCDataset workers, each handling "
+                        "a hash-sharded slice of the manifest. Default 0. "
+                        "Suggested for corpus runs: os.cpu_count() - 1.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -58,9 +72,22 @@ def main(argv: list[str] | None = None) -> int:
     seed = int(config.get("seed", 0))
     torch.manual_seed(seed)
 
-    dataset_examples = _build_dataset(config)
-    feature_dim = dataset_examples[0].features.shape[0]
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    dataset = _build_dataset(config, num_workers=args.workers)
+    # Feature dim comes from the featurizer constant — no need to peek at the
+    # first example, which would force materialisation of a streaming dataset
+    # before training starts. SyntheticBCDataset uses a configurable smaller
+    # dim for smoke; fall back to the constant when it's not overridden.
+    if config["dataset"] == "synthetic":
+        feature_dim = int(config.get("dataset_kwargs", {}).get(
+            "feature_dim", FEATURIZER_OUTPUT_DIM,
+        ))
+    else:
+        feature_dim = FEATURIZER_OUTPUT_DIM
     model = _build_model(feature_dim, config)
+    device = _resolve_device(args.device)
+    log.info("using device: %s", device)
+    model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["learning_rate"]))
 
     start_step = 0
@@ -78,6 +105,15 @@ def main(argv: list[str] | None = None) -> int:
     head_weights = {k: float(v) for k, v in config.get("head_weights", {}).items()}
 
     if args.refine_from:
+        # AWR requires the full dataset materialised (value-baseline fit is
+        # one-shot, not per-batch). Drain the iterable once and pass the
+        # list through. Respect --max-examples here too — caller may want
+        # a quick AWR smoke without committing to the full sweep.
+        refine_iter = (
+            _capped(dataset, args.max_examples)
+            if args.max_examples is not None else dataset
+        )
+        dataset_examples = list(refine_iter)
         return _run_awr_refinement(
             model, optimizer, dataset_examples, config, run_dir,
             log_path=log_path, ckpt_dir=ckpt_dir,
@@ -86,9 +122,16 @@ def main(argv: list[str] | None = None) -> int:
 
     step = start_step
     for epoch in range(int(config["epochs"])):
+        # Cap the per-epoch example count if requested. islice gives a
+        # bounded iterable that preserves the streaming nature of the
+        # underlying dataset — no materialisation up front.
+        epoch_iter = (
+            _capped(dataset, args.max_examples)
+            if args.max_examples is not None else dataset
+        )
         loss = train_one_epoch(
             model,
-            dataset_examples,
+            epoch_iter,
             optimizer,
             batch_size=int(config["batch_size"]),
             log_path=log_path,
@@ -172,19 +215,71 @@ def _run_awr_refinement(
     return 0
 
 
-def _build_dataset(config):
+def _resolve_device(choice: str) -> torch.device:
+    """Resolve the `--device` flag to a torch.device.
+
+    `auto` picks `cuda` when `torch.cuda.is_available()`, else `cpu`.
+    Explicit `cuda` raises if CUDA isn't available, so silent CPU
+    fallback never confuses a user who asked for GPU.
+    """
+    if choice == "cpu":
+        return torch.device("cpu")
+    if choice == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "--device cuda requested but torch.cuda.is_available() is False"
+            )
+        return torch.device("cuda")
+    # auto
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class _CappedIterable:
+    """Bound an iterable to its first N items while preserving `n_rows`
+    so the trainer's tqdm bar shows the right total. `n_rows` is the
+    minimum of the underlying value (when present) and the cap.
+    """
+
+    def __init__(self, inner, cap: int) -> None:
+        self._inner = inner
+        self._cap = int(cap)
+        underlying_n_rows = getattr(inner, "n_rows", None)
+        self.n_rows = (
+            min(underlying_n_rows, self._cap)
+            if underlying_n_rows is not None else self._cap
+        )
+
+    def __iter__(self):
+        from itertools import islice
+        return islice(iter(self._inner), self._cap)
+
+
+def _capped(inner, cap: int):
+    return _CappedIterable(inner, cap)
+
+
+def _build_dataset(config, *, num_workers: int = 0):
+    """Construct the BC training dataset.
+
+    `synthetic`: in-memory deterministic examples for smoke. Materialised
+        as a list (small).
+    `parquet`: ADR-0011 archive-driven replay-on-the-fly streaming
+        dataset. With `num_workers == 0` (default), the sequential
+        `ParquetBCDataset` is used. With `num_workers >= 1`, the
+        `ParallelParquetBCDataset` shards the manifest across that many
+        worker processes — typical speedup is near-linear on CPU-bound
+        runs since the Python data-loading loop releases nothing to
+        MKL's threadpool.
+    """
     name = config["dataset"]
     kwargs = dict(config.get("dataset_kwargs", {}))
     if name == "synthetic":
         return list(SyntheticBCDataset(**kwargs))
     if name == "parquet":
-        ds = ParquetBCDataset(**kwargs)
-        # Parquet → BCExample materialisation is a follow-up; refuse for now.
-        raise NotImplementedError(
-            "ParquetBCDataset example materialisation is deferred to a "
-            "featurization-cache follow-up; use the synthetic dataset for "
-            "the smoke test and for early experiments."
-        )
+        if num_workers >= 1:
+            from tichu_training.bc.parallel_dataset import ParallelParquetBCDataset
+            return ParallelParquetBCDataset(num_workers=num_workers, **kwargs)
+        return ParquetBCDataset(**kwargs)
     raise ValueError(f"unknown dataset: {name!r}")
 
 

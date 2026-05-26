@@ -31,7 +31,7 @@ _Avoid_: "a deal", "per deal", "deal-level".
 
 ### Decision terms
 
-A player makes exactly **6 kinds of Decision** over a Round. Four are served by heads on the shared-trunk BC model; two are served by standalone networks.
+A player makes exactly **6 kinds of Decision** over a Round. Three are served by heads on the shared-trunk BC model; three are served by standalone networks.
 
 **Decision**:
 A player's choice-point — a moment at which the engine awaits an Action. Six types exist; see below.
@@ -42,15 +42,19 @@ One output layer of the shared-trunk BC model, mapping the trunk's 512-dim repre
 _Avoid_: branch, output (when referring to the BC model).
 
 **Call Network**:
-A standalone small network for a single Decision, not sharing the BC trunk. Two exist (Tichu, Grand-Tichu). See [ADR-0007](docs/adr/0007-calls-are-standalone-networks.md).
+A standalone small network for a single Tichu / Grand-Tichu call Decision, not sharing the BC trunk. Two exist (Tichu, Grand-Tichu). See [ADR-0007](docs/adr/0007-calls-are-standalone-networks.md).
 _Avoid_: call head (calls are not heads — they are separate networks).
+
+**Schupfen Network**:
+A standalone network for the Schupfen Decision, not sharing the BC trunk. Same precedent as Call Networks — carved out because the Decision shape (pick 3 of 14 cards, assign 3 labeled destinations) does not fit the single-discrete-output multi-head pattern. See [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md).
+_Avoid_: schupfen head, pass head.
 
 **The 6 Decisions** (canonical names, with network mapping):
 
 | Decision | Served by | Action space |
 |---|---|---|
 | **Grand-Tichu Call** | Call Network | binary (call / skip) |
-| **Schupfen** | BC head `schupfen` | 3-way (to-left, to-partner, to-right) per card |
+| **Schupfen** | Schupfen Network | 3 cards × 3 directions (to-next, to-partner, to-previous) |
 | **Tichu Call** | Call Network | binary (call / skip) |
 | **Play** | BC head `play` | 1809 intents, includes in-trick **Pass** as one slot |
 | **Wish** | BC head `wish` | 14 ranks |
@@ -134,7 +138,7 @@ The intent-level peer of a Combination — `PlayPair`, `PlayStraight`, etc. Live
 _Avoid_: combo intent, abstract combo.
 
 **Resolver**:
-The function in `tichu_inference/ml_agent.py` that maps an Intent + a Hand → a Concrete Action by picking specific cards (which two 7s; which suit holds the Phoenix). The picks are heuristic — that heuristic is itself a design surface.
+The function in `tichu_inference/ml_agent.py` that maps an Intent + a Hand → a Concrete Action by picking specific cards (which two 7s; which suit holds the Phoenix). The picks are heuristic — that heuristic is itself a design surface. The **inverse direction** (Concrete Action → Intent index, plus the legal Intent mask at a decision point) is mechanical, not heuristic, and lives in `tichu_training/action_space.py` next to `encode` / `decode`. The two directions are deliberately not co-located — inference needs the forward, training needs the inverse, and forcing a shared module would couple inference to engine internals it does not otherwise touch. See [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md).
 _Avoid_: wrapper, mapper, decoder.
 
 ### Agent terms
@@ -156,7 +160,7 @@ An Agent that loads a Checkpoint and runs `Policy Network → Action Index → R
 _Avoid_: learned agent, neural agent, model agent.
 
 **Policy Network**:
-The shared-trunk + four BC Heads (play, schupfen, wish, dragon_assignment) that an ML Agent runs for in-game Decisions. Specifically excludes the Call Networks.
+The shared-trunk + three BC Heads (play, wish, dragon_assignment) that an ML Agent runs for those in-game Decisions. Specifically excludes the Call Networks and the Schupfen Network.
 _Avoid_: bare "policy", model, net.
 
 **Call Network**:
@@ -196,7 +200,7 @@ The supervised training stage on the BSW corpus. Output is a BC Checkpoint.
 _Avoid_: imitation, supervised, pretraining.
 
 **BC Training**:
-The act of running BC. CLI: `train_bc`.
+The act of running BC. CLI: `train_bc`. **Replay-on-the-fly, archive-driven**: the trainer iterates the BSW archive in offset order, replays each round once, featurizes at every decision boundary, and yields training examples. The parquet shards are a per-decision manifest (validated `(game_id, round_id)` set + label / metadata columns), not the training input — Feature Vectors and legal Intent masks are not stored. See [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md).
 
 **BC Checkpoint**:
 A Checkpoint produced by BC Training. Payload = Trunk weights + four BC Head weights.
@@ -326,9 +330,10 @@ _Avoid_: test set, eval set, held-out pool.
 
 ### Decision → Network
 
-- A **Play / Schupfen / Wish / Dragon-Assignment** Decision is served by a BC **Head** on the shared **Trunk**.
+- A **Play / Wish / Dragon-Assignment** Decision is served by a BC **Head** on the shared **Trunk**.
 - A **Tichu Call / Grand-Tichu Call** Decision is served by a standalone **Call Network**.
-- An **ML Agent** loads **one** Policy Network Checkpoint + **two** Call Network Checkpoints.
+- A **Schupfen** Decision is served by a standalone **Schupfen Network** (see [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md)).
+- An **ML Agent** loads **one** Policy Network Checkpoint + **two** Call Network Checkpoints + **one** Schupfen Network Checkpoint.
 
 ### Action
 
@@ -400,3 +405,5 @@ _Avoid_: test set, eval set, held-out pool.
 - "skill weight" vs "skill conditioning" — resolved: the model is **conditioned** on Skill Decile via the Skill Embedding; **Sample Weight is unrelated to skill** in BC Training (always `1.0`).
 - "deal" used as a noun in `tichu_eval` for "the synthetic starting position" — resolved: **Starting Position** is the noun; "deal" stays verb-only per §Game-layer terms. Module renamed to `tichu_eval/starting_position_pool.py` and `play_deal()` → `play_round()` in session 2026-05-25.
 - "player handle" treated as game-stable (one tuple per `ParsedGame`) — resolved: handles are **per-round** (`ParsedRound.handles`), not per-game. Captures BSW mid-game player substitutions and **Anonymous Seats** correctly. `ParsedGame.handles` removed in session 2026-05-26. BC ingestion tolerates anonymous / substituted seats (Neutral Skill Decile); TrueSkill ingestion rejects them (per-identified-stable-game invariant). See [ADR-0010](docs/adr/0010-per-round-handles-with-asymmetric-tolerance.md).
+- "parquet shards are the BC training input" — resolved: **the BSW archive is the training input**; parquet shards are a per-decision manifest carrying labels, `sample_weight`, `round_outcome`, and `player_handle`. Feature Vector and legal Intent mask are computed at train time by replaying the round from the archive. The schema's reserved `state` / `legal_actions_mask` / `skill_decile` columns are dead weight in v1 and slated for removal. Skill Decile is joined live against the TrueSkill ratings table by `player_handle`. See [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md).
+- "schupfen is a BC head with `HEAD_LOGIT_DIMS['schupfen']=3`" — resolved: schupfen is a **standalone Schupfen Network**, same pattern as Call Networks. The 3-output stub in `bc/heads.py` is removed; the BC model now has three heads (play, wish, dragon_assignment). The `schupfen_00000.parquet` shard feeds `train_schupfen`, not `train_bc`. See [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md).

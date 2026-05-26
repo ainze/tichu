@@ -63,6 +63,14 @@ class ReplayResult:
     # lockstep with `decisions`. `None` for pseudo-decisions (Tichu/Grand-Tichu
     # call passthroughs and phantom passes) where no engine step happened.
     pre_decision_states: list[GameState | None] = field(default_factory=list)
+    # Legal-action set at each pre-decision state, parallel to
+    # `pre_decision_states`. Cached during replay (the engine's full
+    # enumeration is the dominant cost — ~86% of pipeline runtime per
+    # ADR-0009) and exposed here so downstream consumers (e.g.
+    # `ParquetBCDataset` computing legal masks) reuse the computation
+    # instead of re-enumerating. `None` wherever the parallel pre-decision
+    # state is `None`.
+    legal_actions_at: list[frozenset | None] = field(default_factory=list)
 
 
 def replay_round(parsed: ParsedRound) -> ReplayResult:
@@ -96,11 +104,13 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             to_partner=sub.schupfen_to_partner,
             to_previous=sub.schupfen_to_previous,
         )
-        if action not in legal(state):
+        legal_at_state = legal(state)
+        if action not in legal_at_state:
             result.illegal_action = sub
             result.illegal_reason = "schupfen submission not legal"
             return result
         result.pre_decision_states.append(state)
+        result.legal_actions_at.append(legal_at_state)
         state, _, _, _ = step(state, action)
         result.steps_taken += 1
         result.decisions.append((sub, action))
@@ -111,6 +121,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             # Engine doesn't model these yet — capture but skip stepping.
             result.decisions.append((parsed_action, _CallPassthrough(parsed_action.kind)))
             result.pre_decision_states.append(None)
+            result.legal_actions_at.append(None)
             continue
 
         # Auto-decline a pending MahjongWish when the next BSW action is not
@@ -139,6 +150,7 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
         ):
             result.decisions.append((parsed_action, PASS))
             result.pre_decision_states.append(None)
+            result.legal_actions_at.append(None)
             continue
 
         # BSW sometimes omits the "Drache an:" line after a Dragon-winning
@@ -179,10 +191,17 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
                 result.illegal_reason = str(exc)
                 return result
             state_before_bomb = state
+            # Bomb interrupts are out-of-turn: the parsed actor is not the
+            # current_player. The downstream legal-mask consumer (BC
+            # dataset) will go through `legal_bomb_interrupts` for these,
+            # not `legal_actions`, so the cached state legal set is the
+            # wrong universe to expose. Leave it None — consumers fall
+            # back to fresh enumeration for the rare bomb-interrupt path.
             state, _, _, _ = step(state, bomb_action)
             result.steps_taken += 1
             result.decisions.append((parsed_action, bomb_action))
             result.pre_decision_states.append(state_before_bomb)
+            result.legal_actions_at.append(None)
             continue
 
         try:
@@ -191,11 +210,13 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
             result.illegal_action = parsed_action
             result.illegal_reason = str(exc)
             return result
-        if engine_action not in legal(state):
+        legal_at_state = legal(state)
+        if engine_action not in legal_at_state:
             result.illegal_action = parsed_action
             result.illegal_reason = f"engine action {engine_action!r} not in legal set"
             return result
         result.pre_decision_states.append(state)
+        result.legal_actions_at.append(legal_at_state)
         state, _, _, _ = step(state, engine_action)
         result.steps_taken += 1
         result.decisions.append((parsed_action, engine_action))

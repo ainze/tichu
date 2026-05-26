@@ -5,23 +5,44 @@ deterministically from a seed — used by the smoke test. The featurizer is
 not invoked; features are drawn from the seeded RNG so the smoke test stays
 fast and engine-independent.
 
-`ParquetBCDataset` loads parquet shards produced by #007 and validates the
-two version columns against the loader's expectation, raising
-`VersionMismatchError` on drift. Yielding featurized examples from parquet
-requires re-replaying the round from the .tch source; that path is a stub
-in v1 and a follow-up will land the full reconstruction pipeline once
-featurization-caching is decided.
+`ParquetBCDataset` is the production training source per [ADR-0011]. It
+treats the parquet shards as a **manifest** of validated (game_id,
+round_id) pairs — Feature Vectors and legal Intent masks are computed at
+iteration time by replaying each round from the BSW archive. Skill Decile
+is joined live from the TrueSkill ratings table by `player_handle`.
+Schupfen is **not** consumed here — it is served by a standalone Schupfen
+Network per [ADR-0012].
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
 import numpy as np
+import pyarrow.parquet as pq
 
 from tichu_training.bc.heads import HEAD_LOGIT_DIMS
 from tichu_training.checkpoint import VersionMismatchError
 from tichu_training.records import load_shards
+
+
+log = logging.getLogger("tichu_training.bc.dataset")
+
+
+_DEFAULT_RECENCY_CUTOFF: int = 1855844
+_DEFAULT_RECENCY_WEIGHT: float = 0.5
+_NEUTRAL_SKILL_DECILE: int = 10  # the eleventh row of the Skill Embedding
+
+# Map from BSW ParsedAction.kind to BC decision_type. `play` and `pass` both
+# feed the `play` head. Schupfen, Tichu/Grand-Tichu calls are excluded from
+# BC (see ADR-0007 / ADR-0012).
+_KIND_TO_DECISION_TYPE: dict[str, str] = {
+    "play": "play",
+    "pass": "play",
+    "wish": "wish",
+    "dragon_give": "dragon_assignment",
+}
 
 
 @dataclass
@@ -89,40 +110,217 @@ class SyntheticBCDataset(Iterable[BCExample]):
                 )
 
 
-class ParquetBCDataset:
-    """Read parquet shards and validate version pins.
+class ParquetBCDataset(Iterable[BCExample]):
+    """Archive-driven, replay-on-the-fly BC dataset per ADR-0011.
 
-    Yielding featurized examples requires re-replaying rounds from the
-    `.tch` source — that path is deferred to a follow-up so the BC training
-    pipeline can ship without coupling the trainer to the parser.
+    Construction:
+      - Loads parquet shards (per decision_type) once. Validates the version
+        pins (featurizer_version, action_space_version) against the loader's
+        expectation; raises `VersionMismatchError` on mismatch.
+      - Builds a `(game_id, round_id)` manifest from the parquet — the set
+        of replay-validated rounds that contribute BC training rows.
+      - Loads the optional ratings parquet for live `player_handle →
+        skill_decile` lookup.
+
+    Iteration:
+      - Streams the BSW archive in offset order (`tichu_training.bsw.archive
+        .iter_archive`), parses each game, replays each in-manifest round
+        once. For every parsed decision whose `decision_type` is in
+        `HEAD_LOGIT_DIMS`, builds a PrivateState at the decision boundary,
+        featurizes, derives the target via `bc_target_for_concrete`, builds
+        the legal mask via `legal_mask`, and yields a `BCExample`.
+
+    Excludes (per ADR-0007 / ADR-0012):
+      - `call_tichu` / `call_grand_tichu` rows (feed `train_calls`)
+      - `schupfen` rows (feed `train_schupfen`)
     """
 
     def __init__(
         self,
         shards_dir: str | Path,
         *,
+        archive_path: str | Path,
         expected_featurizer_version: str,
         expected_action_space_version: str,
+        ratings_path: str | Path | None = None,
+        recency_cutoff_game_id: int = _DEFAULT_RECENCY_CUTOFF,
+        recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
+        skill_buckets: int = 10,
     ) -> None:
         self.shards_dir = Path(shards_dir)
+        self.archive_path = Path(archive_path)
         self.expected_featurizer_version = expected_featurizer_version
         self.expected_action_space_version = expected_action_space_version
-        # Validate at construction: any mismatch fails fast.
-        self._n_rows_by_type: dict[str, int] = {}
+        self.recency_cutoff_game_id = recency_cutoff_game_id
+        self.recency_weight = recency_weight
+        self.skill_buckets = skill_buckets
+        self._neutral_decile = skill_buckets  # the 11th row
+
+        # Manifest: game_id (str) → set of valid round_index (int).
+        # Built from the play shard since per ADR-0008 round-level validity
+        # is all-or-nothing across decision types in a round.
+        self._manifest: dict[str, set[int]] = self._build_manifest()
+        self._skill_lookup: dict[str, int] = (
+            self._load_skill_lookup(ratings_path) if ratings_path else {}
+        )
+
+    def _build_manifest(self) -> dict[str, set[int]]:
+        """Read the play shard's (game_id, round_id) columns; union across
+        shards is redundant because ADR-0008 validates at Round granularity.
+        Counts and version pins also come from `load_shards` so a
+        `VersionMismatchError` fires before any iteration.
+
+        Progress is logged at INFO so a 100k-game manifest build (~30s)
+        isn't silent.
+        """
+        log.info(
+            "building manifest from parquet shards under %s …", self.shards_dir,
+        )
+        manifest: dict[str, set[int]] = {}
+        n_rows_by_type: dict[str, int] = {}
         for decision_type in HEAD_LOGIT_DIMS:
             try:
                 table = load_shards(
                     self.shards_dir,
                     decision_type,
-                    expected_featurizer_version=expected_featurizer_version,
-                    expected_action_space_version=expected_action_space_version,
+                    expected_featurizer_version=self.expected_featurizer_version,
+                    expected_action_space_version=self.expected_action_space_version,
                 )
             except FileNotFoundError:
+                log.info("  %s: no shard found, skipping", decision_type)
                 continue
-            except VersionMismatchError:
-                raise
-            self._n_rows_by_type[decision_type] = table.num_rows
+            n_rows_by_type[decision_type] = table.num_rows
+            log.info(
+                "  %s: %d rows; extracting (game_id, round_id) …",
+                decision_type, table.num_rows,
+            )
+            game_ids = table.column("game_id").to_pylist()
+            round_ids = table.column("round_id").to_pylist()
+            for g, r in zip(game_ids, round_ids):
+                if g is None or r is None or g == "":
+                    continue
+                manifest.setdefault(g, set()).add(int(r))
+        log.info(
+            "manifest built: %d games, %d (game_id, round_id) pairs",
+            len(manifest), sum(len(rs) for rs in manifest.values()),
+        )
+        self._n_rows_by_type = n_rows_by_type
+        return manifest
+
+    @staticmethod
+    def _load_skill_lookup(ratings_path) -> dict[str, int]:
+        log.info("loading skill lookup from %s …", ratings_path)
+        table = pq.read_table(
+            Path(ratings_path), columns=["player_handle", "skill_decile"],
+        )
+        handles = table.column("player_handle").to_pylist()
+        deciles = table.column("skill_decile").to_pylist()
+        lookup = {h: int(d) for h, d in zip(handles, deciles) if h and d is not None}
+        log.info("skill lookup: %d handles", len(lookup))
+        return lookup
 
     @property
     def n_rows(self) -> int:
         return sum(self._n_rows_by_type.values())
+
+    @property
+    def manifest_size(self) -> int:
+        return sum(len(rs) for rs in self._manifest.values())
+
+    def __iter__(self) -> Iterator[BCExample]:
+        # Deferred imports so the dataset module stays cheap to import.
+        from tichu_training.bsw.archive import iter_archive
+        from tichu_training.bsw.parser import parse_tch
+        from tichu_training.bsw.replay import replay_round
+        from tichu_training.action_space import bc_target_for_concrete, legal_mask
+        from tichu_training.featurizer import featurize
+        from tichu_engine.state import DragonGivePending
+
+        game_ids = set(self._manifest.keys())
+        for stem, text in iter_archive(self.archive_path, game_ids=game_ids):
+            if stem not in self._manifest:
+                continue
+            try:
+                game = parse_tch(text, game_id=stem)
+            except Exception:  # noqa: BLE001
+                continue
+            sample_weight = self._sample_weight_for(stem)
+            valid_rounds = self._manifest[stem]
+            for parsed_round in game.rounds:
+                if parsed_round.round_index not in valid_rounds:
+                    continue
+                replay = replay_round(parsed_round)
+                if replay.final_state is None:
+                    continue  # round failed to replay — manifest disagrees, skip
+                team_outcome = float(
+                    parsed_round.ergebnis[0] - parsed_round.ergebnis[1],
+                )
+                for (parsed_action, concrete), pre_state, cached_actions in zip(
+                    replay.decisions,
+                    replay.pre_decision_states,
+                    replay.legal_actions_at,
+                ):
+                    if pre_state is None:
+                        continue  # Tichu/Grand-Tichu passthrough or phantom pass
+                    decision_type = _KIND_TO_DECISION_TYPE.get(parsed_action.kind)
+                    if decision_type is None:
+                        continue  # schupfen, tichu, grand_tichu — not BC's job
+                    player = parsed_action.player
+                    if not 0 <= player < 4:
+                        continue
+                    # Build PrivateState at the decision boundary and featurize.
+                    private = pre_state.private_view(player)
+                    features = featurize(private)
+                    # Targets are decision-type-specific. For dragon_assignment
+                    # we need the winner seat from the pending decision.
+                    if decision_type == "dragon_assignment":
+                        pending = pre_state.public.pending_decision
+                        if not isinstance(pending, DragonGivePending):
+                            continue  # shouldn't happen if replay is consistent
+                        try:
+                            target = bc_target_for_concrete(
+                                decision_type, concrete,
+                                winner_seat=pending.winner,
+                            )
+                        except ValueError:
+                            continue
+                    else:
+                        try:
+                            target = bc_target_for_concrete(
+                                decision_type, concrete,
+                            )
+                        except ValueError:
+                            continue
+                    # Reuse the legal-action frozenset that replay_round
+                    # already computed (and cached) for validating this
+                    # very decision — saves the duplicate enumeration that
+                    # would otherwise happen here.
+                    mask = legal_mask(
+                        decision_type, pre_state, player,
+                        cached_actions=cached_actions,
+                    )
+                    if not mask[target]:
+                        # Defensive: target must be in the legal set. If it's
+                        # not, the engine/action-space disagree and we'd be
+                        # training on a bug. Skip silently — counted in the
+                        # `skipped_target_not_in_mask` accumulator if we add
+                        # one in a follow-up.
+                        continue
+                    handle = parsed_round.handles[player]
+                    skill = self._skill_lookup.get(handle, self._neutral_decile)
+                    yield BCExample(
+                        decision_type=decision_type,
+                        features=features,
+                        target=int(target),
+                        legal_mask=mask,
+                        sample_weight=sample_weight,
+                        skill_decile=skill,
+                        round_outcome=team_outcome,
+                    )
+
+    def _sample_weight_for(self, game_id: str) -> float:
+        try:
+            gid = int(game_id)
+        except (TypeError, ValueError):
+            return 1.0
+        return 1.0 if gid >= self.recency_cutoff_game_id else self.recency_weight

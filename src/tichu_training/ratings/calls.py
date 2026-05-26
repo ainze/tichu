@@ -37,41 +37,49 @@ class CallStats:
         return self.grand_tichu_wins / self.grand_tichu_calls
 
 
+def update_for_game(game: ParsedGame, stats: dict[str, CallStats]) -> None:
+    """Accumulate one game's call counts into `stats` in place.
+
+    Used by the streaming CLI so the full `parsed_games` list never has to
+    be held in memory. `compute_call_stats` is the corresponding loop
+    wrapper.
+    """
+    for r in game.rounds:
+        # Attribute calls to the seat's *round-level* handle so mid-game
+        # substitutions credit the right player. Anonymous seats (empty
+        # handle) are skipped — their stats would aggregate against a
+        # synthetic `""` "player". See ADR-0010.
+        handles = r.handles
+        margin_per_team = (
+            r.ergebnis[0] - r.ergebnis[1],
+            r.ergebnis[1] - r.ergebnis[0],
+        )
+        for seat in r.tichu_callers:
+            if not 0 <= seat < 4 or not handles[seat]:
+                continue
+            if handles[seat] not in stats:
+                stats[handles[seat]] = CallStats(handle=handles[seat])
+            cs = stats[handles[seat]]
+            cs.tichu_calls += 1
+            if margin_per_team[seat % 2] >= _SUCCESS_MARGIN:
+                cs.tichu_wins += 1
+        for seat in r.grand_tichu_callers:
+            if not 0 <= seat < 4 or not handles[seat]:
+                continue
+            if handles[seat] not in stats:
+                stats[handles[seat]] = CallStats(handle=handles[seat])
+            cs = stats[handles[seat]]
+            cs.grand_tichu_calls += 1
+            if margin_per_team[seat % 2] >= _SUCCESS_MARGIN:
+                cs.grand_tichu_wins += 1
+
+
 def compute_call_stats(games: Iterable[ParsedGame]) -> dict[str, CallStats]:
     """Sweep games and emit per-handle Tichu/Grand Tichu success counts.
 
     Players who never called either kind are omitted from the result.
     """
     stats: dict[str, CallStats] = {}
-
-    def _get(handle: str) -> CallStats:
-        if handle not in stats:
-            stats[handle] = CallStats(handle=handle)
-        return stats[handle]
-
     for game in games:
-        for r in game.rounds:
-            # Attribute calls to the seat's *round-level* handle so mid-game
-            # substitutions credit the right player. Anonymous seats (empty
-            # handle) are skipped — their stats would aggregate against a
-            # synthetic `""` "player". See ADR-0010.
-            handles = r.handles
-            margin_per_team = (
-                r.ergebnis[0] - r.ergebnis[1],
-                r.ergebnis[1] - r.ergebnis[0],
-            )
-            for seat in r.tichu_callers:
-                if not 0 <= seat < 4 or not handles[seat]:
-                    continue
-                cs = _get(handles[seat])
-                cs.tichu_calls += 1
-                if margin_per_team[seat % 2] >= _SUCCESS_MARGIN:
-                    cs.tichu_wins += 1
-            for seat in r.grand_tichu_callers:
-                if not 0 <= seat < 4 or not handles[seat]:
-                    continue
-                cs = _get(handles[seat])
-                cs.grand_tichu_calls += 1
-                if margin_per_team[seat % 2] >= _SUCCESS_MARGIN:
-                    cs.grand_tichu_wins += 1
+        update_for_game(game, stats)
     return stats

@@ -41,55 +41,73 @@ Here is the entire flow, from raw human game logs on the left to a running infer
 ```
 .tch files (BSW logs)
         |
-        |  parse_bsw
+        |  tools/compress.py
         v
-Parquet shards
-   (one per decision type:
-    play / schupfen /
-    wish / dragon_assignment)
+archive.zst + archive.zst.idx
+   (indexed-blob archive of all .tch payloads —
+    see ADR-0009)
         |
-        |  compute_trueskill          (optional but recommended)
-        v
-TrueSkill ratings parquet
-        |
-        |  parse_bsw --trueskill      (re-emit with skill deciles + sample weights)
-        v
-Parquet shards (with skill column)
-        |                                              |
-        |  train_bc                                    |  train_calls
-        v                                              v
-BC checkpoint                                Tichu / Grand Tichu
-(.bin, contains the network                  call-network checkpoints
- weights + featurizer/action-space versions)
-        |                                              |
-        |  train_bc --refine-from <bc.bin>             |
-        v                                              |
-AWR checkpoint                                         |
-(same .bin format, version-compatible                  |
- with the original BC checkpoint)                      |
-        |                                              |
-        |              eval_matrix                     |
-        +----------------------+-----------------------+
-                               v
-                Tournament matrix (Parquet) +
-                held-out move-prediction CSV
-                               |
-                               |  export_model
-                               v
-                       TorchScript artifacts
-                       (policy.pt, tichu_call.pt,
-                        grand_tichu_call.pt)
-                               |
-                               |  serve_inference
-                               v
-                  HTTP server: POST /act, GET /health,
-                              GET /metrics
+        +------------------ compute_trueskill ------------------+
+        |                                                       v
+        |                                            TrueSkill ratings parquet
+        |                                            (player_handle, mu, sigma,
+        |                                             n_games, skill_decile)
+        |                                                       |
+        |  parse_bsw                                            |
+        v                                                       |
+Parquet manifest                                                |
+  (one shard per decision type:                                 |
+   play / schupfen / wish /                                     |
+   dragon_assignment / call_tichu /                             |
+   call_grand_tichu)                                            |
+                                                                |
+   Manifest only — Feature Vectors and legal-Intent masks       |
+   are computed at training time by replaying each round        |
+   from the archive (ADR-0011: replay-on-the-fly).              |
+        |                                                       |
+        +--------+--------------+-------------+-----------------+
+                 |              |             |                 |
+                 v              v             v                 v
+              train_bc     train_calls   train_schupfen     (live join
+              (play / wish /  (tichu /    (standalone        of skill_decile
+              dragon-assn)    grand-tichu) network —          by player_handle)
+                              call nets)  ADR-0012; deferred)
+                 |              |
+                 v              v
+        BC checkpoint     Tichu / Grand Tichu
+        (.bin, version-   call-network checkpoints
+         pinned)
+                 |              |
+                 |  train_bc --refine-from <bc.bin>
+                 v              |
+        AWR checkpoint           |
+        (same .bin format,       |
+         drop-in for BC)         |
+                 |              |
+                 |  eval_matrix  |
+                 +-----+--------+
+                       v
+        Tournament matrix (Parquet) +
+        held-out move-prediction CSV
+                       |
+                       |  export_model
+                       v
+               TorchScript artifacts
+               (policy.pt, tichu_call.pt,
+                grand_tichu_call.pt)
+                       |
+                       |  serve_inference
+                       v
+          HTTP server: POST /act, GET /health,
+                      GET /metrics
 ```
 
-Two things are worth understanding at this point:
+Several things are worth understanding at this point:
 
 - **Checkpoints are version-pinned.** Every checkpoint file stamps the versions of two things: the **featurizer** (the code that turns a game state into a numeric vector) and the **action space** (the canonical list of 1,809 possible actions a player can take). If you change either, old checkpoints won't load — you get a clear error instead of silently broken predictions.
 - **The action space is "intent-level".** Instead of a separate index for every concrete play (e.g. "the pair of red 7s"), there is one index for the intent ("a pair of 7s"). The inference layer maps the model's chosen intent onto the specific cards in the player's hand.
+- **Parquet is a manifest, not a dataset.** The shards carry the validated `(game_id, round_id)` set plus label / metadata columns (`action_taken`, `round_outcome`, `player_handle`, `sample_weight`). Feature Vectors and legal Intent masks are recomputed at training time by replaying each round from the BSW archive — no on-disk feature cache. See [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md). Skill Decile is joined live from the ratings parquet by `player_handle` — no need to re-emit parquet shards after computing ratings.
+- **Decisions → networks split.** Three of the six decision types are served by BC heads on the shared trunk (`play`, `wish`, `dragon_assignment`). The other three are standalone networks: Tichu Call and Grand-Tichu Call ([ADR-0007](docs/adr/0007-calls-are-standalone-networks.md)) plus Schupfen ([ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md)). An ML Agent at inference time loads four checkpoints total: BC + two Call Networks + one Schupfen Network.
 
 ---
 
@@ -118,51 +136,78 @@ After installing the package, eight tools become available on your PATH. Each is
 
 ### `parse_bsw`
 
-**What it does:** Reads `.tch` files (the format that the BSW online Tichu server uses to log games), parses them into structured records, and writes them out as Parquet shards — one shard per decision type. Each row in the shard represents one decision a human made: which card to play, which direction to send a schupfen card, what rank to wish for, etc.
+**What it does:** Reads `.tch` files (the format that the BSW online Tichu server uses to log games), parses them into structured records, replays each round through the engine to validate it (see [ADR-0008](docs/adr/0008-bsw-replay-validation.md)), and writes the validated records out as Parquet shards — one shard per decision type. Each row represents one decision a human made: which card to play, which direction to send a schupfen card, what rank to wish for, etc. The pipeline is fully streaming — bounded memory regardless of corpus size (see [ADR-0009](docs/adr/0009-bsw-ingest-streaming-pipeline.md)).
 
-**When you'd run it:** Once at the start of your pipeline, against a directory of raw `.tch` files.
+**When you'd run it:** Once at the start of your pipeline, against either a directory of raw `.tch` files or the indexed-blob archive produced by `tools/compress.py`.
 
 ```bash
+# Directory of loose .tch files:
 parse_bsw \
-  --input  data/bsw/                       # directory of .tch files
-  --output artifacts/parquet/              # directory for output shards
-  --trueskill artifacts/ratings.parquet    # optional: stamp skill deciles per row
-  --recency-cutoff-game-id 1855844         # the first 2015 game id
-  --recency-weight 0.5                     # downweight pre-2015 games by 0.5
+  --input   data/bsw/                       # directory of .tch files
+  --output  artifacts/parquet/              # directory for output shards
+  --workers 12                              # parallel replay workers
+  --recency-cutoff-game-id 1855844          # the first 2015 game id
+  --recency-weight 0.5                      # downweight pre-2015 games by 0.5
+
+# Or the indexed-blob archive (preferred at corpus scale):
+parse_bsw \
+  --archive data/archive.zst                # zstd archive + .zst.idx sidecar
+  --output  artifacts/parquet/
+  --subset  100000                          # first N games by sorted game_id
+  --workers 12
 ```
 
 The recency flags exist because Tichu's strategic landscape has shifted over the years; downweighting older games stops the model from over-fitting to obsolete play.
 
-**Outputs:** `play_00000.parquet`, `schupfen_00000.parquet`, `wish_00000.parquet`, `dragon_assignment_00000.parquet` in the output directory.
+`--trueskill RATINGS.parquet` is also accepted and stamps `skill_decile` into the rows, but it is **no longer required** for BC training — the trainer joins ratings live by `player_handle` (see ADR-0011). The flag is kept for spot-checking and legacy callers.
+
+**Outputs:** Six parquet shards under the output dir — one per decision type (`play`, `schupfen`, `wish`, `dragon_assignment`, `call_tichu`, `call_grand_tichu`). Plus `known_bad_games.txt` (games with at least one replay-failed round), `parse_failures.txt` (games whose `.tch` couldn't tokenize), and `failure_details.tsv` (per-failed-round category + detail).
 
 ---
 
 ### `compute_trueskill`
 
-**What it does:** Streams through your parsed games and computes a [TrueSkill](https://www.microsoft.com/en-us/research/project/trueskill-ranking-system/) rating for every player handle. TrueSkill is the rating system Xbox Live uses — it's like Elo, but it understands team games and represents uncertainty about a player's true skill. The output is a Parquet file with `(player_handle, mu, sigma, n_games, skill_decile)` columns. The skill decile is then fed back into the training pipeline so the model knows which decisions came from strong players vs. weak ones.
+**What it does:** Streams through the BSW archive and computes a [TrueSkill](https://www.microsoft.com/en-us/research/project/trueskill-ranking-system/) rating for every player handle. TrueSkill is the rating system Xbox Live uses — it's like Elo, but it understands team games and represents uncertainty about a player's true skill. The pipeline is a single fused streaming pass (parse → TrueSkill update → call-stats update → discard, per game) so memory stays bounded by the unique-handles dicts regardless of corpus size. The output is a Parquet file with `(player_handle, mu, sigma, n_games, skill_decile, tichu_calls, tichu_success_rate, ...)` columns. The skill decile is fed into the training pipeline so the model conditions on "what would a strong player do here?" specifically (see [ADR-0005](docs/adr/0005-inference-time-skill-conditioning.md) and [ADR-0010](docs/adr/0010-per-round-handles-with-asymmetric-tolerance.md)).
 
-**When you'd run it:** After `parse_bsw` has emitted shards but before re-running `parse_bsw` with `--trueskill`.
+**When you'd run it:** Independently of `parse_bsw` — the trainer joins ratings live, so order doesn't matter. Typically before training.
 
 ```bash
+# Against the indexed-blob archive (preferred at corpus scale):
 compute_trueskill \
-  --input  data/bsw/                          # the same .tch directory
-  --output artifacts/ratings.parquet
+  --input    data/archive.zst                 # .zst + .zst.idx archive
+  --output   artifacts/ratings.parquet
+  --subset   100000                           # match the parse_bsw --subset for a smoke run
   --min-games 20                              # exclude players with fewer than 20 games
+
+# Or against a directory of .tch files (also accepts .tar.zst legacy archives):
+compute_trueskill \
+  --input  data/bsw/
+  --output artifacts/ratings.parquet
+  --min-games 20
 ```
 
-**Outputs:** A Parquet file mapping each handle to a TrueSkill (mu, sigma) and an integer skill decile in `[0, 9]`.
+Reports a `decile share` distribution and a `Spearman ρ(mu, tichu_success_rate)` cross-validation at the end — positive rho means higher TrueSkill correlates with higher Tichu success rate, the expected signal.
+
+**Outputs:** A Parquet file mapping each handle to a TrueSkill `(mu, sigma)`, an integer skill decile in `[0, 9]`, and per-handle Tichu / Grand-Tichu call success counts.
 
 ---
 
 ### `train_bc`
 
-**What it does:** Trains the main policy network using **behavioral cloning** — i.e. it learns to predict what a human did, given the same game state. The network has a shared "trunk" (a deep residual MLP) feeding four heads, one per decision type (play, schupfen, wish, dragon_assignment). It also conditions on the acting player's skill decile so it can learn "what would a strong player do here?" specifically.
+**What it does:** Trains the main policy network using **behavioral cloning** — i.e. it learns to predict what a human did, given the same game state. The network has a shared "trunk" (a deep residual MLP) feeding **three heads** — one per BC-served decision type (`play`, `wish`, `dragon_assignment`). Schupfen has its own standalone network per [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md); the Tichu / Grand-Tichu call decisions have theirs per [ADR-0007](docs/adr/0007-calls-are-standalone-networks.md). The BC trunk also conditions on the acting player's skill decile so it can learn "what would a strong player do here?" specifically.
 
-**When you'd run it:** After parquet shards exist. Two modes:
+The trainer reads from the BSW archive directly and replays each round on the fly — the parquet shards are just a validity manifest plus label / metadata columns. See [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md).
+
+**When you'd run it:** After `parse_bsw` has produced the parquet manifest and `compute_trueskill` has produced the ratings table.
 
 ```bash
-# Plain BC training:
-train_bc --config configs/bc_smoke.yaml --run-dir runs/bc/smoke
+# Smoke run against the 100k parquet manifest:
+train_bc \
+  --config       configs/bc_smoke_parquet.yaml \
+  --run-dir      runs/bc/smoke_100k \
+  --workers      11                            # parallel data-loader processes
+  --device       auto                          # cuda if available, else cpu
+  --max-examples 200000                        # cap epoch length for fast smoke
 ```
 
 ```bash
@@ -171,10 +216,16 @@ train_bc --config configs/awr_smoke.yaml --run-dir runs/awr/smoke \
          --refine-from runs/bc/smoke/checkpoints/step_000006.bin
 ```
 
+Flag highlights:
+
+- `--workers N` spawns N data-loader processes that shard the manifest by `hash(game_id)`. Default 0 = sequential. **The single-threaded Python data loop is the throughput bottleneck on small-model configs**; with N workers, CPU utilisation scales toward 100% × N cores.
+- `--device {auto,cpu,cuda}` — where the model runs. `auto` picks CUDA if `torch.cuda.is_available()`, else CPU. Useful for the large-model `bc_full.yaml` config. Note: the default `pip install torch` on Windows pulls the CPU-only wheel; install via `pip install torch --index-url https://download.pytorch.org/whl/cu{NNN}` to enable GPU.
+- `--max-examples N` caps each epoch to the first N yielded BCExamples — useful for smoking the full 100k/2.4M manifest without committing to a full sweep.
+
 In refinement mode it loads the BC checkpoint, fits a small value baseline on `round_outcome`, computes per-example **advantage weights** (good outcomes get a bigger weight, bad outcomes get a smaller weight), and trains the same network for more epochs with those weights applied. The output is a checkpoint with the same on-disk format as the BC one — your inference service can swap them transparently.
 
 **Outputs in the run dir:**
-- `step.csv` — per-batch training metrics.
+- `step.csv` — per-batch training metrics (one column per head: `loss_play`, `loss_wish`, `loss_dragon_assignment`).
 - `epoch.csv` — per-epoch summary (AWR mode only).
 - `checkpoints/step_NNNNNN.bin` — versioned weights.
 - A copy of the YAML config you passed in (so the run is fully reproducible from the run dir).
@@ -308,27 +359,35 @@ The endpoint contract is described in detail in the next section.
 
 ## End-to-end training pipeline
 
-Here is the order to run things if you're starting from a directory of `.tch` files and want to end up with a serving HTTP endpoint. Substitute paths to match your layout.
+Here is the order to run things if you're starting from a directory of `.tch` files (or an existing `archive.zst`) and want to end up with a serving HTTP endpoint. Substitute paths to match your layout.
 
 ```bash
-# 1. Compute TrueSkill ratings (so the training pipeline can stamp skill deciles).
+# 0. (One-time, if you don't already have the archive.) Compress the raw .tch
+#    directory into the indexed-blob archive used by the rest of the pipeline.
+python tools/compress.py data/bsw/ data/archive.zst
+
+# 1. Compute TrueSkill ratings. Streams the archive in chronological order
+#    and writes one row per handle. The trainer joins this live by
+#    player_handle — no need to re-emit parquet afterwards.
 compute_trueskill \
-  --input  data/bsw/ \
-  --output artifacts/ratings.parquet \
+  --input    data/archive.zst \
+  --output   artifacts/ratings.parquet \
   --min-games 20
 
-# 2. Parse the .tch files into Parquet shards, with skill + recency weighting.
+# 2. Parse the archive into the per-decision parquet manifest. The trainer
+#    will replay rounds on the fly at training time — these shards are a
+#    validated (game_id, round_id) manifest plus label / metadata columns.
 parse_bsw \
-  --input  data/bsw/ \
-  --output artifacts/parquet/ \
-  --trueskill artifacts/ratings.parquet \
-  --recency-cutoff-game-id 1855844 \
-  --recency-weight 0.5
+  --archive data/archive.zst \
+  --output  artifacts/parquet/ \
+  --workers 12
 
-# 3. Train the main BC policy network.
+# 3. Train the main BC policy network. Joins ratings live by player_handle.
 train_bc \
   --config  configs/bc_full.yaml \
-  --run-dir runs/bc/v1/
+  --run-dir runs/bc/v1/ \
+  --workers 11 \
+  --device  auto
 
 # 4. Train the two call networks (in parallel with step 3 if you like).
 train_calls \
@@ -358,7 +417,7 @@ export_model \
 serve_inference --config configs/serve.yaml
 ```
 
-For early experimentation, replace each `*_full.yaml` with the matching `*_smoke.yaml` — those configs use synthetic datasets and a tiny network so a full run completes in seconds rather than hours.
+For early experimentation, replace each `*_full.yaml` with the matching `*_smoke.yaml`. `configs/bc_smoke.yaml` uses a synthetic dataset for engine-independent testing; `configs/bc_smoke_parquet.yaml` runs the real replay-on-the-fly path against the 100k parquet manifest with a smaller model — combine with `--max-examples` for sub-minute end-to-end smokes against real data.
 
 ---
 
@@ -470,7 +529,7 @@ A couple of design notes worth knowing:
 
 ## Running the tests
 
-The test suite is the most thorough piece of documentation. There are 512 tests and they run in about 90 seconds.
+The test suite is the most thorough piece of documentation. There are 603 tests and they run in about 2 minutes.
 
 ```bash
 # Run everything except the slow-marked tests:
@@ -495,12 +554,13 @@ Every CLI has a smoke test that does the full thing on a tiny synthetic dataset.
 
 The following items are documented but not yet implemented. They live as comments in the relevant modules.
 
-- **Parquet → BC example materialisation.** The Parquet shards store the parsed action records, but reconstructing the featurized training example from a row requires replaying the round from the `.tch` source. The smoke configs use `SyntheticBCDataset` for now; the parquet path is wired up to validate versions but raises `NotImplementedError` when you try to iterate it. A future follow-up will add a featurization cache so the parquet path becomes usable.
-- **Negative call examples.** The BSW parser only emits positive Tichu / Grand Tichu calls. Negative examples (a player at a call-decision point who chose not to call) need to be synthesized — also deferred to a follow-up.
+- **Schupfen Network implementation.** [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md) carves Schupfen out into a standalone network because a Schupfen Decision is structurally "pick 3 of 14 cards, assign 3 labeled destinations" — not a single-discrete-output decision that fits the shared-trunk multi-head pattern. The `tichu_training/bc/schupfen_model.py` module + `train_schupfen` CLI are not yet implemented; for now the ML Agent falls back to a heuristic at Schupfen-time. Output shape (multi-output, autoregressive decoder, or pointer network) is itself an open design choice to be resolved when the implementation lands.
+- **Wish / dragon_assignment inference decoding.** The BC heads exist and train end-to-end as of [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md), but the `MLAgent` doesn't yet wire the `wish` and `dragon_assignment` head outputs through to concrete engine actions. At inference the ML Agent currently delegates pending-decision moments to `RuleAgent` heuristics. The plumbing is small — argmax + the small index→engine-value mapping — and is the most immediate follow-up.
+- **Negative call examples.** The BSW parser only emits positive Tichu / Grand Tichu calls. Negative examples (a player at a call-decision point who chose not to call) need to be synthesized — deferred to a follow-up.
 - **Trunk sharing between BC and value baseline.** The AWR value baseline is its own small MLP rather than sharing the BC trunk. Cleaner from a wiring standpoint at this stage; trunk sharing is a possible optimization later.
 - **ONNX export.** TorchScript is the primary target. The `--format onnx` flag is reserved but currently rejected with a clear message.
-- **Schupfen / wish / dragon_assignment head decoding.** The BC model has heads for all four decision types, but only the `play` head is wired into `MLAgent` end-to-end. For pending decisions (schupfen, wish, dragon-give) the ML agent currently delegates to `RuleAgent` heuristics. Wiring the other heads through to concrete engine actions is the largest of the documented follow-ups.
 - **BombInterrupt in tournament play.** The tournament harness exercises only in-turn actions because `legal_actions_for` doesn't enumerate out-of-turn bomb interrupts. Engine support exists; surfacing it through the harness is a follow-up.
 - **Tichu calling composed onto play agents.** The play and call models exist as separate networks; a thin wrapper that uses the call models to decide whether to announce Tichu before play begins is a follow-up.
+- **Within-epoch shuffle buffer.** `ParquetBCDataset` iterates the archive in offset order (= chronological by `tools/compress.py` construction). SGD tolerates this, but a bounded shuffle buffer (e.g. 16k examples) would improve within-epoch independence. Documented in ADR-0011's "Consequences" section.
 
-The combination of "what's complete + what's deferred" is also captured in the commit messages and in `documentation/PRD-python-ai-implementation.md`.
+The combination of "what's complete + what's deferred" is also captured in the commit messages, in `documentation/PRD-python-ai-implementation.md`, and across the ADRs under `docs/adr/`.

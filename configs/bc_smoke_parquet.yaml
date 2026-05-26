@@ -1,0 +1,41 @@
+# Smoke-sized BC training against the 100k parquet manifest + archive
+# per ADR-0011. Replay-on-the-fly: features and legal masks are computed
+# at training time by replaying each round from the BSW archive. Skill
+# Decile is joined live from the ratings table.
+#
+# Run from the worktree (after pip install -e . has pointed the editable
+# install at this worktree, or with PYTHONPATH=src):
+#
+#   python -m tichu_training.cli.train_bc `
+#     --config configs/bc_smoke_parquet.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_smoke_100k -v
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_100k
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
+  expected_featurizer_version: v1
+  expected_action_space_version: v1
+
+# Small-ish model for the smoke pass — wide enough to actually learn
+# something from real BSW data, narrow enough to finish in minutes on a
+# CPU-only machine. Bump to bc_full.yaml dims (1024 × 4, head_hidden 256)
+# for the corpus run.
+model:
+  trunk_hidden: 256
+  trunk_depth: 2
+  trunk_out_dim: 128
+  skill_dim: 32
+  head_hidden: 64
+
+learning_rate: 3.0e-4
+batch_size: 256
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 100000  # one checkpoint at end of epoch (small enough to never hit otherwise)
+seed: 0

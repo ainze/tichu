@@ -47,9 +47,12 @@ def test_synthetic_features_match_requested_dim():
 
 def test_parquet_dataset_raises_on_featurizer_version_mismatch(tmp_path):
     _write_minimal_shard(tmp_path / "play_00000.parquet", featurizer_version="v1")
+    # archive_path is required by the new ADR-0011 constructor but is not
+    # touched during version-pin validation, so a dummy path is fine here.
     with pytest.raises(VersionMismatchError):
         ParquetBCDataset(
             shards_dir=tmp_path,
+            archive_path=tmp_path / "irrelevant.zst",
             expected_featurizer_version="v2",
             expected_action_space_version="v1",
         )
@@ -59,6 +62,7 @@ def test_parquet_dataset_accepts_matching_versions(tmp_path):
     _write_minimal_shard(tmp_path / "play_00000.parquet", featurizer_version="v1")
     ds = ParquetBCDataset(
         shards_dir=tmp_path,
+        archive_path=tmp_path / "irrelevant.zst",
         expected_featurizer_version="v1",
         expected_action_space_version="v1",
     )

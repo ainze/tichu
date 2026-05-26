@@ -64,11 +64,14 @@ def awr_refine_epoch(
     step = _next_step(log_path)
     weight_running_total = 0.0
     weight_running_count = 0
+    model_device = next(model.parameters()).device
 
     for head, ex_list in by_head.items():
         for i in range(0, len(ex_list), batch_size):
             batch = ex_list[i : i + batch_size]
             tensors = _to_tensors(batch)
+            if model_device.type != "cpu":
+                tensors = {k: v.to(model_device, non_blocking=True) for k, v in tensors.items()}
             out = model(tensors["features"], tensors["skill_decile"])
             logits = out[head]
             per_head_loss = masked_cross_entropy(
@@ -156,6 +159,9 @@ def _play_head_top1(model: BCModel, examples: Iterable[BCExample]) -> float:
     if not play:
         return 0.0
     tensors = _to_tensors(play)
+    model_device = next(model.parameters()).device
+    if model_device.type != "cpu":
+        tensors = {k: v.to(model_device, non_blocking=True) for k, v in tensors.items()}
     with torch.no_grad():
         logits = model(tensors["features"], tensors["skill_decile"])["play"]
         pred = logits.masked_fill(~tensors["legal_mask"], float("-inf")).argmax(dim=-1)

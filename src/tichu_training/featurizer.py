@@ -49,6 +49,7 @@ from tichu_training.action_space import (
     PlayStraightFlushBomb,
     PlayTriple,
     encode,
+    play_intent_index,
 )
 
 
@@ -145,67 +146,17 @@ def _has_phoenix(cards: Iterable[object]) -> bool:
 def _combination_to_action_index(combo: object) -> int | None:
     """Map an engine combination to the canonical action-space index.
 
-    Returns None if the combination cannot be represented (e.g. unknown type
-    or a degenerate case the v1 action space does not enumerate).
+    Thin null-tolerant wrapper over ``play_intent_index`` (the canonical
+    concrete→Intent resolver in ``action_space``). Returns None for cases
+    the v1 action space cannot represent (e.g. FullHouse with Phoenix in
+    both triple and pair) so the featurizer can zero the slot rather than
+    crash.
     """
     if combo is None:
         return None
-    if isinstance(combo, Single):
-        card = combo.card
-        if isinstance(card, Card):
-            action = PlaySingle(suit=_SUIT_NAME[card.suit], rank=card.rank)
-        elif card is PHOENIX:
-            if combo.as_rank is not None:
-                action = PlaySingle(phoenix_as_rank=int(combo.as_rank))
-            else:
-                action = PlaySingle(special="phoenix")
-        elif card is MAHJONG:
-            action = PlaySingle(special="mahjong")
-        elif card is DOG:
-            action = PlaySingle(special="dog")
-        elif card is DRAGON:
-            action = PlaySingle(special="dragon")
-        else:
-            return None
-        return _lookup(action)
-    if isinstance(combo, Pair):
-        return _lookup(PlayPair(rank=combo.rank, with_phoenix=_has_phoenix(_combo_cards(combo))))
-    if isinstance(combo, Triple):
-        return _lookup(PlayTriple(rank=combo.rank, with_phoenix=_has_phoenix(_combo_cards(combo))))
-    if isinstance(combo, FullHouse):
-        triple_has_phx = _has_phoenix(_combo_cards(combo.triple))
-        pair_has_phx = _has_phoenix(_combo_cards(combo.pair))
-        if triple_has_phx and pair_has_phx:
-            return None
-        pos = "triple" if triple_has_phx else "pair" if pair_has_phx else "none"
-        return _lookup(PlayFullHouse(triple_rank=combo.triple.rank, pair_rank=combo.pair.rank, phoenix_position=pos))
-    if isinstance(combo, PairStep):
-        pairs = combo.pairs
-        phx_pos = next(
-            (i for i, p in enumerate(pairs) if _has_phoenix(_combo_cards(p))),
-            None,
-        )
-        return _lookup(PlayPairStep(start_rank=pairs[0].rank, length=len(pairs), phoenix_position=phx_pos))
-    if isinstance(combo, Straight):
-        cards = combo.cards
-        has_mj = any(c is MAHJONG for c in cards)
-        start = 1 if has_mj else combo.rank
-        phx_pos = combo.phoenix_as_rank - start if combo.phoenix_as_rank is not None else None
-        if phx_pos is not None and not 0 <= phx_pos < len(cards):
-            phx_pos = None
-        return _lookup(PlayStraight(start_rank=start, length=len(cards), phoenix_position=phx_pos))
-    if isinstance(combo, FourOfAKindBomb):
-        return _lookup(PlayFourBomb(rank=combo.rank))
-    if isinstance(combo, StraightFlushBomb):
-        suit_name = _SUIT_NAME[combo.cards[0].suit]
-        return _lookup(PlayStraightFlushBomb(suit=suit_name, start_rank=combo.cards[0].rank, length=combo.length))
-    return None
-
-
-def _lookup(action) -> int | None:
     try:
-        return encode(action)
-    except KeyError:
+        return play_intent_index(combo)
+    except (KeyError, ValueError):
         return None
 
 
