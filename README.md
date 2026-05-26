@@ -211,24 +211,49 @@ train_bc \
 ```
 
 ```bash
-# AWR offline-RL refinement of an existing BC checkpoint:
-train_bc --config configs/awr_smoke.yaml --run-dir runs/awr/smoke \
-         --refine-from runs/bc/smoke/checkpoints/step_000006.bin
+# AWR offline-RL refinement (streaming — works on the full 2.4M corpus):
+train_bc --config configs/awr_smoke_100k.yaml --run-dir runs/awr/smoke_100k \
+         --refine-from runs/bc/smoke_100k/checkpoints/step_e000_b00020000.bin \
+         --device cuda --workers 11
 ```
 
 Flag highlights:
 
 - `--workers N` spawns N data-loader processes that shard the manifest by `hash(game_id)`. Default 0 = sequential. **The single-threaded Python data loop is the throughput bottleneck on small-model configs**; with N workers, CPU utilisation scales toward 100% × N cores.
 - `--device {auto,cpu,cuda}` — where the model runs. `auto` picks CUDA if `torch.cuda.is_available()`, else CPU. Useful for the large-model `bc_full.yaml` config. Note: the default `pip install torch` on Windows pulls the CPU-only wheel; install via `pip install torch --index-url https://download.pytorch.org/whl/cu{NNN}` to enable GPU.
-- `--max-examples N` caps each epoch to the first N yielded BCExamples — useful for smoking the full 100k/2.4M manifest without committing to a full sweep.
+- `--max-examples N` caps each epoch to the first N yielded BCExamples — useful for smoking the full 100k/2.4M manifest without committing to a full sweep. In AWR streaming mode the cap applies per stream pass (i.e. per epoch).
 
-In refinement mode it loads the BC checkpoint, fits a small value baseline on `round_outcome`, computes per-example **advantage weights** (good outcomes get a bigger weight, bad outcomes get a smaller weight), and trains the same network for more epochs with those weights applied. The output is a checkpoint with the same on-disk format as the BC one — your inference service can swap them transparently.
+Two config keys worth knowing about for long runs:
+
+- `checkpoint_every_batches: N` — saves a checkpoint every N fired batches inside an epoch. Without this, BC only saves at end-of-epoch, which is hours on the full corpus. With `N=20000` you get ~hourly mid-epoch checkpoints suitable for `--resume` or `--refine-from`.
+- `awr.streaming: true` — selects the streaming AWR pipeline. Required for any AWR run beyond ~5M examples; the in-memory path holds every BCExample in RAM at ~66 KB each. See AWR section below.
+
+#### AWR refinement modes
+
+AWR has two implementations behind `--refine-from`, selected by `awr.streaming` in the config.
+
+**In-memory mode (`awr.streaming: false`, the default)** — materialises the whole training set into RAM once, fits a value baseline on `round_outcome`, computes per-example **advantage weights** (good outcomes get a bigger weight, bad outcomes get a smaller weight), and trains the same network for more epochs with those weights applied. Simple and fast for ≤ a few million examples; OOMs on anything larger.
+
+**Streaming mode (`awr.streaming: true`)** — never materialises the dataset:
+
+1. **Held-out scan**: one pass through the stream collecting a capped subset (`max_held_out`, default 20k) via a deterministic hash predicate. The same predicate excludes those examples from training on every subsequent pass.
+2. **Baseline fit**: one streaming SGD pass over the train partition with multiple SGD steps per chunk.
+3. **Refine epochs**: one fresh stream pass per AWR epoch. Per chunk: baseline forward → advantages → per-chunk AWR weights → distribute to per-head buffers → fire weighted-BC step when each buffer fills.
+
+Two subtleties of the streaming path:
+
+- **Advantage standardisation** (`awr.standardize_advantages: true`, default in the smoke config). Tichu's `round_outcome` ranges ±200 points; the AWR paper's beta is calibrated against unit-variance advantages. Without standardisation the per-chunk max-subtract collapses every non-max weight to ~0 and the model effectively trains on one example per chunk. Standardisation makes `beta: 1.0` behave as the paper intends.
+- **Mid-epoch eval** (`awr.eval_every_chunks: N > 0`). Every N chunks the held-out subset is forward-passed for an intermediate `win_rate_proxy`, written as a row in `epoch.csv` with a populated `chunks_done` column. Lets you watch refinement progress within a long full-corpus epoch (otherwise blind for hours) and kill early if the metric craters.
+
+The output is a checkpoint with the same on-disk format as the BC one — your inference service can swap them transparently.
 
 **Outputs in the run dir:**
-- `step.csv` — per-batch training metrics (one column per head: `loss_play`, `loss_wish`, `loss_dragon_assignment`).
-- `epoch.csv` — per-epoch summary (AWR mode only).
-- `checkpoints/step_NNNNNN.bin` — versioned weights.
+- `step.csv` — per-batch training metrics (one column per head: `loss_play`, `loss_wish`, `loss_dragon_assignment`). Written per-batch as the trainer fires them — durable for live monitoring and survives mid-epoch crashes.
+- `epoch.csv` — per-epoch AWR summary (`epoch`, `chunks_done`, `loss_total`, `avg_weight`, `win_rate_proxy`). In streaming mode with `eval_every_chunks > 0` the file also gets intermediate rows with `chunks_done` populated, one per evaluation snapshot. Flushed per row.
+- `checkpoints/step_NNNNNN.bin` — versioned weights. Streaming AWR additionally writes one `awr_epoch_NNN_step_NNNNNN.bin` per completed epoch so multi-hour runs are resumable on crash.
 - A copy of the YAML config you passed in (so the run is fully reproducible from the run dir).
+
+To visualise a run, point `tools/plot_step_csv.py` at the run directory — it auto-detects BC vs AWR by the columns present and adds the right diagnostic panels (per-head loss + accuracy, plus AWR weight diagnostics and per-epoch summary when applicable).
 
 ---
 
@@ -395,10 +420,13 @@ train_calls \
   --run-dir runs/calls/v1/
 
 # 5. (Optional) Refine the BC policy with offline RL (AWR).
+#    awr_smoke_100k.yaml uses the streaming pipeline; copy it and point
+#    dataset_kwargs at your full-corpus paths for the production run.
 train_bc \
-  --config  configs/awr_full.yaml \
+  --config  configs/awr_smoke_100k.yaml \
   --run-dir runs/awr/v1/ \
-  --refine-from runs/bc/v1/checkpoints/<latest>.bin
+  --refine-from runs/bc/v1/checkpoints/<latest>.bin \
+  --device  cuda --workers 11
 
 # 6. Evaluate every checkpoint against the others.
 eval_matrix --config configs/eval_matrix.yaml
@@ -518,6 +546,8 @@ configs/                    # example YAML configs (each command has a *_smoke.y
 documentation/              # the PRD and rulebook
 docs/adr/                   # Architecture Decision Records — read these to understand non-obvious design choices
 sample/                     # two sample .tch games used by the tests
+tools/                      # standalone scripts (uv-script format) — data ingest +
+                            # post-training visualisation (plot_step_csv.py)
 ```
 
 A couple of design notes worth knowing:
@@ -529,7 +559,7 @@ A couple of design notes worth knowing:
 
 ## Running the tests
 
-The test suite is the most thorough piece of documentation. There are 603 tests and they run in about 2 minutes.
+The test suite is the most thorough piece of documentation. There are 624 tests and they run in about 2 minutes.
 
 ```bash
 # Run everything except the slow-marked tests:
