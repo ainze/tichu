@@ -1,7 +1,11 @@
 """Multi-head BC model: shared trunk + per-decision-type linear heads.
 
 Heads are kept in deterministic order keyed by `decision_type`:
-  play → schupfen → wish → dragon_assignment
+  play → wish → dragon_assignment
+
+Schupfen is **not** a BC head — it is served by a standalone Schupfen
+Network per [ADR-0012](../../../docs/adr/0012-schupfen-is-a-standalone-network.md).
+The schupfen parquet shard feeds `train_schupfen`, not `train_bc`.
 """
 
 from collections import OrderedDict
@@ -15,7 +19,6 @@ from tichu_training.bc.model import SkillEmbedding, TichuTrunk
 
 HEAD_LOGIT_DIMS: "OrderedDict[str, int]" = OrderedDict([
     ("play", ACTION_SPACE_SIZE),
-    ("schupfen", 3),
     ("wish", 14),
     ("dragon_assignment", 2),
 ])

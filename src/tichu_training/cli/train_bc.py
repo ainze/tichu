@@ -58,8 +58,18 @@ def main(argv: list[str] | None = None) -> int:
     seed = int(config.get("seed", 0))
     torch.manual_seed(seed)
 
-    dataset_examples = _build_dataset(config)
-    feature_dim = dataset_examples[0].features.shape[0]
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    dataset = _build_dataset(config)
+    # Feature dim comes from the featurizer constant — no need to peek at the
+    # first example, which would force materialisation of a streaming dataset
+    # before training starts. SyntheticBCDataset uses a configurable smaller
+    # dim for smoke; fall back to the constant when it's not overridden.
+    if config["dataset"] == "synthetic":
+        feature_dim = int(config.get("dataset_kwargs", {}).get(
+            "feature_dim", FEATURIZER_OUTPUT_DIM,
+        ))
+    else:
+        feature_dim = FEATURIZER_OUTPUT_DIM
     model = _build_model(feature_dim, config)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["learning_rate"]))
 
@@ -78,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     head_weights = {k: float(v) for k, v in config.get("head_weights", {}).items()}
 
     if args.refine_from:
+        # AWR requires the full dataset materialised (value-baseline fit is
+        # one-shot, not per-batch). Drain the iterable once and pass the
+        # list through.
+        dataset_examples = list(dataset)
         return _run_awr_refinement(
             model, optimizer, dataset_examples, config, run_dir,
             log_path=log_path, ckpt_dir=ckpt_dir,
@@ -88,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     for epoch in range(int(config["epochs"])):
         loss = train_one_epoch(
             model,
-            dataset_examples,
+            dataset,
             optimizer,
             batch_size=int(config["batch_size"]),
             log_path=log_path,
@@ -173,18 +187,20 @@ def _run_awr_refinement(
 
 
 def _build_dataset(config):
+    """Construct the BC training dataset.
+
+    `synthetic`: in-memory deterministic examples for smoke. Materialised
+        as a list (small).
+    `parquet`: ADR-0011 archive-driven replay-on-the-fly streaming
+        dataset. The `ParquetBCDataset` instance is its own `Iterable`;
+        the trainer consumes it one example at a time.
+    """
     name = config["dataset"]
     kwargs = dict(config.get("dataset_kwargs", {}))
     if name == "synthetic":
         return list(SyntheticBCDataset(**kwargs))
     if name == "parquet":
-        ds = ParquetBCDataset(**kwargs)
-        # Parquet → BCExample materialisation is a follow-up; refuse for now.
-        raise NotImplementedError(
-            "ParquetBCDataset example materialisation is deferred to a "
-            "featurization-cache follow-up; use the synthetic dataset for "
-            "the smoke test and for early experiments."
-        )
+        return ParquetBCDataset(**kwargs)
     raise ValueError(f"unknown dataset: {name!r}")
 
 

@@ -46,9 +46,10 @@ def test_sample_weight_scales_loss():
 
 def test_head_logit_dims_match_spec():
     assert HEAD_LOGIT_DIMS["play"] == ACTION_SPACE_SIZE
-    assert HEAD_LOGIT_DIMS["schupfen"] == 3
     assert HEAD_LOGIT_DIMS["wish"] == 14
     assert HEAD_LOGIT_DIMS["dragon_assignment"] == 2
+    # Schupfen is a standalone Schupfen Network per ADR-0012, not a BC head.
+    assert "schupfen" not in HEAD_LOGIT_DIMS
 
 
 def test_bcmodel_forward_returns_all_heads():
@@ -72,8 +73,9 @@ def test_bcmodel_forward_returns_all_heads():
 def test_bcmodel_heads_have_deterministic_order():
     model = BCModel(feature_dim=8, skill_buckets=10, skill_dim=2,
                     trunk_hidden=4, trunk_depth=1, trunk_out_dim=4)
-    # Always in the canonical order play → schupfen → wish → dragon_assignment.
-    assert list(model.heads.keys()) == ["play", "schupfen", "wish", "dragon_assignment"]
+    # Always in the canonical order play → wish → dragon_assignment.
+    # Schupfen is omitted — it lives in a standalone Schupfen Network per ADR-0012.
+    assert list(model.heads.keys()) == ["play", "wish", "dragon_assignment"]
 
 
 def test_bcmodel_accepts_default_dims():
