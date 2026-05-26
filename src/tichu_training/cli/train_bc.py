@@ -47,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
                    help="Where to run the model. `auto` picks cuda if "
                         "torch.cuda.is_available() else cpu. (default: auto)")
+    p.add_argument("--workers", type=int, default=0, metavar="N",
+                   help="Number of data-loader worker processes. 0 = "
+                        "single-threaded (the legacy path). N>=1 spawns "
+                        "ParallelParquetBCDataset workers, each handling "
+                        "a hash-sharded slice of the manifest. Default 0. "
+                        "Suggested for corpus runs: os.cpu_count() - 1.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -67,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(seed)
 
     from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
-    dataset = _build_dataset(config)
+    dataset = _build_dataset(config, num_workers=args.workers)
     # Feature dim comes from the featurizer constant — no need to peek at the
     # first example, which would force materialisation of a streaming dataset
     # before training starts. SyntheticBCDataset uses a configurable smaller
@@ -252,20 +258,27 @@ def _capped(inner, cap: int):
     return _CappedIterable(inner, cap)
 
 
-def _build_dataset(config):
+def _build_dataset(config, *, num_workers: int = 0):
     """Construct the BC training dataset.
 
     `synthetic`: in-memory deterministic examples for smoke. Materialised
         as a list (small).
     `parquet`: ADR-0011 archive-driven replay-on-the-fly streaming
-        dataset. The `ParquetBCDataset` instance is its own `Iterable`;
-        the trainer consumes it one example at a time.
+        dataset. With `num_workers == 0` (default), the sequential
+        `ParquetBCDataset` is used. With `num_workers >= 1`, the
+        `ParallelParquetBCDataset` shards the manifest across that many
+        worker processes — typical speedup is near-linear on CPU-bound
+        runs since the Python data-loading loop releases nothing to
+        MKL's threadpool.
     """
     name = config["dataset"]
     kwargs = dict(config.get("dataset_kwargs", {}))
     if name == "synthetic":
         return list(SyntheticBCDataset(**kwargs))
     if name == "parquet":
+        if num_workers >= 1:
+            from tichu_training.bc.parallel_dataset import ParallelParquetBCDataset
+            return ParallelParquetBCDataset(num_workers=num_workers, **kwargs)
         return ParquetBCDataset(**kwargs)
     raise ValueError(f"unknown dataset: {name!r}")
 
