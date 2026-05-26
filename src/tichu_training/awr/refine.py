@@ -16,6 +16,7 @@ from typing import Iterable, Sequence
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from tichu_training.awr.value_baseline import ValueBaseline
 from tichu_training.awr.weights import awr_weights
@@ -45,6 +46,7 @@ def awr_refine_epoch(
     held_out_subset: Sequence[BCExample] | None = None,
     head_weights: dict[str, float] | None = None,
     features: np.ndarray | None = None,
+    show_progress: bool = True,
 ) -> dict[str, float | None]:
     if beta <= 0:
         raise ValueError(f"beta must be > 0, got {beta}")
@@ -68,39 +70,59 @@ def awr_refine_epoch(
     weight_running_count = 0
     model_device = next(model.parameters()).device
 
-    for head, ex_list in by_head.items():
-        for i in range(0, len(ex_list), batch_size):
-            batch = ex_list[i : i + batch_size]
-            tensors = _to_tensors(batch)
-            if model_device.type != "cpu":
-                tensors = {k: v.to(model_device, non_blocking=True) for k, v in tensors.items()}
-            out = model(tensors["features"], tensors["skill_decile"])
-            logits = out[head]
-            per_head_loss = masked_cross_entropy(
-                logits, tensors["target"], tensors["legal_mask"], tensors["sample_weight"],
-            )
-            total = head_weights[head] * per_head_loss
-            optimizer.zero_grad()
-            total.backward()
-            optimizer.step()
-            with torch.no_grad():
-                pred = logits.masked_fill(~tensors["legal_mask"], float("-inf")).argmax(dim=-1)
-                acc = (pred == tensors["target"]).float().mean().item()
-            batch_awr_mean = float(tensors["sample_weight"].mean())
-            weight_running_total += batch_awr_mean * len(batch)
-            weight_running_count += len(batch)
+    total_batches = sum(
+        (len(ex_list) + batch_size - 1) // batch_size for ex_list in by_head.values()
+    )
+    bar = tqdm(
+        total=total_batches,
+        unit="batch",
+        dynamic_ncols=True,
+        desc="awr refine",
+        disable=not show_progress,
+    )
 
-            row = {f: 0.0 for f in _CSV_FIELDS}
-            row["step"] = step
-            row["loss_total"] = float(total.detach())
-            row[f"loss_{head}"] = float(per_head_loss.detach())
-            row[f"acc_{head}"] = acc
-            row["awr_weight_mean"] = batch_awr_mean
-            # Append immediately so a crash mid-epoch leaves valid partial
-            # progress on disk and live monitors can tail the file.
-            _append_csv(log_path, [row])
-            last_total = row["loss_total"]
-            step += 1
+    try:
+        for head, ex_list in by_head.items():
+            for i in range(0, len(ex_list), batch_size):
+                batch = ex_list[i : i + batch_size]
+                tensors = _to_tensors(batch)
+                if model_device.type != "cpu":
+                    tensors = {k: v.to(model_device, non_blocking=True) for k, v in tensors.items()}
+                out = model(tensors["features"], tensors["skill_decile"])
+                logits = out[head]
+                per_head_loss = masked_cross_entropy(
+                    logits, tensors["target"], tensors["legal_mask"], tensors["sample_weight"],
+                )
+                total = head_weights[head] * per_head_loss
+                optimizer.zero_grad()
+                total.backward()
+                optimizer.step()
+                with torch.no_grad():
+                    pred = logits.masked_fill(~tensors["legal_mask"], float("-inf")).argmax(dim=-1)
+                    acc = (pred == tensors["target"]).float().mean().item()
+                batch_awr_mean = float(tensors["sample_weight"].mean())
+                weight_running_total += batch_awr_mean * len(batch)
+                weight_running_count += len(batch)
+
+                row = {f: 0.0 for f in _CSV_FIELDS}
+                row["step"] = step
+                row["loss_total"] = float(total.detach())
+                row[f"loss_{head}"] = float(per_head_loss.detach())
+                row[f"acc_{head}"] = acc
+                row["awr_weight_mean"] = batch_awr_mean
+                # Append immediately so a crash mid-epoch leaves valid partial
+                # progress on disk and live monitors can tail the file.
+                _append_csv(log_path, [row])
+                last_total = row["loss_total"]
+                step += 1
+                bar.update(1)
+                bar.set_postfix(
+                    head=head, loss=f"{last_total:.3f}",
+                    w_mean=f"{batch_awr_mean:.3f}",
+                    refresh=False,
+                )
+    finally:
+        bar.close()
 
     summary: dict[str, float | None] = {
         "loss_total": last_total,

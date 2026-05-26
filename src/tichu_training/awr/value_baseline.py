@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 
 class ValueBaseline(nn.Module):
@@ -32,6 +33,7 @@ def fit_value_baseline(
     epochs: int,
     lr: float,
     log_path: Path | None = None,
+    show_progress: bool = True,
 ) -> float:
     """MSE fit on `(features, outcomes)`. Returns final MSE."""
     feats_t = torch.from_numpy(np.asarray(features, dtype=np.float32))
@@ -39,16 +41,25 @@ def fit_value_baseline(
     optimizer = torch.optim.Adam(baseline.parameters(), lr=lr)
     n = feats_t.shape[0]
     final_mse = float("inf")
-    for _ in range(epochs):
-        for i in range(0, n, batch_size):
-            batch_feats = feats_t[i : i + batch_size]
-            batch_out = outcomes_t[i : i + batch_size]
-            preds = baseline(batch_feats)
-            loss = F.mse_loss(preds, batch_out)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            final_mse = float(loss.detach())
+    bar = tqdm(
+        total=epochs, unit="epoch", dynamic_ncols=True,
+        desc="value baseline", disable=not show_progress,
+    )
+    try:
+        for _ in range(epochs):
+            for i in range(0, n, batch_size):
+                batch_feats = feats_t[i : i + batch_size]
+                batch_out = outcomes_t[i : i + batch_size]
+                preds = baseline(batch_feats)
+                loss = F.mse_loss(preds, batch_out)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                final_mse = float(loss.detach())
+            bar.update(1)
+            bar.set_postfix(last_mse=f"{final_mse:.4f}", refresh=False)
+    finally:
+        bar.close()
     # Re-evaluate MSE on the trained baseline in the same mini-batches
     # used during training. The full-dataset forward pass would OOM the
     # GPU on multi-million-row training sets.

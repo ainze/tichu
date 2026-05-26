@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
+from tqdm import tqdm
 
 from tichu_training.awr.refine import awr_refine_epoch
 from tichu_training.awr.value_baseline import ValueBaseline, fit_value_baseline
@@ -118,7 +119,15 @@ def main(argv: list[str] | None = None) -> int:
             _capped(dataset, args.max_examples)
             if args.max_examples is not None else dataset
         )
-        dataset_examples = list(refine_iter)
+        # The drain takes minutes on real parquet — show a bar so the
+        # user knows the run hasn't hung. n_rows is set on both
+        # _CappedIterable and the parquet datasets.
+        total = getattr(refine_iter, "n_rows", None)
+        dataset_examples = list(tqdm(
+            refine_iter, total=total, unit="ex", dynamic_ncols=True,
+            desc="awr materialise",
+        ))
+        log.info("materialised %d examples for AWR refinement", len(dataset_examples))
         return _run_awr_refinement(
             model, optimizer, dataset_examples, config, run_dir,
             log_path=log_path, ckpt_dir=ckpt_dir,
