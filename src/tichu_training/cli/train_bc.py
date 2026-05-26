@@ -249,6 +249,9 @@ def _run_awr_refinement(
                 "win_rate_proxy": "" if summary["win_rate_proxy"] is None
                                   else summary["win_rate_proxy"],
             })
+            # Flush per-row so epoch.csv is a live monitor and a crash
+            # mid-run preserves the rows we've already produced.
+            fh.flush()
             step += 1
 
     ckpt_path = ckpt_dir / f"awr_final_step_{step:06d}.bin"
@@ -356,6 +359,9 @@ def _run_awr_refinement_streaming(
                 "win_rate_proxy": "" if summary["win_rate_proxy"] is None
                                   else summary["win_rate_proxy"],
             })
+            # Flush per-row so epoch.csv is a live monitor and a crash
+            # mid-run preserves the rows we've already produced.
+            fh.flush()
             step += 1
             # Per-epoch checkpoint so a long full-corpus run can be
             # resumed without retraining from scratch on a crash.
