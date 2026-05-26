@@ -2,6 +2,7 @@
 
 import csv
 
+import pytest
 import torch
 
 from tichu_training.bc.dataset import SyntheticBCDataset
@@ -60,6 +61,69 @@ def test_csv_log_has_one_row_per_step(tmp_path):
         assert "step" in r
         assert "loss_total" in r
         assert "loss_play" in r
+
+
+def test_step_csv_is_written_per_batch_not_at_epoch_end(tmp_path):
+    """The CSV must be flushed as each batch fires so long-running epochs
+    (and crashes mid-epoch) leave on-disk progress, not an empty file."""
+    feature_dim = 16
+    model = _make_small_model(feature_dim)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    log_path = tmp_path / "step.csv"
+
+    dataset = list(SyntheticBCDataset(seed=0, n_per_head=4, feature_dim=feature_dim))
+    play_only = [e for e in dataset if e.decision_type == "play"][:2]
+    assert len(play_only) == 2
+
+    line_counts_after_each_yield: list[int] = []
+
+    def spy():
+        for ex in play_only:
+            yield ex
+            line_counts_after_each_yield.append(
+                len(log_path.read_text(encoding="utf-8").splitlines())
+                if log_path.exists() else 0
+            )
+
+    train_one_epoch(
+        model, spy(), optimizer,
+        batch_size=2, log_path=log_path, show_progress=False,
+    )
+
+    # After yielding the 2nd 'play' example the buffer fills, _fire runs, and
+    # the row must be on disk before the generator is asked for the next item.
+    # If writes are deferred to epoch-end, the count stays at 0 throughout.
+    assert line_counts_after_each_yield[-1] >= 2, (
+        f"expected header + ≥1 data row visible mid-iteration, "
+        f"got line counts {line_counts_after_each_yield}"
+    )
+
+
+def test_step_csv_survives_dataset_exception_mid_iteration(tmp_path):
+    """When the data iterator blows up partway through an epoch, the rows
+    that already fired must be on disk and the exception must propagate."""
+    feature_dim = 16
+    model = _make_small_model(feature_dim)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    log_path = tmp_path / "step.csv"
+
+    dataset = list(SyntheticBCDataset(seed=0, n_per_head=4, feature_dim=feature_dim))
+    play_only = [e for e in dataset if e.decision_type == "play"][:2]
+
+    def explodes_after_one_batch():
+        for ex in play_only:
+            yield ex
+        raise RuntimeError("simulated mid-epoch crash")
+
+    with pytest.raises(RuntimeError, match="simulated mid-epoch crash"):
+        train_one_epoch(
+            model, explodes_after_one_batch(), optimizer,
+            batch_size=2, log_path=log_path, show_progress=False,
+        )
+
+    assert log_path.exists()
+    rows = list(csv.DictReader(log_path.open("r", encoding="utf-8")))
+    assert len(rows) >= 1, "expected the row from the batch that fired before the crash"
 
 
 def test_checkpoint_round_trip(tmp_path):

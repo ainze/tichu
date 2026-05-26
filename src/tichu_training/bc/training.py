@@ -78,7 +78,6 @@ def train_one_epoch(
 
     head_buffers: dict[str, list[BCExample]] = defaultdict(list)
     head_batch_counts: dict[str, int] = {h: 0 for h in HEAD_LOGIT_DIMS}
-    rows: list[dict[str, float]] = []
     last_total = float("inf")
     step = _next_step(log_path)
 
@@ -109,7 +108,9 @@ def train_one_epoch(
         row["loss_total"] = float(total.detach())
         row[f"loss_{head}"] = float(per_head_loss.detach())
         row[f"acc_{head}"] = acc
-        rows.append(row)
+        # Append immediately so a crash mid-epoch leaves valid partial progress
+        # on disk and live monitors can tail the file during long runs.
+        _append_csv(log_path, [row])
         last_total = row["loss_total"]
         head_batch_counts[head] = head_batch_counts.get(head, 0) + 1
         step += 1
@@ -124,26 +125,30 @@ def train_one_epoch(
     ) if show_progress else None
 
     try:
-        for example in examples:
-            buf = head_buffers[example.decision_type]
-            buf.append(example)
-            if len(buf) >= batch_size:
-                _fire(example.decision_type, buf)
-                buf.clear()
+        try:
+            for example in examples:
+                buf = head_buffers[example.decision_type]
+                buf.append(example)
+                if len(buf) >= batch_size:
+                    _fire(example.decision_type, buf)
+                    buf.clear()
+                    if bar is not None:
+                        bar.set_postfix(
+                            loss=f"{last_total:.3f}",
+                            **{f"b_{h}": head_batch_counts[h] for h in HEAD_LOGIT_DIMS},
+                            refresh=False,
+                        )
                 if bar is not None:
-                    bar.set_postfix(
-                        loss=f"{last_total:.3f}",
-                        **{f"b_{h}": head_batch_counts[h] for h in HEAD_LOGIT_DIMS},
-                        refresh=False,
-                    )
-            if bar is not None:
-                bar.update(1)
-
-        # Drain partial buffers at end of epoch.
-        for head, buf in head_buffers.items():
-            if buf:
-                _fire(head, buf)
-                buf.clear()
+                    bar.update(1)
+        finally:
+            # Drain partial buffers — runs on normal completion AND on
+            # KeyboardInterrupt / dataset exception so already-pulled
+            # examples still produce a row. _fire writes per-batch, so
+            # rows fired before any crash are already on disk.
+            for head, buf in head_buffers.items():
+                if buf:
+                    _fire(head, buf)
+                    buf.clear()
         if bar is not None:
             bar.set_postfix(
                 loss=f"{last_total:.3f}",
@@ -153,7 +158,6 @@ def train_one_epoch(
         if bar is not None:
             bar.close()
 
-    _append_csv(log_path, rows)
     return last_total
 
 

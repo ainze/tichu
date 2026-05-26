@@ -59,7 +59,6 @@ def awr_refine_epoch(
     for e in weighted_examples:
         by_head[e.decision_type].append(e)
 
-    rows: list[dict[str, float]] = []
     last_total = float("inf")
     step = _next_step(log_path)
     weight_running_total = 0.0
@@ -94,11 +93,11 @@ def awr_refine_epoch(
             row[f"loss_{head}"] = float(per_head_loss.detach())
             row[f"acc_{head}"] = acc
             row["awr_weight_mean"] = batch_awr_mean
-            rows.append(row)
+            # Append immediately so a crash mid-epoch leaves valid partial
+            # progress on disk and live monitors can tail the file.
+            _append_csv(log_path, [row])
             last_total = row["loss_total"]
             step += 1
-
-    _append_csv(log_path, rows)
 
     summary: dict[str, float | None] = {
         "loss_total": last_total,

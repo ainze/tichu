@@ -137,6 +137,79 @@ def test_held_out_subset_yields_win_rate_proxy(tmp_path):
     assert 0.0 <= out["win_rate_proxy"] <= 1.0
 
 
+def test_step_csv_is_written_per_batch_not_at_epoch_end(tmp_path, monkeypatch):
+    """The CSV must be flushed as each batch fires so long-running refine
+    epochs (and crashes mid-epoch) leave on-disk progress, not an empty file."""
+    import tichu_training.awr.refine as refine_mod
+
+    feature_dim = 8
+    # Enough examples for ≥2 batches per head at batch_size=4.
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=12, feature_dim=feature_dim))
+    model = _build_model(feature_dim)
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    real_append = refine_mod._append_csv
+    append_call_row_counts: list[int] = []
+
+    def spy_append(path, rows):
+        rows_list = list(rows)
+        append_call_row_counts.append(len(rows_list))
+        real_append(path, rows_list)
+
+    monkeypatch.setattr(refine_mod, "_append_csv", spy_append)
+
+    awr_refine_epoch(
+        model, examples, baseline, optimizer,
+        beta=1.0, max_weight=20.0, batch_size=4,
+        log_path=tmp_path / "step.csv",
+    )
+
+    # Per-batch writes ⇒ many calls with one row each. Bulk-at-end ⇒ one
+    # call carrying every row.
+    assert len(append_call_row_counts) >= 2, (
+        f"expected per-batch _append_csv calls, got {append_call_row_counts}"
+    )
+    assert all(c == 1 for c in append_call_row_counts), (
+        f"expected exactly one row per call, got {append_call_row_counts}"
+    )
+
+
+def test_step_csv_survives_mid_epoch_exception(tmp_path, monkeypatch):
+    """When the forward pass blows up partway through a refine epoch, the
+    rows that already fired must be on disk and the exception must propagate."""
+    import tichu_training.awr.refine as refine_mod
+
+    feature_dim = 8
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=12, feature_dim=feature_dim))
+    model = _build_model(feature_dim)
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    real_to_tensors = refine_mod._to_tensors
+    call_count = {"n": 0}
+
+    def explode_on_second_call(batch):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise RuntimeError("simulated mid-epoch crash")
+        return real_to_tensors(batch)
+
+    monkeypatch.setattr(refine_mod, "_to_tensors", explode_on_second_call)
+
+    log_path = tmp_path / "step.csv"
+    with pytest.raises(RuntimeError, match="simulated mid-epoch crash"):
+        awr_refine_epoch(
+            model, examples, baseline, optimizer,
+            beta=1.0, max_weight=20.0, batch_size=4,
+            log_path=log_path,
+        )
+
+    assert log_path.exists()
+    rows = list(csv.DictReader(log_path.open("r", encoding="utf-8")))
+    assert len(rows) >= 1, "expected the row from the batch that fired before the crash"
+
+
 def test_invalid_beta_propagates(tmp_path):
     examples = list(SyntheticBCDataset(seed=0, n_per_head=4, feature_dim=4))
     model = _build_model(4)
