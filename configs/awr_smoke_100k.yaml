@@ -58,9 +58,18 @@ awr:
   # holds every BCExample in RAM — only viable up to a few million).
   streaming: true
 
+  # Standardise advantages to unit variance per chunk before computing
+  # weights. Required for Tichu — raw round_outcome ranges ±200, so
+  # without this the per-chunk max-subtract collapses every weight
+  # except the single max example to ~0. With standardisation, beta
+  # behaves as in the AWR paper (calibrated against unit-variance
+  # advantages). Set false ONLY if you've already centred + normalised
+  # outcomes upstream.
+  standardize_advantages: true
+
   # exp(advantage / beta) — smaller beta = sharper reweighting, more
   # aggressive policy improvement, higher risk of collapse. 1.0 is a
-  # safe starting point.
+  # safe starting point with standardised advantages.
   beta: 1.0
   # Hard ceiling on per-example weight to stop one lucky round from
   # dominating the gradient.

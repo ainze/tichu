@@ -182,6 +182,89 @@ def test_awr_refine_epoch_streaming_drains_partial_per_head_buffers(tmp_path):
     )
 
 
+def _stream_with_outcomes_in_range(seed, n_per_head, feature_dim, low, high):
+    """Synthetic dataset rewritten with outcomes uniformly in [low, high].
+    Use to reproduce Tichu-scale advantages (~±200) on the test suite's
+    deterministic synthetic generator."""
+    rng = np.random.RandomState(seed)
+    examples = list(SyntheticBCDataset(seed=seed, n_per_head=n_per_head, feature_dim=feature_dim))
+    return [
+        BCExample(
+            decision_type=e.decision_type,
+            features=e.features,
+            target=e.target,
+            legal_mask=e.legal_mask,
+            sample_weight=e.sample_weight,
+            skill_decile=e.skill_decile,
+            round_outcome=float(rng.uniform(low, high)),
+        )
+        for e in examples
+    ]
+
+
+def test_unstandardised_large_advantages_collapse_weights_to_zero(tmp_path):
+    """With Tichu-scale outcomes (±200) and beta=1.0, per-chunk
+    max-subtract pushes exp(-large) → 0 for nearly every example. The
+    chunk-mean AWR weight drops to ~1/chunk_size. This is the bug that
+    standardisation fixes — pinning it ensures the fix actually
+    addresses the cause."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    examples = _stream_with_outcomes_in_range(0, 50, feature_dim, low=-200, high=200)
+
+    model = _build_model(feature_dim)
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    summary = awr_refine_epoch_streaming(
+        model, _factory(examples), baseline, optimizer,
+        beta=1.0, max_weight=20.0, batch_size=8,
+        log_path=tmp_path / "step.csv",
+        held_out_examples=None,
+        held_out_filter=lambda e: False,
+        chunk_size=64,
+        standardize_advantages=False,
+        show_progress=False,
+    )
+
+    # avg_weight collapses to << 1 because only the single max-advantage
+    # example per chunk gets non-trivial weight.
+    assert summary["avg_weight"] < 0.05, (
+        f"expected weight collapse with unstandardised ±200 advantages, "
+        f"got avg_weight={summary['avg_weight']:.4f}"
+    )
+
+
+def test_standardised_advantages_keep_weights_in_healthy_range(tmp_path):
+    """Same Tichu-scale advantages, but with per-chunk standardisation
+    the scaled advantages have ~unit variance, beta=1.0 behaves as the
+    AWR paper intends, and chunk-mean weights stay in a sensible range
+    (mean ≳ 0.1 for roughly-normal advantages after max-subtract)."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    examples = _stream_with_outcomes_in_range(0, 50, feature_dim, low=-200, high=200)
+
+    model = _build_model(feature_dim)
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    summary = awr_refine_epoch_streaming(
+        model, _factory(examples), baseline, optimizer,
+        beta=1.0, max_weight=20.0, batch_size=8,
+        log_path=tmp_path / "step.csv",
+        held_out_examples=None,
+        held_out_filter=lambda e: False,
+        chunk_size=64,
+        standardize_advantages=True,
+        show_progress=False,
+    )
+
+    assert summary["avg_weight"] > 0.1, (
+        f"expected healthy weight range with standardisation, "
+        f"got avg_weight={summary['avg_weight']:.4f}"
+    )
+
+
 def test_awr_refine_epoch_streaming_excludes_held_out_by_predicate(tmp_path):
     """Examples matching held_out_filter must never be trained on, no
     matter how many AWR-refine passes are run."""

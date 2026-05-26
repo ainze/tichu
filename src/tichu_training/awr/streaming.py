@@ -221,6 +221,7 @@ def awr_refine_epoch_streaming(
     held_out_examples: Sequence[BCExample] | None = None,
     held_out_filter: HeldOutFilter | None = None,
     chunk_size: int = 16_384,
+    standardize_advantages: bool = True,
     show_progress: bool = True,
 ) -> dict[str, float | None]:
     """One streaming AWR refinement pass over the dataset.
@@ -286,6 +287,17 @@ def awr_refine_epoch_streaming(
         with torch.no_grad():
             preds = baseline(torch.from_numpy(features)).cpu().numpy()
         advantages = outcomes - preds
+        if standardize_advantages:
+            # AWR's beta is calibrated against unit-variance advantages
+            # (the AWR paper's MuJoCo defaults assume normalised
+            # rewards). Tichu outcomes range ±200, so without
+            # standardisation the per-chunk max-subtract pushes every
+            # non-max example to exp(-very_large)≈0 and the model
+            # effectively trains on one example per chunk. Per-chunk
+            # standardisation makes beta=1.0 behave as intended.
+            std = float(advantages.std())
+            if std > 1e-8:
+                advantages = (advantages - float(advantages.mean())) / std
         weights = awr_weights(advantages, beta=beta, max_weight=max_weight)
         for ex, w in zip(buf, weights):
             new_ex = BCExample(

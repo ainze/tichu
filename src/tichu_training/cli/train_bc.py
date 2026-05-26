@@ -278,6 +278,7 @@ def _run_awr_refinement_streaming(
     held_out_fraction = float(awr_cfg.get("held_out_fraction", 0.05))
     max_held_out = int(awr_cfg.get("max_held_out", 20_000))
     chunk_size = int(awr_cfg.get("chunk_size", 16_384))
+    standardize_advantages = bool(awr_cfg.get("standardize_advantages", True))
 
     # Each call returns a fresh iterator. iter() on a list, ParquetBCDataset,
     # or ParallelParquetBCDataset all yield a new pass.
@@ -340,6 +341,7 @@ def _run_awr_refinement_streaming(
                 held_out_examples=held_out or None,
                 held_out_filter=held_out_filter,
                 chunk_size=chunk_size,
+                standardize_advantages=standardize_advantages,
             )
             log.info(
                 "[awr/stream] epoch %d loss=%.4f avg_weight=%.3f win_rate_proxy=%s",
