@@ -265,6 +265,82 @@ def test_standardised_advantages_keep_weights_in_healthy_range(tmp_path):
     )
 
 
+def test_mid_epoch_eval_callback_fires_every_n_chunks(tmp_path):
+    """With eval_every_chunks=2 the callback must fire after chunks 2, 4,
+    6, ... so the user gets intermediate win_rate_proxy values during
+    long full-corpus epochs (where waiting for the end-of-epoch row
+    means hours of blind running)."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    # 7 chunks of size 8 = 56 examples ⇒ expect callback at chunks 2, 4, 6
+    # plus the implicit final partial chunk doesn't get a callback (just
+    # the final end-of-epoch return).
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=20, feature_dim=feature_dim))[:56]
+    held_out = examples[:8]
+
+    model = _build_model(feature_dim)
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    fired_at: list[dict] = []
+
+    def callback(payload: dict) -> None:
+        fired_at.append(dict(payload))
+
+    awr_refine_epoch_streaming(
+        model, _factory(examples), baseline, optimizer,
+        beta=1.0, max_weight=20.0, batch_size=4,
+        log_path=tmp_path / "step.csv",
+        held_out_examples=held_out,
+        held_out_filter=lambda e: False,
+        chunk_size=8,
+        eval_every_chunks=2,
+        intermediate_eval_callback=callback,
+        show_progress=False,
+    )
+
+    # 56 examples / chunk_size 8 = 7 chunks. eval_every_chunks=2 fires
+    # at chunks 2, 4, 6 — so 3 intermediate callbacks.
+    assert len(fired_at) == 3, (
+        f"expected 3 mid-epoch callbacks at chunks 2,4,6 got {len(fired_at)}"
+    )
+    for i, payload in enumerate(fired_at):
+        assert "chunks_done" in payload
+        assert "win_rate_proxy" in payload
+        assert "loss_total" in payload
+        assert "avg_weight" in payload
+        assert payload["chunks_done"] == (i + 1) * 2
+        assert 0.0 <= payload["win_rate_proxy"] <= 1.0
+
+
+def test_no_mid_epoch_eval_when_disabled(tmp_path):
+    """eval_every_chunks=0 preserves legacy behavior — the callback is
+    never invoked, just the final summary returned."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=20, feature_dim=feature_dim))[:40]
+
+    model = _build_model(feature_dim)
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    called = []
+
+    awr_refine_epoch_streaming(
+        model, _factory(examples), baseline, optimizer,
+        beta=1.0, max_weight=20.0, batch_size=4,
+        log_path=tmp_path / "step.csv",
+        held_out_examples=examples[:4],
+        held_out_filter=lambda e: False,
+        chunk_size=8,
+        eval_every_chunks=0,
+        intermediate_eval_callback=lambda p: called.append(p),
+        show_progress=False,
+    )
+
+    assert called == [], "callback must not fire when eval_every_chunks=0"
+
+
 def test_awr_refine_epoch_streaming_excludes_held_out_by_predicate(tmp_path):
     """Examples matching held_out_filter must never be trained on, no
     matter how many AWR-refine passes are run."""

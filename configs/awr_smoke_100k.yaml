@@ -91,3 +91,11 @@ awr:
   # never sees a potential eval example), it just isn't stored.
   held_out_fraction: 0.05
   max_held_out: 20000
+  # Mid-epoch held-out eval cadence. 0 disables (legacy: one row per
+  # epoch). N>0 writes an intermediate epoch.csv row with chunks_done
+  # populated every N chunks. With chunk_size=16384 and the smoke
+  # capped at 500k examples, 1 chunk ≈ 1/30th of an epoch, so
+  # eval_every_chunks=5 gives ~6 mid-epoch snapshots per refine pass.
+  # Each eval is a forward pass over the held-out subset (~20k
+  # examples, ~1s on GPU).
+  eval_every_chunks: 5

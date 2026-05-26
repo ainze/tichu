@@ -222,6 +222,8 @@ def awr_refine_epoch_streaming(
     held_out_filter: HeldOutFilter | None = None,
     chunk_size: int = 16_384,
     standardize_advantages: bool = True,
+    eval_every_chunks: int = 0,
+    intermediate_eval_callback: Callable[[dict], None] | None = None,
     show_progress: bool = True,
 ) -> dict[str, float | None]:
     """One streaming AWR refinement pass over the dataset.
@@ -316,10 +318,36 @@ def awr_refine_epoch_streaming(
                 head_buf.clear()
 
     chunk: list[BCExample] = []
+    chunks_done = 0
     bar = tqdm(
         unit="ex", dynamic_ncols=True,
         desc="awr refine (stream)", disable=not show_progress,
     )
+
+    def _maybe_intermediate_eval() -> None:
+        # Compute win_rate_proxy on the held-out subset and fire the
+        # callback. Skipped when the caller disabled mid-epoch eval, or
+        # when there's no held-out / callback to use.
+        if (
+            eval_every_chunks <= 0
+            or intermediate_eval_callback is None
+            or not held_out_examples
+        ):
+            return
+        if chunks_done == 0 or chunks_done % eval_every_chunks != 0:
+            return
+        win_rate_proxy = _play_head_top1(model, held_out_examples)
+        payload = {
+            "chunks_done": chunks_done,
+            "loss_total": last_total,
+            "avg_weight": (
+                weight_running_total / weight_running_count
+                if weight_running_count else 0.0
+            ),
+            "win_rate_proxy": win_rate_proxy,
+        }
+        intermediate_eval_callback(payload)
+
     try:
         for ex in dataset_factory():
             bar.update(1)
@@ -329,9 +357,12 @@ def awr_refine_epoch_streaming(
             if len(chunk) >= chunk_size:
                 _process_chunk(chunk)
                 chunk.clear()
+                chunks_done += 1
                 bar.set_postfix(loss=f"{last_total:.3f}", refresh=False)
+                _maybe_intermediate_eval()
         if chunk:
             _process_chunk(chunk)
+            chunks_done += 1
         # Drain per-head partial buffers — every example pulled from
         # the stream must contribute exactly one row, even if its head's
         # last batch ran short.

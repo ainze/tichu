@@ -221,7 +221,9 @@ def _run_awr_refinement(
 
     epoch_log_path = run_dir / "epoch.csv"
     new_epoch_log = not epoch_log_path.exists()
-    epoch_fields = ["epoch", "loss_total", "avg_weight", "win_rate_proxy"]
+    # Shared schema with the streaming path. `chunks_done` is always
+    # empty here (the in-memory path doesn't do mid-epoch evals).
+    epoch_fields = ["epoch", "chunks_done", "loss_total", "avg_weight", "win_rate_proxy"]
 
     step = start_step
     with epoch_log_path.open("a", encoding="utf-8", newline="") as fh:
@@ -245,6 +247,7 @@ def _run_awr_refinement(
             )
             writer.writerow({
                 "epoch": epoch,
+                "chunks_done": "",
                 "loss_total": summary["loss_total"],
                 "avg_weight": summary["avg_weight"],
                 "win_rate_proxy": "" if summary["win_rate_proxy"] is None
@@ -283,6 +286,11 @@ def _run_awr_refinement_streaming(
     max_held_out = int(awr_cfg.get("max_held_out", 20_000))
     chunk_size = int(awr_cfg.get("chunk_size", 16_384))
     standardize_advantages = bool(awr_cfg.get("standardize_advantages", True))
+    # Mid-epoch win_rate_proxy logging. 0 disables; N>0 evaluates the
+    # held-out subset every N chunks and writes an intermediate row to
+    # epoch.csv. Lets you see refinement progress without waiting for a
+    # full epoch (hours on the full corpus).
+    eval_every_chunks = int(awr_cfg.get("eval_every_chunks", 0))
 
     # Each call returns a fresh iterator. iter() on a list, ParquetBCDataset,
     # or ParallelParquetBCDataset all yield a new pass.
@@ -327,7 +335,9 @@ def _run_awr_refinement_streaming(
 
     epoch_log_path = run_dir / "epoch.csv"
     new_epoch_log = not epoch_log_path.exists()
-    epoch_fields = ["epoch", "loss_total", "avg_weight", "win_rate_proxy"]
+    # `chunks_done` is empty for end-of-epoch rows and populated for
+    # intermediate mid-epoch rows.
+    epoch_fields = ["epoch", "chunks_done", "loss_total", "avg_weight", "win_rate_proxy"]
 
     step = start_step
     with epoch_log_path.open("a", encoding="utf-8", newline="") as fh:
@@ -336,6 +346,23 @@ def _run_awr_refinement_streaming(
             writer.writeheader()
         for epoch in range(int(config["epochs"])):
             log.info("[awr/stream] phase 3.%d: refine epoch", epoch)
+
+            def _on_intermediate(payload: dict, _epoch=epoch) -> None:
+                log.info(
+                    "[awr/stream] epoch %d chunk %d loss=%.4f avg_weight=%.3f "
+                    "win_rate_proxy=%.3f",
+                    _epoch, payload["chunks_done"], payload["loss_total"],
+                    payload["avg_weight"], payload["win_rate_proxy"],
+                )
+                writer.writerow({
+                    "epoch": _epoch,
+                    "chunks_done": payload["chunks_done"],
+                    "loss_total": payload["loss_total"],
+                    "avg_weight": payload["avg_weight"],
+                    "win_rate_proxy": payload["win_rate_proxy"],
+                })
+                fh.flush()
+
             summary = awr_refine_epoch_streaming(
                 model, dataset_factory, baseline, optimizer,
                 beta=beta, max_weight=max_weight,
@@ -346,6 +373,8 @@ def _run_awr_refinement_streaming(
                 held_out_filter=held_out_filter,
                 chunk_size=chunk_size,
                 standardize_advantages=standardize_advantages,
+                eval_every_chunks=eval_every_chunks,
+                intermediate_eval_callback=_on_intermediate,
             )
             log.info(
                 "[awr/stream] epoch %d loss=%.4f avg_weight=%.3f win_rate_proxy=%s",
@@ -355,6 +384,7 @@ def _run_awr_refinement_streaming(
             )
             writer.writerow({
                 "epoch": epoch,
+                "chunks_done": "",  # empty marks the end-of-epoch row
                 "loss_total": summary["loss_total"],
                 "avg_weight": summary["avg_weight"],
                 "win_rate_proxy": "" if summary["win_rate_proxy"] is None

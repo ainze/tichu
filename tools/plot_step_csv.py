@@ -140,32 +140,62 @@ def _plot_epoch_summary(ax, edf: pd.DataFrame) -> None:
     `win_rate_proxy` is the held-out play-head top-1 accuracy and is the
     only out-of-sample signal in the whole pipeline. `avg_weight` shows
     the cumulative AWR sharpening per epoch.
+
+    When the streaming path is run with eval_every_chunks>0, epoch.csv
+    contains BOTH mid-epoch snapshots (chunks_done populated) and
+    end-of-epoch rows (chunks_done empty). Render them as one continuous
+    line indexed by snapshot order, with end-of-epoch boundaries marked
+    by larger filled markers + vertical dashed guides.
     """
-    ep = edf["epoch"]
+    edf = edf.reset_index(drop=True)
+    x = edf.index
     wrp = edf.get("win_rate_proxy")
     aw = edf.get("avg_weight")
+    chunks_done = edf.get("chunks_done")
+
+    # Identify which rows are end-of-epoch markers.
+    if chunks_done is not None:
+        end_mask = chunks_done.astype(str).str.strip().isin(["", "nan"])
+    else:
+        end_mask = pd.Series([True] * len(edf))
+    mid_mask = ~end_mask
 
     plotted = False
     if wrp is not None:
-        # win_rate_proxy may be empty strings when held_out_subset wasn't set.
         wrp_clean = pd.to_numeric(wrp, errors="coerce")
         if wrp_clean.notna().any():
-            ax.plot(ep, wrp_clean, "o-", color="C3", linewidth=1.8, label="win_rate_proxy (held-out)")
+            # Single continuous line through all snapshots, distinct
+            # markers for mid vs end.
+            ax.plot(x, wrp_clean, "-", color="C3", linewidth=1.2, alpha=0.6)
+            if mid_mask.any():
+                ax.plot(
+                    x[mid_mask], wrp_clean[mid_mask],
+                    "o", color="C3", markersize=4, alpha=0.7,
+                    label="win_rate_proxy (mid-epoch)",
+                )
+            if end_mask.any():
+                ax.plot(
+                    x[end_mask], wrp_clean[end_mask],
+                    "s", color="C3", markersize=10, markeredgecolor="black",
+                    markeredgewidth=0.8,
+                    label="win_rate_proxy (end-of-epoch)",
+                )
             ax.set_ylim(0, 1)
             plotted = True
+            # Vertical guide at each end-of-epoch boundary.
+            for xi in x[end_mask]:
+                ax.axvline(xi, color="grey", linestyle=":", alpha=0.3)
     ax.set_ylabel("win_rate_proxy", color="C3")
     ax.tick_params(axis="y", labelcolor="C3")
-    ax.set_xlabel("epoch")
+    ax.set_xlabel("snapshot (mid-epoch evals + end-of-epoch markers)")
     ax.set_title("AWR per-epoch summary")
     ax.grid(True, alpha=0.3)
-    # Integer ticks for epoch counts.
-    ax.set_xticks(list(ep))
 
     if aw is not None:
         aw_clean = pd.to_numeric(aw, errors="coerce")
         if aw_clean.notna().any():
             ax2 = ax.twinx()
-            ax2.plot(ep, aw_clean, "s--", color="C2", linewidth=1.2, alpha=0.85, label="avg_weight")
+            ax2.plot(x, aw_clean, "s--", color="C2", linewidth=1.2, alpha=0.6, markersize=3, label="avg_weight")
             ax2.set_ylabel("avg_weight", color="C2")
             ax2.tick_params(axis="y", labelcolor="C2")
             h1, l1 = ax.get_legend_handles_labels()
@@ -230,7 +260,69 @@ def _plot(csv_path: Path, window: int, out: Path | None) -> None:
         fig.savefig(out, dpi=120, bbox_inches="tight")
         print(f"wrote {out}")
     else:
+        _center_window_on_screen(fig)
         plt.show()
+
+
+def _center_window_on_screen(fig) -> None:
+    """Move the matplotlib window so it's centred on the user's screen.
+
+    Matplotlib doesn't expose this directly — the API differs per
+    backend (Tk, Qt, GTK, Wx). Try each known path, swallow failures
+    silently so the plot still shows even on an unrecognised backend.
+    """
+    try:
+        manager = fig.canvas.manager
+    except AttributeError:
+        return
+    # Force the figure to render once so width/height are known.
+    try:
+        fig.canvas.draw()
+    except Exception:  # noqa: BLE001
+        pass
+
+    window = getattr(manager, "window", None)
+    if window is None:
+        return
+
+    # TkAgg — window is a Tk Toplevel.
+    if hasattr(window, "winfo_screenwidth"):
+        try:
+            window.update_idletasks()
+            w = window.winfo_width()
+            h = window.winfo_height()
+            screen_w = window.winfo_screenwidth()
+            screen_h = window.winfo_screenheight()
+            x = max(0, (screen_w - w) // 2)
+            y = max(0, (screen_h - h) // 2)
+            window.geometry(f"+{x}+{y}")
+            return
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Qt5Agg / QtAgg — window is a QMainWindow.
+    if hasattr(window, "screen") and hasattr(window, "move"):
+        try:
+            geom = window.frameGeometry()
+            screen_geom = window.screen().availableGeometry()
+            x = screen_geom.x() + (screen_geom.width() - geom.width()) // 2
+            y = screen_geom.y() + (screen_geom.height() - geom.height()) // 2
+            window.move(x, y)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+
+    # GTK3Agg — window is a Gtk.Window.
+    if hasattr(window, "get_screen") and hasattr(window, "move"):
+        try:
+            screen = window.get_screen()
+            w, h = window.get_size()
+            x = (screen.get_width() - w) // 2
+            y = (screen.get_height() - h) // 2
+            window.move(x, y)
+            return
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main() -> None:
