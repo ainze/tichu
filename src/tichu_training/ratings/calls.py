@@ -50,23 +50,25 @@ def compute_call_stats(games: Iterable[ParsedGame]) -> dict[str, CallStats]:
         return stats[handle]
 
     for game in games:
-        handles = game.handles
-        if len(handles) != 4:
-            continue
         for r in game.rounds:
+            # Attribute calls to the seat's *round-level* handle so mid-game
+            # substitutions credit the right player. Anonymous seats (empty
+            # handle) are skipped — their stats would aggregate against a
+            # synthetic `""` "player". See ADR-0010.
+            handles = r.handles
             margin_per_team = (
                 r.ergebnis[0] - r.ergebnis[1],
                 r.ergebnis[1] - r.ergebnis[0],
             )
             for seat in r.tichu_callers:
-                if not 0 <= seat < 4:
+                if not 0 <= seat < 4 or not handles[seat]:
                     continue
                 cs = _get(handles[seat])
                 cs.tichu_calls += 1
                 if margin_per_team[seat % 2] >= _SUCCESS_MARGIN:
                     cs.tichu_wins += 1
             for seat in r.grand_tichu_callers:
-                if not 0 <= seat < 4:
+                if not 0 <= seat < 4 or not handles[seat]:
                     continue
                 cs = _get(handles[seat])
                 cs.grand_tichu_calls += 1

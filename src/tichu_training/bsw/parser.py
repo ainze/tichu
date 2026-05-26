@@ -36,14 +36,14 @@ from tichu_training.bsw.records import ParsedAction, ParsedGame, ParsedRound
 from tichu_training.bsw.tokens import _RANK_BY_CODE, parse_card_token
 
 
-_PLAYER_LINE_RE = re.compile(r"^\((\d)\)(\S+)\s*(.*)$")
-_GROSSES_TICHU_RE = re.compile(r"^Grosses Tichu:\s*\((\d)\)(\S+)\s*$")
-_TICHU_RE = re.compile(r"^Tichu:\s*\((\d)\)(\S+)\s*$")
-_DRAGON_RE = re.compile(r"^Drache an:\s*\((\d)\)(\S+)\s*$")
+_PLAYER_LINE_RE = re.compile(r"^\((\d)\)(\S*)\s*(.*)$")
+_GROSSES_TICHU_RE = re.compile(r"^Grosses Tichu:\s*\((\d)\)(\S*)\s*$")
+_TICHU_RE = re.compile(r"^Tichu:\s*\((\d)\)(\S*)\s*$")
+_DRAGON_RE = re.compile(r"^Drache an:\s*\((\d)\)(\S*)\s*$")
 _WUNSCH_RE = re.compile(r"^Wunsch:\s*(\S+)\s*$")
 _ERGEBNIS_RE = re.compile(r"^Ergebnis:\s*(-?\d+)\s*-\s*(-?\d+)\s*$")
-_PASST_RE = re.compile(r"^\((\d)\)(\S+)\s+passt\.\s*$")
-_SCHUPFEN_GIBT_RE = re.compile(r"^\((\d)\)(\S+)\s+gibt:\s*(.*)$")
+_PASST_RE = re.compile(r"^\((\d)\)(\S*)\s+passt\.\s*$")
+_SCHUPFEN_GIBT_RE = re.compile(r"^\((\d)\)(\S*)\s+gibt:\s*(.*)$")
 
 
 class _RoundBuilder:
@@ -77,25 +77,23 @@ class _RoundBuilder:
             schupfen=tuple(self.schupfen),  # type: ignore[arg-type]
             plays=tuple(self.plays),
             ergebnis=self.ergebnis,
+            handles=tuple(h or "" for h in self.handles),  # type: ignore[arg-type]
         )
 
 
 def parse_tch(text: str, *, game_id: str | None = None) -> ParsedGame:
     lines = text.splitlines()
     rounds: list[ParsedRound] = []
-    handles: tuple[str, str, str, str] | None = None
     i = 0
     while i < len(lines):
         if "Gr.Tichukarten" in lines[i]:
             built, i = _parse_round(lines, i, round_index=len(rounds))
-            if handles is None:
-                handles = tuple(built.handles)  # type: ignore[assignment]
             rounds.append(built.finalise())
         else:
             i += 1
-    if handles is None:
+    if not rounds:
         raise ValueError("no rounds found in log")
-    return ParsedGame(game_id=game_id, handles=handles, rounds=tuple(rounds))
+    return ParsedGame(game_id=game_id, rounds=tuple(rounds))
 
 
 def _parse_round(lines: list[str], start: int, *, round_index: int) -> tuple[_RoundBuilder, int]:
@@ -306,21 +304,10 @@ def _consume_action_line(builder: _RoundBuilder, line: str, round_index: int) ->
         )
         return
 
-    # Default: a play line "(N)handle: card card ..."
-    m = _PLAYER_LINE_RE.match(line)
-    if m:
-        body = m.group(3).rstrip()
-        # Trailing colon-then-cards pattern means this is a play. The handle
-        # group already swallowed the colon if the handle had no colon; we
-        # need to check the original line.
-        # Player-line regex matches "(N)handle <rest>", and a play line is
-        # "(N)handle: cards". So group(2) ends with ':' in plays.
-        pass
-
     # Plays are formatted "(N)handle: card card ..." — handle ends with ':'.
-    # The general regex captures handle without the colon, so detect via the
-    # presence of ':' before the cards portion.
-    m = re.match(r"^\((\d)\)(\S+?):\s*(.*)$", line)
+    # Handle may be empty (BSW anonymous seat); the colon is what makes this
+    # a play line.
+    m = re.match(r"^\((\d)\)(\S*?):\s*(.*)$", line)
     if m:
         seat = int(m.group(1))
         body = m.group(3).strip()

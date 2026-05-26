@@ -68,6 +68,35 @@ def test_schupfen_shard_contains_schupfen_rows(tmp_path, games):
     assert all(a.startswith("schupfen:") for a in actions)
 
 
+def test_player_handle_column_uses_per_round_handles_for_substituted_seat(tmp_path):
+    """When a seat's handle changes between rounds (BSW player substitution),
+    each parquet row records the handle that was at the seat *during that
+    round*. The previous game-level snapshot would have mis-attributed all
+    rounds' decisions to the round-0 handle. See ADR-0010."""
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    # Substitute seat 1 from "1David" to "NewPlayer" starting round 1.
+    lines = raw.splitlines()
+    out: list[str] = []
+    in_round_zero = True
+    for line in lines:
+        out.append(line if in_round_zero else line.replace("1David", "NewPlayer"))
+        if line.startswith("Ergebnis:") and in_round_zero:
+            in_round_zero = False
+    spliced = "\n".join(out) + "\n"
+    game = parse_tch(spliced, game_id="sub")
+
+    stream_to_parquet([game], tmp_path)
+    table = pq.read_table(tmp_path / "play_00000.parquet")
+
+    handles = set(table.column("player_handle").to_pylist())
+    # Both identities of seat 1 must appear in the play shard — the previous
+    # `game.handles`-based attribution would only have emitted "1David".
+    assert "1David" in handles, "round-0 seat-1 handle missing"
+    assert "NewPlayer" in handles, (
+        "seat-1 substitution lost — to_parquet is still reading game-level handles"
+    )
+
+
 def test_player_handles_match_seat_assignments(tmp_path, games):
     stream_to_parquet(games, tmp_path)
     table = pq.read_table(tmp_path / "play_00000.parquet")

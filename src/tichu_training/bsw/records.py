@@ -37,10 +37,18 @@ class ParsedRound:
     schupfen: tuple[ParsedAction, ...]
     plays: tuple[ParsedAction, ...]
     ergebnis: tuple[int, int]  # team 0 score, team 1 score for this round
+    # Per-round handles — seat-stable within a round but may change between
+    # rounds (BSW player substitution) or be empty ("") for an Anonymous Seat.
+    # Downstream attribution (parquet `player_handle`, TrueSkill sweep) reads
+    # from here, never from any game-level snapshot. See ADR-0010.
+    handles: tuple[str, str, str, str] = ("", "", "", "")
 
 
 @dataclass(frozen=True)
 class ParsedGame:
+    # Handles are intentionally NOT stored at game-level — they're per-round
+    # to capture BSW mid-game player substitution and anonymous seats. Read
+    # `parsed_round.handles[seat]` for the canonical identity at a given
+    # moment. See ADR-0010.
     game_id: str | None
-    handles: tuple[str, str, str, str]  # seat -> player handle
     rounds: tuple[ParsedRound, ...]

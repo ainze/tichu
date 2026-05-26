@@ -303,7 +303,10 @@ def _emit_records_for_round(
             continue
         player = parsed_action.player
         if 0 <= player < 4:
-            handle = game.handles[player]
+            # Per-round handles capture mid-game substitutions and anonymous
+            # seats correctly; the previous game-level snapshot mis-attributed
+            # post-substitution decisions to the round-0 handle. See ADR-0010.
+            handle = parsed_round.handles[player]
         else:
             handle = ""
         team = player % 2 if 0 <= player < 4 else 0
