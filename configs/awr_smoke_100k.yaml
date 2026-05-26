@@ -8,13 +8,14 @@
 #     --config configs/awr_smoke_100k.yaml `
 #     --run-dir C:\workbench\tichu\data\runs\awr_smoke_100k `
 #     --refine-from C:\workbench\tichu\data\runs\bc_smoke_100k\checkpoints\<latest>.bin `
-#     --max-examples 500000 `
-#     --device cuda -v
+#     --device cuda --workers 11 -v
 #
-# IMPORTANT: --max-examples is effectively mandatory at this dataset size.
-# AWR currently materialises the entire training set into RAM (one big
-# np.stack of features for the value-baseline fit, plus all BCExample
-# objects). 500k examples ≈ a couple of GB; the full 64M would OOM.
+# This config uses the STREAMING AWR path (awr.streaming: true), which
+# never materialises the full dataset into RAM. It re-streams the
+# parquet corpus once per AWR epoch (plus a held-out scan + a baseline
+# fit pass), so wall-time per epoch ≈ one BC epoch. --max-examples is
+# optional — useful for smoke runs against the full corpus without
+# committing to a full sweep.
 
 dataset: parquet
 dataset_kwargs:
@@ -52,6 +53,11 @@ checkpoint_every: 1
 seed: 0
 
 awr:
+  # Opt into the streaming pipeline. Required for full-corpus runs;
+  # also fine on smoke. Set to false to use the in-memory path (which
+  # holds every BCExample in RAM — only viable up to a few million).
+  streaming: true
+
   # exp(advantage / beta) — smaller beta = sharper reweighting, more
   # aggressive policy improvement, higher risk of collapse. 1.0 is a
   # safe starting point.
@@ -61,9 +67,18 @@ awr:
   max_weight: 20.0
   # Value-baseline MLP. Independent of BCModel (no trunk sharing in v1).
   baseline_hidden: 128
-  baseline_epochs: 3
   baseline_lr: 1.0e-3
-  # Slice held out from the materialised subset to compute the per-epoch
-  # win_rate_proxy (play-head top-1 on unseen examples). This is the
-  # only out-of-sample signal in the loop — watch epoch.csv for it.
-  held_out_fraction: 0.1
+  # Streaming-specific: how many SGD passes over each chunk during the
+  # one-shot baseline fit. Higher ⇒ baseline sees more updates per
+  # example without re-streaming.
+  baseline_sgd_steps_per_chunk: 3
+  # Examples per chunk for the baseline forward + per-chunk AWR
+  # max-subtract. Larger ⇒ closer to dataset-wide normalisation but
+  # more GPU/CPU memory at peak.
+  chunk_size: 16384
+  # Per-mille hash-based partitioning into held-out vs train. Capped
+  # in absolute terms by max_held_out — anything beyond the cap that
+  # matches the hash is *still* skipped during training (so the model
+  # never sees a potential eval example), it just isn't stored.
+  held_out_fraction: 0.05
+  max_held_out: 20000
