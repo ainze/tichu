@@ -27,7 +27,7 @@ ratings table if one is provided. `sample_weight` is `1.0` for games whose
 else `recency_weight` (default `0.5`).
 """
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -39,6 +39,7 @@ import pyarrow.parquet as pq
 from tichu_engine.cards import Card, SpecialCard
 from tichu_engine.combinations import CardOrSpecial
 from tichu_training.action_space import ACTION_SPACE_VERSION
+from tichu_training.bsw.parser import parse_tch
 from tichu_training.bsw.records import ParsedAction, ParsedGame, ParsedRound
 from tichu_training.bsw.replay import ReplayResult, replay_round
 from tichu_training.featurizer import FEATURIZER_VERSION
@@ -119,6 +120,9 @@ class _GameResult:
     rounds_total: int
     rounds_matched: int
     failures: list[RoundFailure]
+    # Set by `_parse_and_process` when parse_tch raised. `records` / `rounds_*`
+    # are empty in that case; `parse_error` is the exception's `str()`.
+    parse_error: str | None = None
 
     @property
     def had_failure(self) -> bool:
@@ -165,6 +169,36 @@ def _process_game(
     )
 
 
+def _parse_and_process(
+    pair: tuple[str, str],
+    *,
+    skill_lookup: dict[str, int | None],
+    recency_cutoff_game_id: int,
+    recency_weight: float,
+) -> _GameResult:
+    """Worker for `stream_raw_to_parquet`: parse `.tch` text + replay + emit
+    in one process boundary crossing. Moves the parse cost off the dispatcher
+    and halves the per-game pickle size (raw text < pickled ParsedGame)."""
+    game_id, text = pair
+    try:
+        game = parse_tch(text, game_id=game_id)
+    except Exception as exc:  # noqa: BLE001 — surface every parse failure
+        return _GameResult(
+            game_id=game_id,
+            records=[],
+            rounds_total=0,
+            rounds_matched=0,
+            failures=[],
+            parse_error=str(exc),
+        )
+    return _process_game(
+        game,
+        skill_lookup=skill_lookup,
+        recency_cutoff_game_id=recency_cutoff_game_id,
+        recency_weight=recency_weight,
+    )
+
+
 def _classify_round_failure(
     game_id: str, parsed: ParsedRound, replay: ReplayResult,
 ) -> RoundFailure | None:
@@ -201,6 +235,9 @@ class StreamStats:
     row_counts: dict[str, int] = field(default_factory=lambda: {t: 0 for t in _KNOWN_DECISION_TYPES})
     failed_game_ids: list[str] = field(default_factory=list)
     round_failures: list[RoundFailure] = field(default_factory=list)
+    # Populated only by `stream_raw_to_parquet` (parse runs in workers).
+    # `stream_to_parquet` callers parse upstream and surface failures themselves.
+    parse_failures: list[str] = field(default_factory=list)
 
 
 def stream_to_parquet(
@@ -212,11 +249,72 @@ def stream_to_parquet(
     recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
     rows_per_flush: int = _DEFAULT_ROWS_PER_FLUSH,
     workers: int = 1,
-    chunksize: int = 16,
     on_game_done: Callable[["StreamStats"], None] | None = None,
 ) -> StreamStats:
-    """Stream parsed games to per-decision Parquet shards, filtering at the
-    Round granularity (see ADR-0009).
+    """Stream pre-parsed games to per-decision Parquet shards, filtering at
+    the Round granularity (see ADR-0009).
+
+    Prefer `stream_raw_to_parquet` for production runs over `.tch` archives:
+    it parses inside workers, which removes parse_tch from the serial
+    dispatcher path (the dominant bottleneck at workers >= 4) and halves the
+    per-game pickle size.
+    """
+    skill_lookup = _load_skill_lookup(ratings_path) if ratings_path else {}
+    worker = partial(
+        _process_game,
+        skill_lookup=skill_lookup,
+        recency_cutoff_game_id=recency_cutoff_game_id,
+        recency_weight=recency_weight,
+    )
+    return _run_stream(
+        games, output_dir, worker,
+        rows_per_flush=rows_per_flush,
+        workers=workers,
+        on_game_done=on_game_done,
+    )
+
+
+def stream_raw_to_parquet(
+    pairs: Iterable[tuple[str, str]],
+    output_dir: Path,
+    *,
+    ratings_path: str | Path | None = None,
+    recency_cutoff_game_id: int = _DEFAULT_RECENCY_CUTOFF,
+    recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
+    rows_per_flush: int = _DEFAULT_ROWS_PER_FLUSH,
+    workers: int = 1,
+    on_game_done: Callable[["StreamStats"], None] | None = None,
+) -> StreamStats:
+    """Stream raw `(game_id, tch_text)` pairs to per-decision Parquet shards,
+    parsing inside the worker process. Parse failures are recorded in
+    `StreamStats.parse_failures` and surface via `on_game_done` like any
+    other completed game (so the progress bar advances)."""
+    skill_lookup = _load_skill_lookup(ratings_path) if ratings_path else {}
+    worker = partial(
+        _parse_and_process,
+        skill_lookup=skill_lookup,
+        recency_cutoff_game_id=recency_cutoff_game_id,
+        recency_weight=recency_weight,
+    )
+    return _run_stream(
+        pairs, output_dir, worker,
+        rows_per_flush=rows_per_flush,
+        workers=workers,
+        on_game_done=on_game_done,
+    )
+
+
+def _run_stream(
+    source: Iterable,
+    output_dir: Path,
+    worker: Callable,
+    *,
+    rows_per_flush: int,
+    workers: int,
+    on_game_done: Callable[["StreamStats"], None] | None,
+) -> StreamStats:
+    """Shared dispatch loop. `worker` consumes one source item and returns a
+    `_GameResult` (possibly with `parse_error` set).
 
     One `ParquetWriter` is opened lazily per decision type the first time a
     row of that type is buffered, and closed in `try/finally` so partial runs
@@ -226,7 +324,6 @@ def stream_to_parquet(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    skill_lookup = _load_skill_lookup(ratings_path) if ratings_path else {}
 
     stats = StreamStats()
     buffers: dict[str, list[_Record]] = {t: [] for t in _KNOWN_DECISION_TYPES}
@@ -245,38 +342,52 @@ def stream_to_parquet(
 
     def _apply(result: _GameResult) -> None:
         stats.games_total += 1
-        stats.rounds_total += result.rounds_total
-        stats.rounds_matched += result.rounds_matched
-        if result.had_failure:
-            stats.games_with_failed_rounds += 1
-            stats.failed_game_ids.append(result.game_id)
+        if result.parse_error is not None:
+            stats.parse_failures.append(result.game_id)
         else:
-            stats.games_fully_matched += 1
-        stats.round_failures.extend(result.failures)
-        for record in result.records:
-            buffers[record.decision_type].append(record)
-            stats.row_counts[record.decision_type] += 1
-        for decision_type, buf in buffers.items():
-            if len(buf) >= rows_per_flush:
-                _flush(decision_type)
+            stats.rounds_total += result.rounds_total
+            stats.rounds_matched += result.rounds_matched
+            if result.had_failure:
+                stats.games_with_failed_rounds += 1
+                stats.failed_game_ids.append(result.game_id)
+            else:
+                stats.games_fully_matched += 1
+            stats.round_failures.extend(result.failures)
+            for record in result.records:
+                buffers[record.decision_type].append(record)
+                stats.row_counts[record.decision_type] += 1
+            for decision_type, buf in buffers.items():
+                if len(buf) >= rows_per_flush:
+                    _flush(decision_type)
         if on_game_done is not None:
             on_game_done(stats)
 
-    worker = partial(
-        _process_game,
-        skill_lookup=skill_lookup,
-        recency_cutoff_game_id=recency_cutoff_game_id,
-        recency_weight=recency_weight,
-    )
-
     try:
         if workers <= 1:
-            for game in games:
-                _apply(worker(game))
+            for item in source:
+                _apply(worker(item))
         else:
+            # Sliding-window submit + wait so `on_game_done` fires per game (not
+            # per `pool.map` chunk) and the input iterator isn't drained upfront.
+            source_iter = iter(source)
+            pending: set = set()
+            max_pending = workers * 2
+
+            def _top_up(n: int) -> None:
+                for _ in range(n):
+                    try:
+                        item = next(source_iter)
+                    except StopIteration:
+                        return
+                    pending.add(pool.submit(worker, item))
+
             with ProcessPoolExecutor(max_workers=workers) as pool:
-                for result in pool.map(worker, games, chunksize=chunksize):
-                    _apply(result)
+                _top_up(max_pending)
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        _apply(fut.result())
+                    _top_up(len(done))
         for decision_type in _KNOWN_DECISION_TYPES:
             _flush(decision_type)
             if decision_type not in writers:

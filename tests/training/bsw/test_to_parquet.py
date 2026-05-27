@@ -196,3 +196,52 @@ def test_row_counts_returned_match_disk(tmp_path, games):
             continue
         table = pq.read_table(tmp_path / f"{decision_type}_00000.parquet")
         assert table.num_rows == n
+
+
+def test_stream_raw_parses_inside_workers_and_records_parse_failures(tmp_path):
+    """`stream_raw_to_parquet` parses .tch text in workers; parse failures are
+    surfaced in StreamStats.parse_failures (not raised) so the dispatch loop
+    keeps draining the iterator and the progress bar still advances."""
+    from tichu_training.bsw.to_parquet import stream_raw_to_parquet
+
+    good_text = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    pairs = [
+        ("2417500", good_text),
+        ("garbage", "this is not a .tch file at all"),
+    ]
+    callbacks = 0
+    def _on_done(_stats):
+        nonlocal callbacks
+        callbacks += 1
+
+    stats = stream_raw_to_parquet(pairs, tmp_path, workers=1, on_game_done=_on_done)
+    assert callbacks == 2
+    assert stats.parse_failures == ["garbage"]
+    assert stats.games_fully_matched + stats.games_with_failed_rounds == 1
+    # Real game still produced rows.
+    table = pq.read_table(tmp_path / "play_00000.parquet")
+    assert table.num_rows > 0
+
+
+def test_multi_worker_matches_single_worker(tmp_path, games):
+    """workers>1 must produce the same row counts and fire on_game_done per
+    game (not per chunk). Previously `pool.map(chunksize=16)` batched results
+    so on_game_done was never invoked for runs smaller than one chunk."""
+    single_dir = tmp_path / "single"
+    multi_dir = tmp_path / "multi"
+
+    callback_count = 0
+    def _on_done(_stats):
+        nonlocal callback_count
+        callback_count += 1
+
+    single_stats = stream_to_parquet(games, single_dir, workers=1, on_game_done=_on_done)
+    assert callback_count == len(games)
+
+    callback_count = 0
+    multi_stats = stream_to_parquet(games, multi_dir, workers=2, on_game_done=_on_done)
+    assert callback_count == len(games)
+
+    assert single_stats.row_counts == multi_stats.row_counts
+    assert single_stats.games_fully_matched == multi_stats.games_fully_matched
+    assert single_stats.rounds_matched == multi_stats.rounds_matched
