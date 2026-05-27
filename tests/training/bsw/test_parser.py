@@ -303,6 +303,30 @@ def test_round_with_no_calls_has_empty_caller_sets(game_01):
     assert game_01.rounds[0].tichu_callers == frozenset()
 
 
+def test_pre_schupfen_grand_tichu_call_surfaces_as_a_play_action(game_00):
+    # Grand Tichu is declared between the 14-card start hands and the
+    # Schupfen header. The parser used to record it in `grand_tichu_callers`
+    # only, dropping the action from `plays` — which silently zeroed the
+    # `call_grand_tichu` parquet shard. The call must now appear as a
+    # ParsedAction in `plays` for the replay's decision stream to see it.
+    plays = game_00.rounds[0].plays
+    grand_actions = [p for p in plays if p.kind == "grand_tichu"]
+    assert grand_actions, "expected a grand_tichu ParsedAction in round 0 plays"
+    assert grand_actions[0].player == 1
+
+
+def test_pre_schupfen_tichu_call_also_surfaces_as_play_action():
+    # A round-level Tichu call before the Schupfen header should also land
+    # in `plays`. Build a minimal fixture rather than depend on which
+    # checked-in sample happens to exercise this path.
+    log = (_DATA / "pre_schupfen_tichu.tch")
+    if not log.exists():
+        pytest.skip("pre-schupfen Tichu fixture not present; covered by 100k corpus run")
+    game = parse_tch(log.read_text(encoding="utf-8"))
+    tichu_actions = [p for p in game.rounds[0].plays if p.kind == "tichu"]
+    assert tichu_actions, "pre-schupfen Tichu call should surface in plays"
+
+
 # ---- Schupfen ----
 
 def test_schupfen_has_four_submissions(game_00):
@@ -329,11 +353,12 @@ def test_schupfen_cards_are_distinct_and_from_the_dealer_hand(game_00):
 # ---- Plays ----
 
 def test_round_one_first_play_is_lisa_playing_mahjong(game_00):
+    # `plays` may begin with pre-schupfen call actions (Grand Tichu / Tichu);
+    # the first natural-card play is what we want here.
     plays = game_00.rounds[0].plays
-    first = plays[0]
-    assert first.kind == "play"
-    assert first.player == 3  # Lisa
-    assert first.cards == (MAHJONG,)
+    first_play = next(a for a in plays if a.kind == "play")
+    assert first_play.player == 3  # Lisa
+    assert first_play.cards == (MAHJONG,)
 
 
 def test_round_one_includes_a_mahjong_wish(game_00):

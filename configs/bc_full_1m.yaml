@@ -29,7 +29,7 @@ dataset_kwargs:
   shards_dir: C:\workbench\tichu\data\parquet_1m
   archive_path: C:\workbench\tichu\data\archive.zst
   ratings_path: C:\workbench\tichu\data\ratings_1m.parquet
-  expected_featurizer_version: v1
+  expected_featurizer_version: v2
   expected_action_space_version: v1
 
 # bc_full architecture per configs/bc_full.yaml — 4-layer 1024-hidden

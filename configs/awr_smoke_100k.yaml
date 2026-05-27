@@ -19,10 +19,10 @@
 
 dataset: parquet
 dataset_kwargs:
-  shards_dir: C:\workbench\tichu\data\parquet_100k
+  shards_dir: C:\workbench\tichu\data\parquet_100k_v2
   archive_path: C:\workbench\tichu\data\archive.zst
   ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
-  expected_featurizer_version: v1
+  expected_featurizer_version: v2
   expected_action_space_version: v1
 
 # MUST match the BC checkpoint's architecture exactly — the model is

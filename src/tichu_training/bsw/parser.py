@@ -151,17 +151,28 @@ def _parse_round(lines: list[str], start: int, *, round_index: int) -> tuple[_Ro
 
     # Optional Grosses Tichu / Tichu calls, then the Schupfen header.
     # A regular `Tichu:` call is legal here — a player who's just seen their
-    # 14-card hand may declare Tichu before passing.
+    # 14-card hand may declare Tichu before passing. We surface both call
+    # kinds as ParsedActions in `builder.plays` (in addition to recording
+    # the seat in the corresponding `*_callers` set for end-of-round
+    # scoring) so the replay's decision stream — and downstream consumers
+    # like the parquet emitter and the call-network dataset — see the call
+    # decision. Without this, Grand Tichu (which is ALWAYS declared in
+    # this block) never reaches the action stream, and pre-schupfen Tichu
+    # calls are dropped too.
     while i < len(lines):
         line = lines[i].rstrip()
         m = _GROSSES_TICHU_RE.match(line)
         if m:
-            builder.grand_tichu_callers.add(int(m.group(1)))
+            seat = int(m.group(1))
+            builder.grand_tichu_callers.add(seat)
+            builder.plays.append(ParsedAction(player=seat, kind="grand_tichu"))
             i += 1
             continue
         m = _TICHU_RE.match(line)
         if m:
-            builder.tichu_callers.add(int(m.group(1)))
+            seat = int(m.group(1))
+            builder.tichu_callers.add(seat)
+            builder.plays.append(ParsedAction(player=seat, kind="tichu"))
             i += 1
             continue
         if line.startswith("Schupfen:"):
