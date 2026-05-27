@@ -1,0 +1,101 @@
+# AWR offline-RL refinement against the 100k parquet manifest.
+# Refines a BC checkpoint (must have been trained with the matching
+# model architecture below).
+#
+# Run from the worktree:
+#
+#   python -m tichu_training.cli.train_bc `
+#     --config configs/awr_smoke_100k.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\awr_smoke_100k `
+#     --refine-from C:\workbench\tichu\data\runs\bc_smoke_100k\checkpoints\<latest>.bin `
+#     --device cuda --workers 11 -v
+#
+# This config uses the STREAMING AWR path (awr.streaming: true), which
+# never materialises the full dataset into RAM. It re-streams the
+# parquet corpus once per AWR epoch (plus a held-out scan + a baseline
+# fit pass), so wall-time per epoch ≈ one BC epoch. --max-examples is
+# optional — useful for smoke runs against the full corpus without
+# committing to a full sweep.
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_100k
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
+  expected_featurizer_version: v1
+  expected_action_space_version: v1
+
+# MUST match the BC checkpoint's architecture exactly — the model is
+# instantiated from this config and the checkpoint weights loaded in.
+# These match configs/bc_smoke_parquet.yaml.
+model:
+  trunk_hidden: 256
+  trunk_depth: 2
+  trunk_out_dim: 128
+  skill_dim: 32
+  head_hidden: 64
+
+# Smaller LR than BC: AWR is refining an already-converged policy. A
+# large step would undo the BC pretraining before the gradient becomes
+# meaningful.
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+# Each "epoch" here is a single weighted-BC pass over the materialised
+# subset, so 4 epochs is plenty for a smoke. The final AWR checkpoint is
+# always written; mid-epoch saves aren't needed at this scale.
+checkpoint_every: 1
+seed: 0
+
+awr:
+  # Opt into the streaming pipeline. Required for full-corpus runs;
+  # also fine on smoke. Set to false to use the in-memory path (which
+  # holds every BCExample in RAM — only viable up to a few million).
+  streaming: true
+
+  # Standardise advantages to unit variance per chunk before computing
+  # weights. Required for Tichu — raw round_outcome ranges ±200, so
+  # without this the per-chunk max-subtract collapses every weight
+  # except the single max example to ~0. With standardisation, beta
+  # behaves as in the AWR paper (calibrated against unit-variance
+  # advantages). Set false ONLY if you've already centred + normalised
+  # outcomes upstream.
+  standardize_advantages: true
+
+  # exp(advantage / beta) — smaller beta = sharper reweighting, more
+  # aggressive policy improvement, higher risk of collapse. 1.0 is a
+  # safe starting point with standardised advantages.
+  beta: 1.0
+  # Hard ceiling on per-example weight to stop one lucky round from
+  # dominating the gradient.
+  max_weight: 20.0
+  # Value-baseline MLP. Independent of BCModel (no trunk sharing in v1).
+  baseline_hidden: 128
+  baseline_lr: 1.0e-3
+  # Streaming-specific: how many SGD passes over each chunk during the
+  # one-shot baseline fit. Higher ⇒ baseline sees more updates per
+  # example without re-streaming.
+  baseline_sgd_steps_per_chunk: 3
+  # Examples per chunk for the baseline forward + per-chunk AWR
+  # max-subtract. Larger ⇒ closer to dataset-wide normalisation but
+  # more GPU/CPU memory at peak.
+  chunk_size: 16384
+  # Per-mille hash-based partitioning into held-out vs train. Capped
+  # in absolute terms by max_held_out — anything beyond the cap that
+  # matches the hash is *still* skipped during training (so the model
+  # never sees a potential eval example), it just isn't stored.
+  held_out_fraction: 0.05
+  max_held_out: 20000
+  # Mid-epoch held-out eval cadence. 0 disables (legacy: one row per
+  # epoch). N>0 writes an intermediate epoch.csv row with chunks_done
+  # populated every N chunks. With chunk_size=16384 and the smoke
+  # capped at 500k examples, 1 chunk ≈ 1/30th of an epoch, so
+  # eval_every_chunks=5 gives ~6 mid-epoch snapshots per refine pass.
+  # Each eval is a forward pass over the held-out subset (~20k
+  # examples, ~1s on GPU).
+  eval_every_chunks: 5

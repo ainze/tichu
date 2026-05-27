@@ -37,5 +37,6 @@ head_weights:
   wish: 0.3
   dragon_assignment: 0.2
 
-checkpoint_every: 100000  # one checkpoint at end of epoch (small enough to never hit otherwise)
+checkpoint_every: 100000          # epoch-counter cadence (always saves end-of-last-epoch anyway)
+checkpoint_every_batches: 20000   # mid-epoch save every 20k fired batches (~hourly on smoke)
 seed: 0

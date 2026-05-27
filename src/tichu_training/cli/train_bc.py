@@ -16,8 +16,14 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
+from tqdm import tqdm
 
 from tichu_training.awr.refine import awr_refine_epoch
+from tichu_training.awr.streaming import (
+    awr_refine_epoch_streaming,
+    collect_held_out,
+    fit_value_baseline_streaming,
+)
 from tichu_training.awr.value_baseline import ValueBaseline, fit_value_baseline
 from tichu_training.bc.dataset import ParquetBCDataset, SyntheticBCDataset
 from tichu_training.bc.heads import BCModel
@@ -58,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(name)s %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%H:%M:%S",
     )
 
     config_path = Path(args.config)
@@ -102,18 +109,43 @@ def main(argv: list[str] | None = None) -> int:
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_every = int(config.get("checkpoint_every", 1000))
+    # Mid-epoch checkpointing: save every N fired batches inside an epoch.
+    # 0 disables, matching the legacy "only at epoch boundary" behaviour.
+    # Crucial for full-corpus epochs that take hours — otherwise AWR refine
+    # and --resume have no recent target.
+    checkpoint_every_batches = int(config.get("checkpoint_every_batches", 0))
     head_weights = {k: float(v) for k, v in config.get("head_weights", {}).items()}
 
     if args.refine_from:
-        # AWR requires the full dataset materialised (value-baseline fit is
-        # one-shot, not per-batch). Drain the iterable once and pass the
-        # list through. Respect --max-examples here too — caller may want
-        # a quick AWR smoke without committing to the full sweep.
+        awr_cfg = config.get("awr") or {}
+        if awr_cfg.get("streaming", False):
+            # Streaming AWR: never materialise the full dataset. The
+            # dataset is iterated fresh once per AWR epoch (plus one
+            # held-out scan + one baseline-fit pass). Required for the
+            # full 2.4M-game / ~1.5B-decision corpus where the
+            # materialised version would need ~100 TB of RAM.
+            return _run_awr_refinement_streaming(
+                model, optimizer, dataset, args, config, run_dir,
+                log_path=log_path, ckpt_dir=ckpt_dir,
+                head_weights=head_weights, start_step=start_step,
+            )
+
+        # In-memory AWR: drain the iterable once and pass the list
+        # through. Respect --max-examples — caller may want a quick AWR
+        # smoke without committing to the full sweep.
         refine_iter = (
             _capped(dataset, args.max_examples)
             if args.max_examples is not None else dataset
         )
-        dataset_examples = list(refine_iter)
+        # The drain takes minutes on real parquet — show a bar so the
+        # user knows the run hasn't hung. n_rows is set on both
+        # _CappedIterable and the parquet datasets.
+        total = getattr(refine_iter, "n_rows", None)
+        dataset_examples = list(tqdm(
+            refine_iter, total=total, unit="ex", dynamic_ncols=True,
+            desc="awr materialise",
+        ))
+        log.info("materialised %d examples for AWR refinement", len(dataset_examples))
         return _run_awr_refinement(
             model, optimizer, dataset_examples, config, run_dir,
             log_path=log_path, ckpt_dir=ckpt_dir,
@@ -129,6 +161,11 @@ def main(argv: list[str] | None = None) -> int:
             _capped(dataset, args.max_examples)
             if args.max_examples is not None else dataset
         )
+        def _save_mid_epoch(batch_step: int) -> None:
+            ckpt_path = ckpt_dir / f"step_e{epoch:03d}_b{batch_step:08d}.bin"
+            save_checkpoint(model, optimizer, step=batch_step, path=ckpt_path)
+            log.info("saved mid-epoch checkpoint %s", ckpt_path)
+
         loss = train_one_epoch(
             model,
             epoch_iter,
@@ -136,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=int(config["batch_size"]),
             log_path=log_path,
             head_weights=head_weights or None,
+            checkpoint_every_batches=checkpoint_every_batches,
+            checkpoint_fn=_save_mid_epoch if checkpoint_every_batches else None,
         )
         log.info("epoch %d final batch loss=%.4f", epoch, loss)
         # Conservative checkpoint cadence: one per epoch is fine for smoke.
@@ -167,6 +206,9 @@ def _run_awr_refinement(
     train_set = dataset_examples[:split]
     held_out = dataset_examples[split:] or None
 
+    # Stack features once and share with both fit_value_baseline and the
+    # per-epoch awr_refine_epoch calls — re-stacking is the dominant
+    # memory hit on multi-million-row training sets.
     features = np.stack([e.features for e in train_set])
     outcomes = np.array([e.round_outcome for e in train_set], dtype=np.float32)
     baseline_mse = fit_value_baseline(
@@ -179,7 +221,9 @@ def _run_awr_refinement(
 
     epoch_log_path = run_dir / "epoch.csv"
     new_epoch_log = not epoch_log_path.exists()
-    epoch_fields = ["epoch", "loss_total", "avg_weight", "win_rate_proxy"]
+    # Shared schema with the streaming path. `chunks_done` is always
+    # empty here (the in-memory path doesn't do mid-epoch evals).
+    epoch_fields = ["epoch", "chunks_done", "loss_total", "avg_weight", "win_rate_proxy"]
 
     step = start_step
     with epoch_log_path.open("a", encoding="utf-8", newline="") as fh:
@@ -194,6 +238,7 @@ def _run_awr_refinement(
                 log_path=log_path,
                 held_out_subset=held_out,
                 head_weights=head_weights or None,
+                features=features,
             )
             log.info(
                 "[awr] epoch %d loss=%.4f avg_weight=%.3f win_rate_proxy=%s",
@@ -202,12 +247,158 @@ def _run_awr_refinement(
             )
             writer.writerow({
                 "epoch": epoch,
+                "chunks_done": "",
                 "loss_total": summary["loss_total"],
                 "avg_weight": summary["avg_weight"],
                 "win_rate_proxy": "" if summary["win_rate_proxy"] is None
                                   else summary["win_rate_proxy"],
             })
+            # Flush per-row so epoch.csv is a live monitor and a crash
+            # mid-run preserves the rows we've already produced.
+            fh.flush()
             step += 1
+
+    ckpt_path = ckpt_dir / f"awr_final_step_{step:06d}.bin"
+    save_checkpoint(model, optimizer, step=step, path=ckpt_path)
+    log.info("saved AWR checkpoint %s", ckpt_path)
+    return 0
+
+
+def _run_awr_refinement_streaming(
+    model, optimizer, dataset, args, config, run_dir,
+    *, log_path, ckpt_dir, head_weights, start_step,
+):
+    """Full-corpus AWR refinement that never materialises the dataset.
+
+    The dataset is iterated fresh once per phase:
+      * held-out scan (stops early once `max_held_out` is hit)
+      * single baseline-fit pass
+      * one fresh pass per AWR epoch
+
+    With ParallelParquetBCDataset each pass spawns its worker pool
+    again. Adds tens of seconds of startup per pass; for the full
+    corpus that's negligible against the multi-hour stream.
+    """
+    awr_cfg = config.get("awr") or {}
+    beta = float(awr_cfg.get("beta", 1.0))
+    max_weight = float(awr_cfg.get("max_weight", 20.0))
+    held_out_fraction = float(awr_cfg.get("held_out_fraction", 0.05))
+    max_held_out = int(awr_cfg.get("max_held_out", 20_000))
+    chunk_size = int(awr_cfg.get("chunk_size", 16_384))
+    standardize_advantages = bool(awr_cfg.get("standardize_advantages", True))
+    # Mid-epoch win_rate_proxy logging. 0 disables; N>0 evaluates the
+    # held-out subset every N chunks and writes an intermediate row to
+    # epoch.csv. Lets you see refinement progress without waiting for a
+    # full epoch (hours on the full corpus).
+    eval_every_chunks = int(awr_cfg.get("eval_every_chunks", 0))
+
+    # Each call returns a fresh iterator. iter() on a list, ParquetBCDataset,
+    # or ParallelParquetBCDataset all yield a new pass.
+    def dataset_factory():
+        capped = (
+            _capped(dataset, args.max_examples)
+            if args.max_examples is not None else dataset
+        )
+        return iter(capped)
+
+    log.info("[awr/stream] phase 1: scanning for held-out subset "
+             "(fraction=%.3f, cap=%d)", held_out_fraction, max_held_out)
+    held_out, held_out_filter = collect_held_out(
+        dataset_factory,
+        fraction=held_out_fraction,
+        max_held_out=max_held_out,
+    )
+    log.info("[awr/stream] held-out subset: %d examples", len(held_out))
+    if not held_out:
+        log.warning("[awr/stream] held-out subset is empty; win_rate_proxy "
+                    "will be n/a for every epoch")
+
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    feature_dim = (
+        held_out[0].features.shape[0] if held_out else FEATURIZER_OUTPUT_DIM
+    )
+    baseline = ValueBaseline(
+        feature_dim=feature_dim,
+        hidden=int(awr_cfg.get("baseline_hidden", 128)),
+    )
+
+    log.info("[awr/stream] phase 2: fitting value baseline by stream")
+    baseline_mse = fit_value_baseline_streaming(
+        baseline, dataset_factory,
+        batch_size=int(config["batch_size"]),
+        lr=float(awr_cfg.get("baseline_lr", 1.0e-3)),
+        chunk_size=chunk_size,
+        sgd_steps_per_chunk=int(awr_cfg.get("baseline_sgd_steps_per_chunk", 3)),
+        held_out_filter=held_out_filter,
+    )
+    log.info("[awr/stream] baseline MSE after fit: %.4f", baseline_mse)
+
+    epoch_log_path = run_dir / "epoch.csv"
+    new_epoch_log = not epoch_log_path.exists()
+    # `chunks_done` is empty for end-of-epoch rows and populated for
+    # intermediate mid-epoch rows.
+    epoch_fields = ["epoch", "chunks_done", "loss_total", "avg_weight", "win_rate_proxy"]
+
+    step = start_step
+    with epoch_log_path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=epoch_fields)
+        if new_epoch_log:
+            writer.writeheader()
+        for epoch in range(int(config["epochs"])):
+            log.info("[awr/stream] phase 3.%d: refine epoch", epoch)
+
+            def _on_intermediate(payload: dict, _epoch=epoch) -> None:
+                log.info(
+                    "[awr/stream] epoch %d chunk %d loss=%.4f avg_weight=%.3f "
+                    "win_rate_proxy=%.3f",
+                    _epoch, payload["chunks_done"], payload["loss_total"],
+                    payload["avg_weight"], payload["win_rate_proxy"],
+                )
+                writer.writerow({
+                    "epoch": _epoch,
+                    "chunks_done": payload["chunks_done"],
+                    "loss_total": payload["loss_total"],
+                    "avg_weight": payload["avg_weight"],
+                    "win_rate_proxy": payload["win_rate_proxy"],
+                })
+                fh.flush()
+
+            summary = awr_refine_epoch_streaming(
+                model, dataset_factory, baseline, optimizer,
+                beta=beta, max_weight=max_weight,
+                batch_size=int(config["batch_size"]),
+                log_path=log_path,
+                head_weights=head_weights or None,
+                held_out_examples=held_out or None,
+                held_out_filter=held_out_filter,
+                chunk_size=chunk_size,
+                standardize_advantages=standardize_advantages,
+                eval_every_chunks=eval_every_chunks,
+                intermediate_eval_callback=_on_intermediate,
+            )
+            log.info(
+                "[awr/stream] epoch %d loss=%.4f avg_weight=%.3f win_rate_proxy=%s",
+                epoch, summary["loss_total"], summary["avg_weight"],
+                "n/a" if summary["win_rate_proxy"] is None
+                else f"{summary['win_rate_proxy']:.3f}",
+            )
+            writer.writerow({
+                "epoch": epoch,
+                "chunks_done": "",  # empty marks the end-of-epoch row
+                "loss_total": summary["loss_total"],
+                "avg_weight": summary["avg_weight"],
+                "win_rate_proxy": "" if summary["win_rate_proxy"] is None
+                                  else summary["win_rate_proxy"],
+            })
+            # Flush per-row so epoch.csv is a live monitor and a crash
+            # mid-run preserves the rows we've already produced.
+            fh.flush()
+            step += 1
+            # Per-epoch checkpoint so a long full-corpus run can be
+            # resumed without retraining from scratch on a crash.
+            ckpt_path = ckpt_dir / f"awr_epoch_{epoch:03d}_step_{step:06d}.bin"
+            save_checkpoint(model, optimizer, step=step, path=ckpt_path)
+            log.info("[awr/stream] saved epoch checkpoint %s", ckpt_path)
 
     ckpt_path = ckpt_dir / f"awr_final_step_{step:06d}.bin"
     save_checkpoint(model, optimizer, step=step, path=ckpt_path)
