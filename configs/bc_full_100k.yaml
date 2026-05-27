@@ -20,7 +20,7 @@
 
 dataset: parquet
 dataset_kwargs:
-  shards_dir: C:\workbench\tichu\data\parquet_100k
+  shards_dir: C:\workbench\tichu\data\parquet_100k_v2
   archive_path: C:\workbench\tichu\data\archive.zst
   ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
   expected_featurizer_version: v2
