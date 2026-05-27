@@ -1,4 +1,4 @@
-"""Featurizer (v1): shape, dtype, purity, version pinning."""
+"""Featurizer (v2): shape, dtype, purity, version pinning."""
 
 import subprocess
 import sys
@@ -50,8 +50,8 @@ def _simple_private_state(player: int = 0) -> PrivateState:
     return PrivateState(player=player, hand=hand, public=public)
 
 
-def test_version_is_pinned_to_v1():
-    assert FEATURIZER_VERSION == "v1"
+def test_version_is_pinned_to_v2():
+    assert FEATURIZER_VERSION == "v2"
 
 
 def test_output_is_float32_and_correct_shape():
@@ -142,6 +142,58 @@ def test_featurize_handles_all_engine_phases(simple_phases):
     for state in simple_phases:
         feat = featurize(state)
         assert feat.shape == (FEATURIZER_OUTPUT_DIM,)
+
+
+# ---- v2: seen_cards section ----
+
+def test_seen_cards_section_dim_is_56():
+    assert SECTION_DIMS["seen_cards"] == 56
+
+
+def _seen_cards_section(feat: np.ndarray) -> np.ndarray:
+    """Slice the trailing seen_cards section from a featurised state."""
+    start = FEATURIZER_OUTPUT_DIM - SECTION_DIMS["seen_cards"]
+    return feat[start:]
+
+
+def test_seen_cards_section_is_empty_when_nothing_played():
+    s = _simple_private_state()
+    feat = featurize(s)
+    assert _seen_cards_section(feat).sum() == 0.0
+
+
+def test_seen_cards_section_reflects_played_cards_this_round():
+    played = frozenset({Card(Suit.JADE, 7), DRAGON, PHOENIX})
+    hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
+    public = PublicState(
+        current_player=0,
+        hand_sizes=(14, 14, 14, 14),
+        scores=(0, 0),
+        trick=Trick.empty(),
+        played_cards_this_round=played,
+    )
+    s = PrivateState(player=0, hand=hand, public=public)
+    feat = featurize(s)
+    seen = _seen_cards_section(feat)
+    assert seen.sum() == 3.0
+
+
+def test_seen_cards_includes_specials_separately_from_naturals():
+    # Phoenix and a natural 7 occupy different slots in the 56-dim section.
+    played = frozenset({Card(Suit.JADE, 7), PHOENIX})
+    hand = frozenset({Card(Suit.SWORD, r) for r in range(2, 15)} | {MAHJONG})
+    public = PublicState(
+        current_player=0,
+        hand_sizes=(14, 14, 14, 14),
+        scores=(0, 0),
+        trick=Trick.empty(),
+        played_cards_this_round=played,
+    )
+    s = PrivateState(player=0, hand=hand, public=public)
+    seen = _seen_cards_section(featurize(s))
+    # Exactly two distinct bits set.
+    assert int(seen.sum()) == 2
+    assert int((seen > 0).sum()) == 2
 
 
 @pytest.fixture

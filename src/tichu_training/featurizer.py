@@ -1,4 +1,4 @@
-"""Featurizer v1: PrivateState → fixed-shape float32 ndarray.
+"""Featurizer v2: PrivateState → fixed-shape float32 ndarray.
 
 Pure function. No I/O, no globals, no hash-seed-sensitive ordering. Output
 shape is `(FEATURIZER_OUTPUT_DIM,)` for every legal PrivateState (including
@@ -7,13 +7,18 @@ schupfen and dragon-give-pending phases).
 Section layout is documented in `SECTION_DIMS`. The trick-top-combo and
 play-history sections are one-hot over the v1 action space.
 
-Notes / known v1 simplifications:
-  - "Phoenix played" reflects whether Phoenix is visible in the *current
-    trick*; we have no PrivateState memory of earlier tricks in the round.
+v2 over v1: adds a 56-dim `seen_cards` multi-hot of every card played so far
+this round (from `PublicState.played_cards_this_round`). v1 only exposed
+played cards within the current trick via `play_history` / `phoenix_played`,
+which left late-trick callers blind to which key cards had already fallen.
+
+Notes / known simplifications:
+  - "Phoenix played" still reflects only the *current trick* (kept for
+    backwards-compatible feature semantics); for round-wide visibility use
+    the `seen_cards` section.
   - "Schupfen received" is populated only while `SchupfenPending` is active;
     once applied, the visible state no longer retains the per-direction
-    breakdown, so the section is zeros outside the pending phase. Either of
-    these can be enriched in a v2 by augmenting the state schema.
+    breakdown, so the section is zeros outside the pending phase.
 """
 
 from typing import Iterable
@@ -53,7 +58,7 @@ from tichu_training.action_space import (
 )
 
 
-FEATURIZER_VERSION: str = "v1"
+FEATURIZER_VERSION: str = "v2"
 
 # Section sizes — exact dims, ordered for the output concatenation.
 SECTION_DIMS: dict[str, int] = {
@@ -72,6 +77,7 @@ SECTION_DIMS: dict[str, int] = {
     "play_history": 8 * ACTION_SPACE_SIZE,
     "schupfen_received": 168,
     "phoenix_played": 1,
+    "seen_cards": 56,
 }
 FEATURIZER_OUTPUT_DIM: int = sum(SECTION_DIMS.values())
 
@@ -288,6 +294,13 @@ def featurize(private_state: PrivateState) -> np.ndarray:
     )
     out[cursor] = 1.0 if phoenix_in_trick else 0.0
     cursor += SECTION_DIMS["phoenix_played"]
+
+    # 16. Seen-cards multi-hot over 56 slots — every card played so far this
+    # round, accumulated by the engine in `played_cards_this_round` and reset
+    # at round boundaries by `_finalise_round`.
+    for card in pub.played_cards_this_round:
+        out[cursor + _card_slot(card)] = 1.0
+    cursor += SECTION_DIMS["seen_cards"]
 
     assert cursor == FEATURIZER_OUTPUT_DIM
     return out

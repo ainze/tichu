@@ -23,7 +23,7 @@ dataset_kwargs:
   shards_dir: C:\workbench\tichu\data\parquet_100k
   archive_path: C:\workbench\tichu\data\archive.zst
   ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
-  expected_featurizer_version: v1
+  expected_featurizer_version: v2
   expected_action_space_version: v1
 
 # bc_full arch: deeper trunk, wider heads, bigger skill embedding.

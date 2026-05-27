@@ -107,6 +107,7 @@ class PublicState:
     out_order: tuple[int, ...] = ()
     tichu_callers: frozenset[int] = frozenset()
     grand_tichu_callers: frozenset[int] = frozenset()
+    played_cards_this_round: frozenset[CardOrSpecial] = frozenset()
 
     def __post_init__(self) -> None:
         if not 0 <= self.current_player < NUM_PLAYERS:

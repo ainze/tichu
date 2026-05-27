@@ -120,6 +120,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             hand_sizes=next_hand_sizes,  # type: ignore[arg-type]
             trick=Trick.empty(),
             out_order=new_out_order,
+            played_cards_this_round=state.public.played_cards_this_round | {DOG},
         )
         new_state = GameState(hands=next_hands, public=next_public)
         if _round_done_state(new_state):
@@ -129,10 +130,13 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     if isinstance(action, Pass):
         next_trick = state.public.trick.add_pass(current)
         next_hands = state.hands
+        played_cards: frozenset[CardOrSpecial] = frozenset()
     else:
         played_cards = frozenset(_cards_in(action))
         next_hands = _remove_from_hand(state.hands, current, played_cards)
         next_trick = state.public.trick.add_play(player=current, combination=action)
+
+    next_played_cards_this_round = state.public.played_cards_this_round | played_cards
 
     next_hand_sizes = tuple(len(h) for h in next_hands)
 
@@ -156,6 +160,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             trick=next_trick,
             out_order=new_out_order,
             pending_decision=MahjongWishPending(player=current),
+            played_cards_this_round=next_played_cards_this_round,
         )
         return GameState(hands=next_hands, public=next_public), 0.0, _round_done(next_hand_sizes), {}  # type: ignore[arg-type]
 
@@ -221,6 +226,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         out_order=new_out_order,
         mahjong_wish=new_wish,
         pending_decision=new_pending,  # type: ignore[arg-type]
+        played_cards_this_round=next_played_cards_this_round,
     )
     new_state = GameState(hands=next_hands, public=next_public)
     if new_pending is None and _round_done_state(new_state):
@@ -342,6 +348,7 @@ def _finalise_round(state: GameState) -> GameState:
         out_order=(),
         tichu_callers=frozenset(),
         grand_tichu_callers=frozenset(),
+        played_cards_this_round=frozenset(),
     )
     return GameState(hands=state.hands, public=next_public)
 
@@ -453,6 +460,7 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
         round_points_by_player=new_round_points,
         out_order=new_out_order,
         pending_decision=new_pending,  # type: ignore[arg-type]
+        played_cards_this_round=state.public.played_cards_this_round | played_cards,
     )
     new_state = GameState(hands=next_hands, public=next_public)
     if new_pending is None and _round_done_state(new_state):
