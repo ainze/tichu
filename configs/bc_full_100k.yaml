@@ -1,0 +1,49 @@
+# BC training on the existing 100k parquet manifest with the bc_full
+# architecture (1024×4 trunk, 256-hidden heads).
+#
+# Same data as bc_smoke_parquet.yaml, ~10× more model capacity. Isolates
+# the question "is BC saturating because of data or because of model
+# capacity?" Run this when bc_smoke has plateaued on the 100k smoke
+# (which it has at step ~30k → 80% play accuracy).
+#
+# Sized for an overnight run on a CUDA box with 11 workers:
+# one full epoch is ~16-24h (data loading still dominates per-batch
+# time but bc_full's deeper trunk adds some GPU time). 8h overnight
+# gets you ~30-50% through one epoch. checkpoint_every_batches: 5000
+# saves every ~38 min → ~12 mid-epoch checkpoints by morning.
+#
+# Use:
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs/bc_full_100k.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_100k `
+#     --workers 11 --device cuda -v
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_100k
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
+  expected_featurizer_version: v1
+  expected_action_space_version: v1
+
+# bc_full arch: deeper trunk, wider heads, bigger skill embedding.
+# Worth trying because bc_smoke's 256×2 trunk plateaued at 80% play
+# accuracy on this data — possibly a capacity bottleneck.
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 100000          # won't fire — epochs=1
+checkpoint_every_batches: 5000    # ~38 min per save, ~12 ckpts overnight
+seed: 0
