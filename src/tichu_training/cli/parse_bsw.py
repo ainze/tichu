@@ -21,9 +21,7 @@ from typing import Iterator
 from tqdm import tqdm
 
 from tichu_training.bsw.archive import count_entries, iter_archive, list_game_ids
-from tichu_training.bsw.parser import parse_tch
-from tichu_training.bsw.records import ParsedGame
-from tichu_training.bsw.to_parquet import StreamStats, stream_to_parquet
+from tichu_training.bsw.to_parquet import StreamStats, stream_raw_to_parquet
 
 
 log = logging.getLogger("parse_bsw")
@@ -82,38 +80,24 @@ def main(argv: list[str] | None = None) -> int:
         # parquet output so the user can read what the parser was given.
         source_pairs = _dumping(source_pairs, output_dir)
 
-    parse_failures: list[str] = []
     bar = tqdm(total=total, unit="game", dynamic_ncols=True)
-
-    def _refresh_postfix(stats: StreamStats | None) -> None:
-        bar.set_postfix(
-            valid=stats.games_fully_matched if stats else 0,
-            failed=(stats.games_with_failed_rounds if stats else 0) + len(parse_failures),
-            rows=sum(stats.row_counts.values()) if stats else 0,
-            refresh=False,
-        )
-
-    def parsed_games() -> Iterator[ParsedGame]:
-        for game_id, text in source_pairs:
-            try:
-                yield parse_tch(text, game_id=game_id)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("skipping %s: parse failed: %s", game_id, exc)
-                parse_failures.append(game_id)
-                bar.update(1)
-                _refresh_postfix(None)
 
     def _on_game_done(stats: StreamStats) -> None:
         bar.update(1)
-        _refresh_postfix(stats)
+        bar.set_postfix(
+            valid=stats.games_fully_matched,
+            failed=stats.games_with_failed_rounds + len(stats.parse_failures),
+            rows=sum(stats.row_counts.values()),
+            refresh=False,
+        )
 
     # Debug mode (--game-id) keeps everything in-process so verbose logs and
     # the .tch dump live next to the parquet output.
     effective_workers = 1 if targeted_ids is not None else max(1, args.workers)
 
     try:
-        stats = stream_to_parquet(
-            parsed_games(),
+        stats = stream_raw_to_parquet(
+            source_pairs,
             output_dir,
             ratings_path=args.trueskill,
             recency_cutoff_game_id=args.recency_cutoff_game_id,
@@ -128,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         "replay validation: %d/%d rounds matched (%.3f%%); %d games fully matched, %d games had at least one failing round, %d parse failures",
         stats.rounds_matched, stats.rounds_total,
         (stats.rounds_matched / stats.rounds_total * 100) if stats.rounds_total else 0.0,
-        stats.games_fully_matched, stats.games_with_failed_rounds, len(parse_failures),
+        stats.games_fully_matched, stats.games_with_failed_rounds, len(stats.parse_failures),
     )
 
     known_bad_path = output_dir / "known_bad_games.txt"
@@ -139,9 +123,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parse_failures_path = output_dir / "parse_failures.txt"
     with parse_failures_path.open("w", encoding="utf-8") as fh:
-        for parse_failed in parse_failures:
+        for parse_failed in stats.parse_failures:
             fh.write(f"{parse_failed}\n")
-    log.info("wrote parse_failures.txt with %d entries", len(parse_failures))
+    log.info("wrote parse_failures.txt with %d entries", len(stats.parse_failures))
 
     details_path = output_dir / "failure_details.tsv"
     with details_path.open("w", encoding="utf-8") as fh:

@@ -379,3 +379,55 @@ def test_second_sample_parses_to_rounds_with_ergebnis(game_01):
     for r in game_01.rounds:
         assert isinstance(r.ergebnis, tuple)
         assert len(r.ergebnis) == 2
+
+
+def test_handles_with_nbsp_parse_and_normalise():
+    """BSW encodes literal spaces inside a handle (e.g. "Lucky Luke") as
+    U+00A0 (NBSP) and sometimes pads cosmetic trailing NBSP before delimiters
+    (e.g. "schubsi\\xa0:"). Python `\\S` excludes NBSP, so naive regexes drop
+    the rest of the handle and the round fails to parse. Both forms must
+    parse, and the captured handle must be normalised back to a regular space
+    so downstream skill_decile lookup matches the ratings table.
+    """
+    raw = (_SAMPLES / "2417500.tch").read_text(encoding="utf-8")
+    # Embedded NBSP: rename seat-0 handle "evi_sea" to "Lucky\xa0Luke" in
+    # round-0 pre-deal AND start-hand lines (the sanity check at the start of
+    # round parsing requires both lines to agree).
+    embedded = "Lucky\xa0Luke"
+    trailing = "schubsi\xa0"  # trailing-NBSP form
+
+    lines = raw.splitlines()
+    out: list[str] = []
+    in_round_zero = True
+    seat0_card_lines_rewritten = 0
+    seat1_play_lines_rewritten = 0
+    for line in lines:
+        if in_round_zero:
+            # Seat-0 card list lines: "(0)evi_sea <cards>" — replace handle with NBSP form.
+            if line.startswith("(0)evi_sea ") and " gibt:" not in line and " passt." not in line and not line.startswith("(0)evi_sea:"):
+                out.append("(0)" + embedded + " " + line[len("(0)evi_sea "):])
+                seat0_card_lines_rewritten += 1
+                if line.startswith("Ergebnis:"):
+                    in_round_zero = False
+                continue
+            # Seat-1 play lines: "(1)1David: cards" — give the handle trailing NBSP.
+            if line.startswith("(1)1David:"):
+                out.append("(1)" + trailing + ":" + line[len("(1)1David:"):])
+                seat1_play_lines_rewritten += 1
+                if line.startswith("Ergebnis:"):
+                    in_round_zero = False
+                continue
+        out.append(line)
+        if line.startswith("Ergebnis:"):
+            in_round_zero = False
+    assert seat0_card_lines_rewritten >= 2, "test setup: expected to rewrite both pre-deal and start-hand seat-0 lines"
+    assert seat1_play_lines_rewritten >= 1, "test setup: expected at least one seat-1 play line"
+    spliced = "\n".join(out) + "\n"
+
+    game = parse_tch(spliced, game_id="nbsp")
+
+    # Embedded NBSP becomes a regular space in the captured handle.
+    assert game.rounds[0].handles[0] == "Lucky Luke"
+    # Cosmetic trailing NBSP is stripped — the round still parses, which is
+    # the load-bearing assertion (seat-1 play lines all parsed successfully).
+    assert len(game.rounds[0].plays) > 0

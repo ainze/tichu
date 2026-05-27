@@ -36,14 +36,32 @@ from tichu_training.bsw.records import ParsedAction, ParsedGame, ParsedRound
 from tichu_training.bsw.tokens import _RANK_BY_CODE, parse_card_token
 
 
-_PLAYER_LINE_RE = re.compile(r"^\((\d)\)(\S*)\s*(.*)$")
-_GROSSES_TICHU_RE = re.compile(r"^Grosses Tichu:\s*\((\d)\)(\S*)\s*$")
-_TICHU_RE = re.compile(r"^Tichu:\s*\((\d)\)(\S*)\s*$")
-_DRAGON_RE = re.compile(r"^Drache an:\s*\((\d)\)(\S*)\s*$")
+# Handles can contain U+00A0 (NO-BREAK SPACE) as a literal in-handle space
+# (BSW logs "Lucky Luke" as "Lucky\xa0Luke") or as cosmetic padding before a
+# delimiter ("schubsi\xa0:"). Python's `\S` excludes \xa0 (Unicode whitespace),
+# so we match handles as "anything that isn't ASCII space/tab/colon" and
+# normalise the capture with `_clean_handle` before use.
+_HANDLE = r"[^ \t:]*"
+
+_PLAYER_LINE_RE = re.compile(rf"^\((\d)\)({_HANDLE})\s*(.*)$")
+_GROSSES_TICHU_RE = re.compile(rf"^Grosses Tichu:\s*\((\d)\)({_HANDLE})\s*$")
+_TICHU_RE = re.compile(rf"^Tichu:\s*\((\d)\)({_HANDLE})\s*$")
+_DRAGON_RE = re.compile(rf"^Drache an:\s*\((\d)\)({_HANDLE})\s*$")
 _WUNSCH_RE = re.compile(r"^Wunsch:\s*(\S+)\s*$")
 _ERGEBNIS_RE = re.compile(r"^Ergebnis:\s*(-?\d+)\s*-\s*(-?\d+)\s*$")
-_PASST_RE = re.compile(r"^\((\d)\)(\S*)\s+passt\.\s*$")
-_SCHUPFEN_GIBT_RE = re.compile(r"^\((\d)\)(\S*)\s+gibt:\s*(.*)$")
+_PASST_RE = re.compile(rf"^\((\d)\)({_HANDLE})\s+passt\.\s*$")
+_SCHUPFEN_GIBT_RE = re.compile(rf"^\((\d)\)({_HANDLE})\s+gibt:\s*(.*)$")
+
+
+def _clean_handle(raw: str) -> str:
+    """Normalise a handle captured from BSW log text.
+
+    BSW encodes a literal space inside a handle as `\\xa0` (NBSP) so the
+    space doesn't break the line's whitespace-delimited grammar. Map it back
+    to a real space for downstream skill_decile lookup, then strip cosmetic
+    trailing NBSPs that BSW sometimes pads with.
+    """
+    return raw.replace("\xa0", " ").strip()
 
 
 class _RoundBuilder:
@@ -207,7 +225,7 @@ def _parse_player_card_line(
     m = _PLAYER_LINE_RE.match(line)
     if not m:
         raise ValueError(f"expected '(N)handle <cards>' line, got {line!r}")
-    handle = m.group(2)
+    handle = _clean_handle(m.group(2))
     tokens = m.group(3).split()
     cards = [parse_card_token(t) for t in tokens]
     return handle, cards, i + 1
@@ -307,7 +325,7 @@ def _consume_action_line(builder: _RoundBuilder, line: str, round_index: int) ->
     # Plays are formatted "(N)handle: card card ..." — handle ends with ':'.
     # Handle may be empty (BSW anonymous seat); the colon is what makes this
     # a play line.
-    m = re.match(r"^\((\d)\)(\S*?):\s*(.*)$", line)
+    m = re.match(rf"^\((\d)\)({_HANDLE}?):\s*(.*)$", line)
     if m:
         seat = int(m.group(1))
         body = m.group(3).strip()
