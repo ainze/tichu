@@ -111,6 +111,40 @@ def test_fit_value_baseline_streaming_reduces_mse():
     assert final_mse < init_mse, f"expected MSE to drop, init={init_mse:.4f} final={final_mse:.4f}"
 
 
+def test_fit_value_baseline_streaming_writes_baseline_csv(tmp_path):
+    """When log_path is given, one row per chunk is written with the
+    aggregate diagnostics, not just the per-batch noise."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=200, feature_dim=feature_dim))
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+
+    log_path = tmp_path / "baseline.csv"
+    fit_value_baseline_streaming(
+        baseline, _factory(examples),
+        batch_size=32, lr=1e-2, chunk_size=64, sgd_steps_per_chunk=2,
+        held_out_filter=lambda e: False,
+        log_path=log_path,
+        show_progress=False,
+    )
+
+    with log_path.open("r", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows, "baseline.csv must contain at least one chunk row"
+    expected_cols = {
+        "chunk_idx", "examples_seen", "chunk_mse", "running_mse", "last_batch_mse",
+    }
+    assert expected_cols <= set(rows[0].keys())
+    # examples_seen must be monotonic non-decreasing.
+    seen = [int(r["examples_seen"]) for r in rows]
+    assert seen == sorted(seen) and seen[-1] > 0
+    # running_mse exists and is finite — the cardinal property the previous
+    # single-batch reading lacked.
+    for r in rows:
+        rm = float(r["running_mse"])
+        assert rm == rm and rm != float("inf"), f"running_mse must be finite, got {rm}"
+
+
 # ---------- refine epoch ----------
 
 def test_awr_refine_epoch_streaming_writes_expected_csv_columns(tmp_path):

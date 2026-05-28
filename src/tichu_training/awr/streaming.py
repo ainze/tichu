@@ -142,6 +142,11 @@ def collect_held_out(
 # ---------------------------------------------------------------------------
 
 
+_BASELINE_CSV_FIELDS = [
+    "chunk_idx", "examples_seen", "chunk_mse", "running_mse", "last_batch_mse",
+]
+
+
 def fit_value_baseline_streaming(
     baseline: ValueBaseline,
     dataset_factory: DatasetFactory,
@@ -151,6 +156,7 @@ def fit_value_baseline_streaming(
     chunk_size: int = 16_384,
     sgd_steps_per_chunk: int = 3,
     held_out_filter: HeldOutFilter | None = None,
+    log_path: Path | None = None,
     show_progress: bool = True,
 ) -> float:
     """SGD-fit the value baseline by streaming the dataset once.
@@ -158,31 +164,88 @@ def fit_value_baseline_streaming(
     Each chunk of `chunk_size` examples is converted to tensors once
     and trained over `sgd_steps_per_chunk` mini-epochs (so the small
     baseline still sees enough updates per example without re-streaming
-    the whole corpus). Returns the final batch MSE.
+    the whole corpus).
+
+    Returns the **running-mean training MSE** across every mini-batch
+    seen during the fit (weighted by mini-batch size). The single-
+    mini-batch loss has huge variance against heavy-tailed targets like
+    Tichu round_outcome — two readings from different chunks aren't
+    comparable evidence of divergence. The running mean smooths that.
+
+    If `log_path` is given, writes one diagnostic row per chunk:
+    chunk_idx, examples_seen, chunk_mse (mean over the chunk's mini-
+    batches), running_mse, last_batch_mse.
     """
     optimizer = torch.optim.Adam(baseline.parameters(), lr=lr)
-    final_mse = float("inf")
+    last_batch_mse = float("inf")
+    running_sse = 0.0
+    running_n = 0
     chunk: list[BCExample] = []
     skip = held_out_filter or (lambda _e: False)
+
+    csv_fh = None
+    csv_writer: csv.DictWriter | None = None
+    if log_path is not None:
+        log_path = Path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        new_csv = not log_path.exists()
+        csv_fh = log_path.open("a", encoding="utf-8", newline="")
+        csv_writer = csv.DictWriter(csv_fh, fieldnames=_BASELINE_CSV_FIELDS)
+        if new_csv:
+            csv_writer.writeheader()
 
     bar = tqdm(
         unit="ex", dynamic_ncols=True,
         desc="value baseline (stream)", disable=not show_progress,
     )
 
-    def _fit_chunk(buf: list[BCExample]) -> None:
-        nonlocal final_mse
+    def _fit_chunk(buf: list[BCExample]) -> float:
+        """Train one chunk; return its mean MSE across all mini-batches."""
+        nonlocal last_batch_mse, running_sse, running_n
         feats = torch.from_numpy(np.stack([e.features for e in buf]))
         outs = torch.from_numpy(np.array([e.round_outcome for e in buf], dtype=np.float32))
         n = len(buf)
+        chunk_sse = 0.0
+        chunk_n = 0
         for _ in range(sgd_steps_per_chunk):
             for i in range(0, n, batch_size):
+                bs = min(batch_size, n - i)
                 preds = baseline(feats[i : i + batch_size])
                 loss = F.mse_loss(preds, outs[i : i + batch_size])
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                final_mse = float(loss.detach())
+                batch_mse = float(loss.detach())
+                last_batch_mse = batch_mse
+                chunk_sse += batch_mse * bs
+                chunk_n += bs
+        running_sse += chunk_sse
+        running_n += chunk_n
+        return chunk_sse / max(1, chunk_n)
+
+    chunks_done = 0
+    examples_seen = 0
+
+    def _flush_chunk(buf: list[BCExample]) -> None:
+        nonlocal chunks_done, examples_seen
+        chunk_mse = _fit_chunk(buf)
+        chunks_done += 1
+        examples_seen += len(buf)
+        running_mse = running_sse / max(1, running_n)
+        if csv_writer is not None:
+            csv_writer.writerow({
+                "chunk_idx": chunks_done,
+                "examples_seen": examples_seen,
+                "chunk_mse": f"{chunk_mse:.6f}",
+                "running_mse": f"{running_mse:.6f}",
+                "last_batch_mse": f"{last_batch_mse:.6f}",
+            })
+            csv_fh.flush()
+        bar.set_postfix(
+            chunk_mse=f"{chunk_mse:.2f}",
+            running_mse=f"{running_mse:.2f}",
+            refresh=False,
+        )
 
     try:
         for ex in dataset_factory():
@@ -191,15 +254,16 @@ def fit_value_baseline_streaming(
                 continue
             chunk.append(ex)
             if len(chunk) >= chunk_size:
-                _fit_chunk(chunk)
+                _flush_chunk(chunk)
                 chunk.clear()
-                bar.set_postfix(last_mse=f"{final_mse:.4f}", refresh=False)
         if chunk:
-            _fit_chunk(chunk)
+            _flush_chunk(chunk)
     finally:
         bar.close()
+        if csv_fh is not None:
+            csv_fh.close()
 
-    return final_mse
+    return running_sse / max(1, running_n)
 
 
 # ---------------------------------------------------------------------------
