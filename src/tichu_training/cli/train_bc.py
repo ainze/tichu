@@ -330,8 +330,9 @@ def _run_awr_refinement_streaming(
         chunk_size=chunk_size,
         sgd_steps_per_chunk=int(awr_cfg.get("baseline_sgd_steps_per_chunk", 3)),
         held_out_filter=held_out_filter,
+        log_path=run_dir / "baseline.csv",
     )
-    log.info("[awr/stream] baseline MSE after fit: %.4f", baseline_mse)
+    log.info("[awr/stream] baseline MSE after fit (running mean): %.4f", baseline_mse)
 
     epoch_log_path = run_dir / "epoch.csv"
     new_epoch_log = not epoch_log_path.exists()
