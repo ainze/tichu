@@ -191,10 +191,13 @@ def _run_awr_refinement(
     model, optimizer, dataset_examples, config, run_dir,
     *, log_path, ckpt_dir, head_weights, start_step,
 ):
+    from tichu_training.awr.targets import target_value
+
     awr_cfg = config.get("awr") or {}
     beta = float(awr_cfg.get("beta", 1.0))
     max_weight = float(awr_cfg.get("max_weight", 20.0))
     held_out_fraction = float(awr_cfg.get("held_out_fraction", 0.1))
+    value_target = str(awr_cfg.get("value_target", "round"))
 
     feature_dim = dataset_examples[0].features.shape[0]
     baseline = ValueBaseline(
@@ -206,11 +209,40 @@ def _run_awr_refinement(
     train_set = dataset_examples[:split]
     held_out = dataset_examples[split:] or None
 
+    # Drop examples with no target signal under the active value_target.
+    # For "round" this is a no-op; for "game" it filters out Incomplete
+    # Sessions. The held-out subset is left intact — it's used for
+    # win_rate_proxy eval, which doesn't depend on the value target.
+    original_n = len(train_set)
+    train_set = [
+        e for e in train_set
+        if target_value(round_outcome=e.round_outcome, game_won=e.game_won,
+                        kind=value_target) is not None
+    ]
+    if not train_set:
+        log.error(
+            "[awr] value_target=%s left zero training rows after filtering "
+            "(original %d). Cannot fit value baseline.",
+            value_target, original_n,
+        )
+        return 1
+    if len(train_set) < original_n:
+        log.info(
+            "[awr] value_target=%s — kept %d/%d training rows "
+            "(dropped %d with no target signal)",
+            value_target, len(train_set), original_n,
+            original_n - len(train_set),
+        )
+
     # Stack features once and share with both fit_value_baseline and the
     # per-epoch awr_refine_epoch calls — re-stacking is the dominant
     # memory hit on multi-million-row training sets.
     features = np.stack([e.features for e in train_set])
-    outcomes = np.array([e.round_outcome for e in train_set], dtype=np.float32)
+    outcomes = np.array(
+        [target_value(round_outcome=e.round_outcome, game_won=e.game_won,
+                      kind=value_target) for e in train_set],
+        dtype=np.float32,
+    )
     baseline_mse = fit_value_baseline(
         baseline, features, outcomes,
         batch_size=int(config["batch_size"]),
@@ -239,6 +271,7 @@ def _run_awr_refinement(
                 held_out_subset=held_out,
                 head_weights=head_weights or None,
                 features=features,
+                value_target=value_target,
             )
             log.info(
                 "[awr] epoch %d loss=%.4f avg_weight=%.3f win_rate_proxy=%s",
@@ -286,6 +319,10 @@ def _run_awr_refinement_streaming(
     max_held_out = int(awr_cfg.get("max_held_out", 20_000))
     chunk_size = int(awr_cfg.get("chunk_size", 16_384))
     standardize_advantages = bool(awr_cfg.get("standardize_advantages", True))
+    # `round` (default) fits V on BCExample.round_outcome; `game` fits on
+    # BCExample.game_won (Incomplete Sessions filtered out per-chunk).
+    # See ADR-0013 and the Value Target entry in CONTEXT.md.
+    value_target = str(awr_cfg.get("value_target", "round"))
     # Mid-epoch win_rate_proxy logging. 0 disables; N>0 evaluates the
     # held-out subset every N chunks and writes an intermediate row to
     # epoch.csv. Lets you see refinement progress without waiting for a
@@ -322,7 +359,10 @@ def _run_awr_refinement_streaming(
         hidden=int(awr_cfg.get("baseline_hidden", 128)),
     )
 
-    log.info("[awr/stream] phase 2: fitting value baseline by stream")
+    log.info(
+        "[awr/stream] phase 2: fitting value baseline by stream (value_target=%s)",
+        value_target,
+    )
     baseline_mse = fit_value_baseline_streaming(
         baseline, dataset_factory,
         batch_size=int(config["batch_size"]),
@@ -331,6 +371,7 @@ def _run_awr_refinement_streaming(
         sgd_steps_per_chunk=int(awr_cfg.get("baseline_sgd_steps_per_chunk", 3)),
         held_out_filter=held_out_filter,
         log_path=run_dir / "baseline.csv",
+        value_target=value_target,
     )
     log.info("[awr/stream] baseline MSE after fit (running mean): %.4f", baseline_mse)
 
@@ -376,6 +417,7 @@ def _run_awr_refinement_streaming(
                 standardize_advantages=standardize_advantages,
                 eval_every_chunks=eval_every_chunks,
                 intermediate_eval_callback=_on_intermediate,
+                value_target=value_target,
             )
             log.info(
                 "[awr/stream] epoch %d loss=%.4f avg_weight=%.3f win_rate_proxy=%s",

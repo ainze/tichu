@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from tichu_training.awr.targets import target_value
 from tichu_training.awr.value_baseline import ValueBaseline
 from tichu_training.awr.weights import awr_weights
 from tichu_training.bc.dataset import BCExample
@@ -46,6 +47,7 @@ def awr_refine_epoch(
     held_out_subset: Sequence[BCExample] | None = None,
     head_weights: dict[str, float] | None = None,
     features: np.ndarray | None = None,
+    value_target: str = "round",
     show_progress: bool = True,
 ) -> dict[str, float | None]:
     if beta <= 0:
@@ -55,7 +57,9 @@ def awr_refine_epoch(
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     weighted_examples = _apply_awr_weights(
-        examples, baseline, beta=beta, max_weight=max_weight, features=features,
+        examples, baseline,
+        beta=beta, max_weight=max_weight, features=features,
+        value_target=value_target,
     )
     awr_weight_for = {id(orig): float(new.sample_weight / max(orig.sample_weight, 1e-12))
                       for orig, new in zip(examples, weighted_examples)}
@@ -142,6 +146,7 @@ def _apply_awr_weights(
     max_weight: float,
     features: np.ndarray | None = None,
     chunk_size: int = 16_384,
+    value_target: str = "round",
 ) -> list[BCExample]:
     """Compute per-example AWR weights and rewrap with new sample_weight.
 
@@ -154,12 +159,35 @@ def _apply_awr_weights(
     exp, clip) still sees the full advantage vector and is numerically
     identical to the unchunked version. This is a memory-only knob; raise
     it on machines with more GPU RAM.
+
+    Examples whose `value_target` resolves to None (e.g. Incomplete
+    Sessions for `"game"`) are filtered out — the returned list may be
+    shorter than `examples`. Callers must not assume positional
+    correspondence with the input.
     """
     if not examples:
         return []
+    # Resolve targets and filter None entries up-front. `features` is the
+    # caller's pre-stacked tensor — slice it to the kept rows so the
+    # baseline forward stays aligned.
+    target_vals: list[float] = []
+    keep_idx: list[int] = []
+    for i, e in enumerate(examples):
+        t = target_value(
+            round_outcome=e.round_outcome,
+            game_won=e.game_won,
+            kind=value_target,
+        )
+        if t is not None:
+            target_vals.append(t)
+            keep_idx.append(i)
+    if not keep_idx:
+        return []
     if features is None:
-        features = np.stack([e.features for e in examples])
-    outcomes = np.array([e.round_outcome for e in examples], dtype=np.float32)
+        features = np.stack([examples[i].features for i in keep_idx])
+    else:
+        features = features[keep_idx]
+    outcomes = np.array(target_vals, dtype=np.float32)
 
     feats_t = torch.from_numpy(features)
     pred_chunks: list[np.ndarray] = []
@@ -172,7 +200,8 @@ def _apply_awr_weights(
     advantages = outcomes - preds
     w = awr_weights(advantages, beta=beta, max_weight=max_weight)
     out: list[BCExample] = []
-    for e, weight in zip(examples, w):
+    for idx, weight in zip(keep_idx, w):
+        e = examples[idx]
         out.append(BCExample(
             decision_type=e.decision_type,
             features=e.features,
@@ -181,6 +210,7 @@ def _apply_awr_weights(
             sample_weight=float(e.sample_weight * float(weight)),
             skill_decile=e.skill_decile,
             round_outcome=e.round_outcome,
+            game_won=e.game_won,
         ))
     return out
 

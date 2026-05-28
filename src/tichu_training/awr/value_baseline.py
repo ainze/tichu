@@ -1,7 +1,13 @@
 """Value baseline V(state) for AWR advantage estimation.
 
-A small MLP fit by MSE on `round_outcome` (team-0 minus team-1 Ergebnis).
-Lives separately from `BCModel`: no trunk sharing in v1 — that is a follow-up.
+A small MLP fit by MSE on a per-row scalar target. The target is
+selected by the caller — currently either `round_outcome` (team-0 minus
+team-1 Ergebnis) or `game_won` cast to 0.0/1.0 — via the
+`awr.value_target` config knob; see `tichu_training.awr.targets` for the
+extractor and ADR-0013 / CONTEXT.md for the design.
+
+Lives separately from `BCModel`: no trunk sharing in v1 — that is a
+follow-up.
 """
 
 from pathlib import Path

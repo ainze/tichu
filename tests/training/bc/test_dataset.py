@@ -45,6 +45,18 @@ def test_synthetic_features_match_requested_dim():
     assert e.features.shape == (64,)
 
 
+def test_synthetic_dataset_populates_game_won():
+    """game_won is the AWR value_target='game' label. SyntheticBCDataset
+    must emit a deterministic mix of True/False/None so the AWR fit has
+    signal and the Incomplete-Session filter has examples to exercise."""
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=200, feature_dim=8))
+    states = {e.game_won for e in examples}
+    # The seeded RNG should produce all three states across 600 examples.
+    assert True in states
+    assert False in states
+    assert None in states
+
+
 def test_parquet_dataset_raises_on_featurizer_version_mismatch(tmp_path):
     _write_minimal_shard(tmp_path / "play_00000.parquet", featurizer_version="v1")
     # archive_path is required by the new ADR-0011 constructor but is not
