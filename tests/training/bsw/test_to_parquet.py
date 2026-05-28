@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -16,7 +17,7 @@ _EXPECTED_DECISION_TYPES = {
 _EXPECTED_COLUMNS = {
     "decision_type", "game_id", "round_id", "timestamp", "player_handle",
     "action_taken", "state", "legal_actions_mask", "round_outcome",
-    "round_won", "featurizer_version", "action_space_version",
+    "round_won", "game_won", "featurizer_version", "action_space_version",
     "skill_decile", "sample_weight",
 }
 
@@ -42,6 +43,80 @@ def test_each_shard_has_the_required_schema(tmp_path, games):
         assert set(table.column_names) == _EXPECTED_COLUMNS, (
             f"{path.name} schema missing: {_EXPECTED_COLUMNS - set(table.column_names)}"
         )
+
+
+def test_complete_game_stamps_game_won_team_relative(tmp_path):
+    """Per ADR-0013-era game-outcome target: every row of a Complete Game
+    carries `game_won` from the perspective of the row's acting player's
+    team. Sample 2417500: cumulative ergebnis = (590, 1110) so team-1 wins.
+    Seats: evi_sea (0, team 0), 1David (1, team 1), evdokia!! (2, team 0),
+    Lisaaaaaaa (3, team 1)."""
+    game = parse_tch(
+        (_SAMPLES / "2417500.tch").read_text(encoding="utf-8"), game_id="2417500",
+    )
+    stream_to_parquet([game], tmp_path)
+    table = pq.read_table(tmp_path / "play_00000.parquet")
+    by_handle: dict[str, set] = {}
+    for h, g in zip(
+        table.column("player_handle").to_pylist(),
+        table.column("game_won").to_pylist(),
+    ):
+        by_handle.setdefault(h, set()).add(g)
+    # team-0 lost, team-1 won; each handle's value is constant across its rows.
+    assert by_handle["evi_sea"] == {False}
+    assert by_handle["evdokia!!"] == {False}
+    assert by_handle["1David"] == {True}
+    assert by_handle["Lisaaaaaaa"] == {True}
+
+
+def test_incomplete_session_stamps_null_game_won(tmp_path):
+    """A ParsedGame whose summed ergebnis never crosses 1000 is an
+    Incomplete Session — game_won stays NULL on every row so the AWR
+    game-outcome value-baseline fit can filter it out without lying about
+    who won. Sample 2417500 truncated to 4 rounds: totals (505, 795)."""
+    from dataclasses import replace
+    full = parse_tch(
+        (_SAMPLES / "2417500.tch").read_text(encoding="utf-8"), game_id="2417500",
+    )
+    truncated = replace(full, rounds=full.rounds[:4])
+    stream_to_parquet([truncated], tmp_path)
+    table = pq.read_table(tmp_path / "play_00000.parquet")
+    values = table.column("game_won").to_pylist()
+    assert values, "expected at least one play row"
+    assert all(v is None for v in values), (
+        f"expected all NULL for Incomplete Session, got distinct values: {set(values)}"
+    )
+
+
+def test_stream_stats_counts_complete_and_incomplete(tmp_path):
+    """Parse-time diagnostic: surface how many games crossed 1000 vs how
+    many were abandoned mid-game. Lets the A/B comparison report the
+    fraction of corpus the game-outcome target actually fits on."""
+    from dataclasses import replace
+    full_a = parse_tch(
+        (_SAMPLES / "2417500.tch").read_text(encoding="utf-8"), game_id="2417500",
+    )
+    full_b = parse_tch(
+        (_SAMPLES / "2417501.tch").read_text(encoding="utf-8"), game_id="2417501",
+    )
+    incomplete = replace(full_a, game_id="incomplete", rounds=full_a.rounds[:4])
+    stats = stream_to_parquet([full_a, full_b, incomplete], tmp_path)
+    assert stats.complete_games == 2
+    assert stats.incomplete_sessions == 1
+
+
+def test_schema_includes_game_won_column(tmp_path, games):
+    """v3 schema: game_won is the team-relative game-level outcome label
+    used by AWR when value_target='game'. See ADR-0013 for why the schema
+    change is signalled by directory name, not by a featurizer_version bump."""
+    stream_to_parquet(games, tmp_path)
+    for path in tmp_path.glob("*.parquet"):
+        table = pq.read_table(path)
+        assert "game_won" in table.column_names, (
+            f"{path.name} missing game_won column"
+        )
+        # bool_ allows nulls in Arrow; the Incomplete Session case relies on it.
+        assert table.schema.field("game_won").type == pa.bool_()
 
 
 def test_play_shard_contains_play_and_pass_rows(tmp_path, games):

@@ -11,8 +11,8 @@ One full play-out from initial deal to scoring. Begins with `deal_initial_state`
 _Avoid_: deal, hand (as a noun for this unit).
 
 **Game**:
-A sequence of Rounds played to a target score (typically 1000 points). Not yet modelled in code, but the word is reserved — do not use "game" to mean a single Round.
-_Avoid_: match, session.
+A sequence of Rounds played to a target score of 1000 points. Modelled as `ParsedGame` (one per BSW `.tch` log). **Complete Game**: at least one team's cumulative `ergebnis` reaches ≥ 1000 — `game_won` and `game_outcome_margin` are defined for these. **Incomplete Session**: a `ParsedGame` whose summed scores never cross 1000 (abandoned mid-game) — game-level outcome columns are NULL and excluded from the AWR game-outcome target. Per-round records still flow through the BC pipeline regardless.
+_Avoid_: match, session (except as the qualified term "Incomplete Session").
 
 **Trick**:
 The unit inside a Round, from one player leading a combination to everyone else passing (or to a winning bomb). Ends with cards going to the trick-winner's score pile.
@@ -217,8 +217,15 @@ A Checkpoint produced by AWR Refine. **Byte-compatible with a BC Checkpoint** �
 _Avoid_: tuned model, refined model.
 
 **Value Baseline**:
-The `V(state)` estimator ([tichu_training/awr/value_baseline.py](src/tichu_training/awr/value_baseline.py)) used by AWR to compute per-sample advantage. Trained separately before AWR Refine.
+The `V(state)` estimator ([tichu_training/awr/value_baseline.py](src/tichu_training/awr/value_baseline.py)) used by AWR to compute per-sample advantage. Trained separately before AWR Refine against a **Value Target**.
 _Avoid_: critic, V-net.
+
+**Value Target**:
+The per-row label the Value Baseline regresses against during AWR Refine. Two options live in the v3 parquet schema, selected by the `awr.value_target` config knob:
+- `"round"` — fits V on `round_outcome` (per-round signed score delta, team-relative). The original v1/v2 target; high variance from slams + grand tichus.
+- `"game"` — fits V on `game_won` (team-relative boolean: did the row's acting player's team win the **Complete Game**). Sparser per-game signal but lower variance and aligned with the actual objective. Rows from an **Incomplete Session** carry NULL `game_won` and are filtered out of the fit. See [ADR-0013](docs/adr/0013-parquet-schema-versioned-by-directory.md) for the schema-version mechanics.
+
+Targets are stamped at parse time; AWR-time config picks which column to read. The Value Baseline architecture (hidden width, loss) may be tuned per target — `game_won` is a 0/1 target so BCE is more principled than MSE.
 
 **Sample Weight**:
 The per-row positive scalar multiplied into the loss for each training example. In BC Training, derived from Skill Decile. In AWR Refine, multiplied by the AWR Weight.
@@ -406,4 +413,6 @@ _Avoid_: test set, eval set, held-out pool.
 - "deal" used as a noun in `tichu_eval` for "the synthetic starting position" — resolved: **Starting Position** is the noun; "deal" stays verb-only per §Game-layer terms. Module renamed to `tichu_eval/starting_position_pool.py` and `play_deal()` → `play_round()` in session 2026-05-25.
 - "player handle" treated as game-stable (one tuple per `ParsedGame`) — resolved: handles are **per-round** (`ParsedRound.handles`), not per-game. Captures BSW mid-game player substitutions and **Anonymous Seats** correctly. `ParsedGame.handles` removed in session 2026-05-26. BC ingestion tolerates anonymous / substituted seats (Neutral Skill Decile); TrueSkill ingestion rejects them (per-identified-stable-game invariant). See [ADR-0010](docs/adr/0010-per-round-handles-with-asymmetric-tolerance.md).
 - "parquet shards are the BC training input" — resolved: **the BSW archive is the training input**; parquet shards are a per-decision manifest carrying labels, `sample_weight`, `round_outcome`, and `player_handle`. Feature Vector and legal Intent mask are computed at train time by replaying the round from the archive. The schema's reserved `state` / `legal_actions_mask` / `skill_decile` columns are dead weight in v1 and slated for removal. Skill Decile is joined live against the TrueSkill ratings table by `player_handle`. See [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md).
+- "parquet schema version is the same as featurizer version" — resolved: they are independent. `featurizer_version` versions the **Featurizer** (`featurize` function output) and nothing else. Parquet schema additions (e.g., `game_won` in v3) bump the **directory suffix** (`parquet_<scale>_v<N>`); featurizer_version is left untouched. Readers detect schema features by column-presence, not by string comparison. See [ADR-0013](docs/adr/0013-parquet-schema-versioned-by-directory.md).
+- "game" used loosely for either a `ParsedGame` or a Tichu Game-to-1000 — resolved: a **Game** is a sequence of Rounds played to 1000; a `ParsedGame` is a Game iff at least one team's cumulative `ergebnis` reaches ≥ 1000 (a **Complete Game**). The remainder are **Incomplete Sessions** — included in BC labels (round-level data is intact) but excluded from the `"game"` Value Target.
 - "schupfen is a BC head with `HEAD_LOGIT_DIMS['schupfen']=3`" — resolved: schupfen is a **standalone Schupfen Network**, same pattern as Call Networks. The 3-output stub in `bc/heads.py` is removed; the BC model now has three heads (play, wish, dragon_assignment). The `schupfen_00000.parquet` shard feeds `train_schupfen`, not `train_bc`. See [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md).

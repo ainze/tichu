@@ -13,10 +13,10 @@ Output layout: one shard per decision type, deterministically named
 manifest. (Multi-shard splits can fill in higher suffixes later.)
 
 Each row corresponds to one decision a BSW player made during a validated
-round. The columns follow the v1 PRD schema:
+round. The columns follow the v3 schema:
 
   decision_type, game_id, round_id, timestamp, player_handle, action_taken,
-  state, legal_actions_mask, round_outcome, round_won,
+  state, legal_actions_mask, round_outcome, round_won, game_won,
   featurizer_version, action_space_version, skill_decile, sample_weight
 
 `state` and `legal_actions_mask` are reserved (filled at training-loop load
@@ -24,7 +24,11 @@ time, not at parse time). `featurizer_version` / `action_space_version` are
 stamped from the live module constants. `skill_decile` is joined from a
 ratings table if one is provided. `sample_weight` is `1.0` for games whose
 `game_id >= recency_cutoff_game_id` (default `1855844`, first game of 2015),
-else `recency_weight` (default `0.5`).
+else `recency_weight` (default `0.5`). `round_won` and `game_won` are both
+team-relative to the row's acting player; `game_won` is NULL for rows from
+an Incomplete Session (see `bsw.records.game_team_totals`). The parquet
+schema is versioned by directory name (`parquet_<scale>_v<N>`), not by a
+per-row column — see ADR-0013.
 """
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -40,7 +44,7 @@ from tichu_engine.cards import Card, SpecialCard
 from tichu_engine.combinations import CardOrSpecial
 from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bsw.parser import parse_tch
-from tichu_training.bsw.records import ParsedAction, ParsedGame, ParsedRound
+from tichu_training.bsw.records import ParsedAction, ParsedGame, ParsedRound, game_team_totals
 from tichu_training.bsw.replay import ReplayResult, replay_round
 from tichu_training.featurizer import FEATURIZER_VERSION
 
@@ -75,6 +79,7 @@ _SCHEMA = pa.schema([
     ("legal_actions_mask", pa.binary()),
     ("round_outcome", pa.int32()),
     ("round_won", pa.bool_()),
+    ("game_won", pa.bool_()),
     ("featurizer_version", pa.string()),
     ("action_space_version", pa.string()),
     ("skill_decile", pa.int32()),
@@ -94,6 +99,7 @@ class _Record:
     legal_actions_mask: bytes | None
     round_outcome: int
     round_won: bool
+    game_won: bool | None
     featurizer_version: str | None
     action_space_version: str | None
     skill_decile: int | None
@@ -120,6 +126,10 @@ class _GameResult:
     rounds_total: int
     rounds_matched: int
     failures: list[RoundFailure]
+    # True if the game's summed ergebnis reaches 1000 for at least one team
+    # (Complete Game); False if it's an Incomplete Session. None when parse
+    # failed and there's no ergebnis to read.
+    is_complete_game: bool | None = None
     # Set by `_parse_and_process` when parse_tch raised. `records` / `rounds_*`
     # are empty in that case; `parse_error` is the exception's `str()`.
     parse_error: str | None = None
@@ -142,6 +152,7 @@ def _process_game(
     sample_weight = _sample_weight_for(
         game.game_id or "", recency_cutoff_game_id, recency_weight,
     )
+    team_totals = game_team_totals(game)
     records: list[_Record] = []
     failures: list[RoundFailure] = []
     rounds_total = 0
@@ -159,6 +170,7 @@ def _process_game(
             game, parsed_round, replay,
             skill_lookup=skill_lookup,
             sample_weight=sample_weight,
+            team_totals=team_totals,
         ))
     return _GameResult(
         game_id=game_id,
@@ -166,6 +178,7 @@ def _process_game(
         rounds_total=rounds_total,
         rounds_matched=rounds_matched,
         failures=failures,
+        is_complete_game=team_totals is not None,
     )
 
 
@@ -230,6 +243,11 @@ class StreamStats:
     games_total: int = 0
     games_fully_matched: int = 0
     games_with_failed_rounds: int = 0
+    # Complete Game vs Incomplete Session split (parsed games only — parse
+    # failures contribute to neither). Drives the A/B comparison's report on
+    # what fraction of corpus the AWR game-outcome target actually fits on.
+    complete_games: int = 0
+    incomplete_sessions: int = 0
     rounds_total: int = 0
     rounds_matched: int = 0
     row_counts: dict[str, int] = field(default_factory=lambda: {t: 0 for t in _KNOWN_DECISION_TYPES})
@@ -352,6 +370,10 @@ def _run_stream(
                 stats.failed_game_ids.append(result.game_id)
             else:
                 stats.games_fully_matched += 1
+            if result.is_complete_game:
+                stats.complete_games += 1
+            else:
+                stats.incomplete_sessions += 1
             stats.round_failures.extend(result.failures)
             for record in result.records:
                 buffers[record.decision_type].append(record)
@@ -406,6 +428,7 @@ def _emit_records_for_round(
     *,
     skill_lookup: dict[str, int | None],
     sample_weight: float,
+    team_totals: tuple[int, int] | None,
 ):
     team_outcome = parsed_round.ergebnis[0] - parsed_round.ergebnis[1]
     for parsed_action, _engine_action in replay.decisions:
@@ -424,6 +447,10 @@ def _emit_records_for_round(
         round_won = (
             parsed_round.ergebnis[team] > parsed_round.ergebnis[1 - team]
         )
+        if team_totals is None:
+            game_won = None
+        else:
+            game_won = team_totals[team] > team_totals[1 - team]
         yield _Record(
             decision_type=decision_type,
             game_id=game.game_id or "",
@@ -435,6 +462,7 @@ def _emit_records_for_round(
             legal_actions_mask=None,
             round_outcome=team_outcome,
             round_won=round_won,
+            game_won=game_won,
             featurizer_version=FEATURIZER_VERSION,
             action_space_version=ACTION_SPACE_VERSION,
             skill_decile=skill_lookup.get(handle),
@@ -500,6 +528,7 @@ def _to_table(records: list[_Record]) -> pa.Table:
         columns["legal_actions_mask"].append(r.legal_actions_mask)
         columns["round_outcome"].append(r.round_outcome)
         columns["round_won"].append(r.round_won)
+        columns["game_won"].append(r.game_won)
         columns["featurizer_version"].append(r.featurizer_version)
         columns["action_space_version"].append(r.action_space_version)
         columns["skill_decile"].append(r.skill_decile)
