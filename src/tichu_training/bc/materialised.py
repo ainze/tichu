@@ -108,11 +108,19 @@ def materialise(
     the stream after the decision-type filter, so the wall total is at
     most `max_examples`).
 
-    `chunk_size` bounds peak RAM. Each per-type buffer holds at most
-    `chunk_size` BCExamples before being stacked + appended to the
-    on-disk file and cleared. With default 25,000 and the production
-    16,624-float feature vector, the per-type buffer peak is ~1.7 GB.
-    The order-pair buffer flushes on the same cadence.
+    `chunk_size` bounds peak RAM. A "flush all buffers" event fires
+    every `chunk_size` accepted stream items — so all three per-type
+    buffers get drained together, regardless of which one filled. This
+    matters because the play type is ~98.8% of the stream and the
+    wish/dragon_assignment types are ~1.2% each: if we waited for each
+    per-type buffer to reach chunk_size independently, the wish/dragon
+    buffers would never flush during a typical run and would
+    accumulate millions of long-lived BCExamples, paying mounting GC
+    cost (the smooth monotonic slowdown observed pre-fix). With the
+    "flush all together" cadence, peak RAM stays bounded at roughly
+    `chunk_size × feature_bytes` regardless of stream length. Default
+    25,000 → ~1.7 GB peak. The order-pair buffer flushes on the same
+    cadence.
 
     Returns a dict mapping decision_type -> rows written. The total is
     `sum(counts.values())` which may be less than `max_examples` (if
@@ -197,8 +205,22 @@ def materialise(
             arr.tofile(fh)
         order_buf.clear()
 
+    def _flush_all() -> None:
+        """Flush every per-type buffer + the order buffer together.
+
+        Keeps wish/dragon buffers from accumulating across the entire
+        run. With per-type thresholds, those buffers (~1.2% of stream
+        each) never reach chunk_size during a typical run and bleed
+        BCExample objects into Python's long-lived heap, causing GC to
+        get slower as the run progresses.
+        """
+        for type_name in TYPE_ORDER:
+            _flush_type(type_name)
+        _flush_order()
+
     t0 = time.perf_counter()
     n = 0
+    n_since_last_flush = 0
     last_t = t0
     last_n = 0
     cap_str = "all" if max_examples is None else f"up to {max_examples}"
@@ -217,10 +239,17 @@ def materialise(
         ))
         bucket.append(ex)
         n += 1
-        if len(bucket) >= chunk_size:
-            _flush_type(ex.decision_type)
-        if len(order_buf) >= chunk_size:
-            _flush_order()
+        n_since_last_flush += 1
+        # Flush ALL per-type buffers + order_buf together when the
+        # combined intake reaches chunk_size. This bounds every
+        # buffer's growth proportionally to its type's stream share —
+        # play gets ~98.8% × chunk_size, wish/dragon ~1.2% each — so
+        # no single buffer accumulates millions of BCExamples across a
+        # long run. The "play buffer fills first" path is gone; we
+        # gate on total intake instead.
+        if n_since_last_flush >= chunk_size:
+            _flush_all()
+            n_since_last_flush = 0
         if max_examples is not None and n >= max_examples:
             break
         if n - last_n >= progress_every:
@@ -234,9 +263,7 @@ def materialise(
             last_n = n
 
     # Drain remaining partial buffers.
-    for type_name in TYPE_ORDER:
-        _flush_type(type_name)
-    _flush_order()
+    _flush_all()
 
     elapsed = time.perf_counter() - t0
     counts = dict(rows_written)
