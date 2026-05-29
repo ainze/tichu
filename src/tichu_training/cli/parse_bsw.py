@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--input", metavar="DIR", help="Directory containing BSW .tch log files")
     source.add_argument("--archive", metavar="FILE", help="Zstd archive (.zst) of .tch files; index sidecar must sit alongside")
     p.add_argument("--output", required=True, metavar="DIR", help="Output directory for Parquet shards")
+    p.add_argument("--bundle-out-dir", default=None, metavar="DIR",
+                   help="If set, also write a MemmapBCDataset-readable materialised bundle here, "
+                        "from the same replay pass (consolidates parse_bsw + materialise_bc into one "
+                        "engine replay). Omit for manifest-only runs.")
     p.add_argument("--subset", type=int, default=None, metavar="N", help="Limit to first N games (sorted by game_id)")
     p.add_argument("--game-id", action="append", default=None, metavar="ID", dest="game_ids",
                    help="Process only this game_id (repeatable). Also dumps the raw .tch text to "
@@ -137,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             recency_cutoff_game_id=args.recency_cutoff_game_id,
             recency_weight=args.recency_weight,
             workers=effective_workers,
+            bundle_out_dir=Path(args.bundle_out_dir) if args.bundle_out_dir else None,
             on_game_done=_on_game_done,
         )
     finally:

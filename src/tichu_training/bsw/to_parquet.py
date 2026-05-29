@@ -43,10 +43,18 @@ import pyarrow.parquet as pq
 from tichu_engine.cards import Card, SpecialCard
 from tichu_engine.combinations import CardOrSpecial
 from tichu_training.action_space import ACTION_SPACE_VERSION
+from tichu_training.bc.dataset import BCExample, _KIND_TO_DECISION_TYPE
 from tichu_training.bsw.parser import parse_tch
 from tichu_training.bsw.records import ParsedAction, ParsedGame, ParsedRound, game_team_totals
 from tichu_training.bsw.replay import ReplayResult, replay_round
 from tichu_training.featurizer import FEATURIZER_VERSION
+
+
+# Neutral skill bucket (the "11th row") for handles with no rating, matching
+# `ParquetBCDataset`'s `_neutral_decile = skill_buckets`. The bundle's meta
+# dtype stores skill_decile as a uint8, so it must always be a concrete int —
+# unlike the parquet path's nullable column.
+_DEFAULT_SKILL_BUCKETS: int = 10
 
 
 _DECISION_TYPE_BY_KIND: dict[str, str] = {
@@ -126,6 +134,12 @@ class _GameResult:
     rounds_total: int
     rounds_matched: int
     failures: list[RoundFailure]
+    # Populated only when `emit_bundle=True`: the BCExamples for the same
+    # validated rounds, featurised at each decision boundary. Empty otherwise
+    # so the no-bundle path pays nothing. See the consolidation handoff —
+    # these come from the *same* replay that produced `records`, so the
+    # engine runs once per round instead of once per pipeline.
+    bc_examples: list["BCExample"] = field(default_factory=list)
     # True if the game's summed ergebnis reaches 1000 for at least one team
     # (Complete Game); False if it's an Incomplete Session. None when parse
     # failed and there's no ergebnis to read.
@@ -145,15 +159,22 @@ def _process_game(
     skill_lookup: dict[str, int | None],
     recency_cutoff_game_id: int,
     recency_weight: float,
+    emit_bundle: bool = False,
+    neutral_decile: int = _DEFAULT_SKILL_BUCKETS,
 ) -> _GameResult:
     """Replay every round of `game` and emit per-decision records for the
     rounds whose engine Ergebnis matches BSW's. Module-level (picklable) so it
-    runs in ProcessPoolExecutor workers."""
+    runs in ProcessPoolExecutor workers.
+
+    With `emit_bundle=True`, the same replay also yields featurised
+    `BCExample`s into the result — the consolidation that lets one engine
+    pass feed both the parquet manifest and the materialised bundle."""
     sample_weight = _sample_weight_for(
         game.game_id or "", recency_cutoff_game_id, recency_weight,
     )
     team_totals = game_team_totals(game)
     records: list[_Record] = []
+    bc_examples: list[BCExample] = []
     failures: list[RoundFailure] = []
     rounds_total = 0
     rounds_matched = 0
@@ -172,12 +193,21 @@ def _process_game(
             sample_weight=sample_weight,
             team_totals=team_totals,
         ))
+        if emit_bundle:
+            bc_examples.extend(_emit_bc_examples_for_round(
+                parsed_round, replay,
+                skill_lookup=skill_lookup,
+                sample_weight=sample_weight,
+                team_totals=team_totals,
+                neutral_decile=neutral_decile,
+            ))
     return _GameResult(
         game_id=game_id,
         records=records,
         rounds_total=rounds_total,
         rounds_matched=rounds_matched,
         failures=failures,
+        bc_examples=bc_examples,
         is_complete_game=team_totals is not None,
     )
 
@@ -188,6 +218,7 @@ def _parse_and_process(
     skill_lookup: dict[str, int | None],
     recency_cutoff_game_id: int,
     recency_weight: float,
+    emit_bundle: bool = False,
 ) -> _GameResult:
     """Worker for `stream_raw_to_parquet`: parse `.tch` text + replay + emit
     in one process boundary crossing. Moves the parse cost off the dispatcher
@@ -209,6 +240,7 @@ def _parse_and_process(
         skill_lookup=skill_lookup,
         recency_cutoff_game_id=recency_cutoff_game_id,
         recency_weight=recency_weight,
+        emit_bundle=emit_bundle,
     )
 
 
@@ -267,10 +299,16 @@ def stream_to_parquet(
     recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
     rows_per_flush: int = _DEFAULT_ROWS_PER_FLUSH,
     workers: int = 1,
+    bundle_out_dir: Path | None = None,
     on_game_done: Callable[["StreamStats"], None] | None = None,
 ) -> StreamStats:
     """Stream pre-parsed games to per-decision Parquet shards, filtering at
     the Round granularity (see ADR-0009).
+
+    With `bundle_out_dir` set, the same replay pass also writes a
+    `MemmapBCDataset`-readable bundle there — consolidating the two engine
+    replays (parse_bsw + materialise_bc) into one. See the 2026-05-29
+    pipeline-perf handoff.
 
     Prefer `stream_raw_to_parquet` for production runs over `.tch` archives:
     it parses inside workers, which removes parse_tch from the serial
@@ -283,11 +321,13 @@ def stream_to_parquet(
         skill_lookup=skill_lookup,
         recency_cutoff_game_id=recency_cutoff_game_id,
         recency_weight=recency_weight,
+        emit_bundle=bundle_out_dir is not None,
     )
     return _run_stream(
         games, output_dir, worker,
         rows_per_flush=rows_per_flush,
         workers=workers,
+        bundle_out_dir=bundle_out_dir,
         on_game_done=on_game_done,
     )
 
@@ -301,23 +341,29 @@ def stream_raw_to_parquet(
     recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
     rows_per_flush: int = _DEFAULT_ROWS_PER_FLUSH,
     workers: int = 1,
+    bundle_out_dir: Path | None = None,
     on_game_done: Callable[["StreamStats"], None] | None = None,
 ) -> StreamStats:
     """Stream raw `(game_id, tch_text)` pairs to per-decision Parquet shards,
     parsing inside the worker process. Parse failures are recorded in
     `StreamStats.parse_failures` and surface via `on_game_done` like any
-    other completed game (so the progress bar advances)."""
+    other completed game (so the progress bar advances).
+
+    With `bundle_out_dir` set, the same replay pass also writes a
+    `MemmapBCDataset`-readable bundle there (consolidation handoff)."""
     skill_lookup = _load_skill_lookup(ratings_path) if ratings_path else {}
     worker = partial(
         _parse_and_process,
         skill_lookup=skill_lookup,
         recency_cutoff_game_id=recency_cutoff_game_id,
         recency_weight=recency_weight,
+        emit_bundle=bundle_out_dir is not None,
     )
     return _run_stream(
         pairs, output_dir, worker,
         rows_per_flush=rows_per_flush,
         workers=workers,
+        bundle_out_dir=bundle_out_dir,
         on_game_done=on_game_done,
     )
 
@@ -329,6 +375,7 @@ def _run_stream(
     *,
     rows_per_flush: int,
     workers: int,
+    bundle_out_dir: Path | None = None,
     on_game_done: Callable[["StreamStats"], None] | None,
 ) -> StreamStats:
     """Shared dispatch loop. `worker` consumes one source item and returns a
@@ -339,6 +386,12 @@ def _run_stream(
     leave valid (footer-written) Parquet files. After the iterator drains,
     any decision types that never saw a record get an empty file written so
     the on-disk shape is invariant.
+
+    When `bundle_out_dir` is set, each result's `bc_examples` are streamed
+    into `materialise()` as the results arrive — the writer pulls examples
+    incrementally rather than the dispatcher buffering the whole corpus, so
+    peak RAM stays bounded by `materialise`'s chunk size regardless of how
+    many games are processed.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -384,10 +437,11 @@ def _run_stream(
         if on_game_done is not None:
             on_game_done(stats)
 
-    try:
+    def _iter_results():
+        """Yield one `_GameResult` per source item as it completes."""
         if workers <= 1:
             for item in source:
-                _apply(worker(item))
+                yield worker(item)
         else:
             # Sliding-window submit + wait so `on_game_done` fires per game (not
             # per `pool.map` chunk) and the input iterator isn't drained upfront.
@@ -408,8 +462,25 @@ def _run_stream(
                 while pending:
                     done, pending = wait(pending, return_when=FIRST_COMPLETED)
                     for fut in done:
-                        _apply(fut.result())
+                        yield fut.result()
                     _top_up(len(done))
+
+    def _apply_results_emitting_examples():
+        """Drive every result through `_apply` (parquet rows + stats) and
+        yield its `bc_examples`, so a downstream `materialise()` pulls the
+        bundle stream incrementally instead of after a full-corpus buffer."""
+        for result in _iter_results():
+            _apply(result)
+            yield from result.bc_examples
+
+    try:
+        if bundle_out_dir is not None:
+            # Deferred import: the bundle writer pulls in numpy + the bc layout.
+            from tichu_training.bc.materialised import materialise
+            materialise(_apply_results_emitting_examples(), bundle_out_dir)
+        else:
+            for result in _iter_results():
+                _apply(result)
         for decision_type in _KNOWN_DECISION_TYPES:
             _flush(decision_type)
             if decision_type not in writers:
@@ -418,6 +489,7 @@ def _run_stream(
     finally:
         for w in writers.values():
             w.close()
+
     return stats
 
 
@@ -467,6 +539,83 @@ def _emit_records_for_round(
             action_space_version=ACTION_SPACE_VERSION,
             skill_decile=skill_lookup.get(handle),
             sample_weight=sample_weight,
+        )
+
+
+def _emit_bc_examples_for_round(
+    parsed_round: ParsedRound,
+    replay: ReplayResult,
+    *,
+    skill_lookup: dict[str, int | None],
+    sample_weight: float,
+    team_totals: tuple[int, int] | None,
+    neutral_decile: int,
+):
+    """Yield one `BCExample` per BC-relevant decision in a validated round.
+
+    Mirrors `ParquetBCDataset.__iter__` (and `_worker_loop`) exactly: same
+    decision-type filter, same featurise/target/legal-mask logic, same skip
+    conditions, same field values. Keeping this in lockstep is what makes the
+    consolidated bundle byte-identical to the parquet -> materialise bundle.
+    """
+    from tichu_training.action_space import bc_target_for_concrete, legal_mask
+    from tichu_training.featurizer import featurize
+    from tichu_engine.state import DragonGivePending
+
+    team_outcome = float(parsed_round.ergebnis[0] - parsed_round.ergebnis[1])
+    for (parsed_action, concrete), pre_state, cached_actions in zip(
+        replay.decisions,
+        replay.pre_decision_states,
+        replay.legal_actions_at,
+    ):
+        if pre_state is None:
+            continue  # Tichu/Grand-Tichu passthrough or phantom pass
+        decision_type = _KIND_TO_DECISION_TYPE.get(parsed_action.kind)
+        if decision_type is None:
+            continue  # schupfen, tichu, grand_tichu — not BC's job
+        player = parsed_action.player
+        if not 0 <= player < 4:
+            continue
+        private = pre_state.private_view(player)
+        features = featurize(private)
+        if decision_type == "dragon_assignment":
+            pending = pre_state.public.pending_decision
+            if not isinstance(pending, DragonGivePending):
+                continue
+            try:
+                target = bc_target_for_concrete(
+                    decision_type, concrete, winner_seat=pending.winner,
+                )
+            except ValueError:
+                continue
+        else:
+            try:
+                target = bc_target_for_concrete(decision_type, concrete)
+            except ValueError:
+                continue
+        mask = legal_mask(
+            decision_type, pre_state, player, cached_actions=cached_actions,
+        )
+        if not mask[target]:
+            continue
+        handle = parsed_round.handles[player]
+        skill = skill_lookup.get(handle, neutral_decile)
+        if skill is None:
+            skill = neutral_decile
+        team = player % 2
+        if team_totals is None:
+            game_won: bool | None = None
+        else:
+            game_won = team_totals[team] > team_totals[1 - team]
+        yield BCExample(
+            decision_type=decision_type,
+            features=features,
+            target=int(target),
+            legal_mask=mask,
+            sample_weight=sample_weight,
+            skill_decile=skill,
+            round_outcome=team_outcome,
+            game_won=game_won,
         )
 
 
