@@ -65,6 +65,14 @@ class Single(_SameTypeRankCompare):
     def __post_init__(self) -> None:
         if self.as_rank is not None and self.card is not PHOENIX:
             raise ValueError("as_rank is only valid when the card is Phoenix")
+        # Cache the dataclass-equivalent hash on the instance. Combination
+        # classes are immutable (`frozen=True`) so the hash never goes
+        # stale. Subsequent `hash(x)` calls become a single attribute
+        # read. See 2026-05-29 card-hash-caching notes for context.
+        object.__setattr__(self, "_hash", hash((self.card, self.as_rank)))
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     @property
     def rank(self) -> float:
@@ -127,6 +135,10 @@ class Pair(_SameTypeRankCompare):
         a, b = _canonical_order((self.a, self.b))
         object.__setattr__(self, "a", a)
         object.__setattr__(self, "b", b)
+        object.__setattr__(self, "_hash", hash((a, b)))
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     @property
     def rank(self) -> int:
@@ -145,6 +157,10 @@ class Triple(_SameTypeRankCompare):
         object.__setattr__(self, "a", a)
         object.__setattr__(self, "b", b)
         object.__setattr__(self, "c", c)
+        object.__setattr__(self, "_hash", hash((a, b, c)))
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     @property
     def rank(self) -> int:
@@ -168,6 +184,10 @@ class FourOfAKindBomb(_SameTypeRankCompare):
         object.__setattr__(self, "b", b)
         object.__setattr__(self, "c", c)
         object.__setattr__(self, "d", d)
+        object.__setattr__(self, "_hash", hash((a, b, c, d)))
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     @property
     def rank(self) -> int:
@@ -195,6 +215,10 @@ class StraightFlushBomb:
             if ranks[i] != ranks[i - 1] + 1:
                 raise ValueError(f"StraightFlushBomb requires consecutive ranks, got {ranks}")
         object.__setattr__(self, "cards", sorted_cards)
+        object.__setattr__(self, "_hash", hash((sorted_cards,)))
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     @property
     def rank(self) -> int:
@@ -233,6 +257,10 @@ class FullHouse(_SameTypeRankCompare):
         pair_has_phoenix = any(c is PHOENIX for c in (self.pair.a, self.pair.b))
         if triple_has_phoenix and pair_has_phoenix:
             raise ValueError("FullHouse cannot use Phoenix in both the triple and the pair")
+        object.__setattr__(self, "_hash", hash((self.triple, self.pair)))
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     @property
     def rank(self) -> int:
@@ -252,6 +280,10 @@ class PairStep(_SameTypeSameLengthRankCompare):
             if ranks[i] != ranks[i - 1] + 1:
                 raise ValueError(f"PairStep requires consecutive pair ranks, got {ranks}")
         object.__setattr__(self, "pairs", sorted_pairs)
+        object.__setattr__(self, "_hash", hash((sorted_pairs,)))
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     @property
     def rank(self) -> int:
@@ -301,6 +333,12 @@ class Straight(_SameTypeSameLengthRankCompare):
         # Canonicalize: normal cards in rank order, Phoenix/Mahjong at their slots.
         sorted_cards = self._canonical_card_order(all_ranks)
         object.__setattr__(self, "cards", sorted_cards)
+        object.__setattr__(
+            self, "_hash", hash((sorted_cards, self.phoenix_as_rank)),
+        )
+
+    def __hash__(self) -> int:
+        return self._hash  # type: ignore[attr-defined]
 
     def _canonical_card_order(self, all_ranks: list[int]) -> tuple[CardOrSpecial, ...]:
         cards_by_rank: dict[int, CardOrSpecial] = {}
@@ -350,4 +388,7 @@ class Straight(_SameTypeSameLengthRankCompare):
         obj = object.__new__(cls)
         object.__setattr__(obj, "cards", cards)
         object.__setattr__(obj, "phoenix_as_rank", phoenix_as_rank)
+        # Must match the regular `__post_init__` hash so canonical-path
+        # and trusted-path Straights collide in sets/frozensets.
+        object.__setattr__(obj, "_hash", hash((cards, phoenix_as_rank)))
         return obj
