@@ -69,16 +69,13 @@ awr:
   baseline_sgd_steps_per_chunk: 3
   chunk_size: 16384
 
-  # Opt-in early stop for the baseline fit (Phase 2). Disabled by
-  # default (patience: 0). At corpus scale Phase 2 otherwise iterates
-  # the full dataset (~9h) even after running_mse has visibly plateaued.
-  # Set patience to N chunks of no improvement, and min_delta to the
-  # smallest improvement that counts as meaningful (against noise).
-  # Example for a corpus run where running_mse plateaus around chunk 100:
-  #   baseline_early_stop_patience: 20
-  #   baseline_early_stop_min_delta: 1.0e-4
-  # baseline_early_stop_patience: 0
-  # baseline_early_stop_min_delta: 0.0
+  # Early stop for Phase 2. The first awr_full_100k_v3_game run (2026-05-29)
+  # showed V plateauing at running_mse ≈ 0.229 by chunk ~100 and
+  # oscillating thereafter — the remaining ~8h of Phase 2 added nothing.
+  # patience=20 chunks at chunk_size=16384 ≈ 330k examples of "no further
+  # improvement" before bailing; min_delta=1e-4 ignores per-chunk noise.
+  baseline_early_stop_patience: 20
+  baseline_early_stop_min_delta: 1.0e-4
 
   held_out_fraction: 0.05
   max_held_out: 20000

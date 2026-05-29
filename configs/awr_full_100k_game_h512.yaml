@@ -1,0 +1,75 @@
+# AWR full-arch + game target + WIDER value baseline (hidden=512).
+#
+# Sibling to `configs/awr_full_100k_game.yaml` (which uses hidden=128).
+# Tests the hypothesis: "V plateauing at running_mse ~0.229 with
+# hidden=128 is capacity-bound, not signal-bound." If hidden=512 lifts
+# variance-captured meaningfully, the BC trunk's 512-dim representation
+# DOES encode game-outcome predictability and the previous V was just
+# too small to extract it. If hidden=512 still plateaus near 0.229,
+# the limit is in the features, not the baseline — and the followup
+# is trunk-sharing or a per-state belief module, not a wider V.
+#
+# Run from the worktree:
+#
+#   py -3.14 -m tichu_training.cli.train_bc `
+#     --config configs/awr_full_100k_game_h512.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\awr_full_100k_v3_game_h512 `
+#     --refine-from C:\workbench\tichu\data\runs\bc_full_100k_v2\checkpoints\step_e000_b00050000.bin `
+#     --device cuda --workers 6 -v
+#
+# Single-variable change vs `awr_full_100k_game.yaml`:
+#   * baseline_hidden: 128 -> 512
+# Everything else (BC arch, value_target, baseline_lr, sgd_steps_per_chunk,
+# early-stop knobs) is identical — apples-to-apples isolates the V-width
+# effect.
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_100k_v3
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
+  expected_featurizer_version: v2
+  expected_action_space_version: v1
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 1
+seed: 0
+
+awr:
+  streaming: true
+  standardize_advantages: true
+  beta: 1.0
+  max_weight: 20.0
+
+  value_target: game
+
+  # 4x wider V vs the sibling config. Same baseline_lr to keep the
+  # experiment single-variable; if V diverges or oscillates, drop lr
+  # to 5e-4 in a v3 of this config.
+  baseline_hidden: 512
+  baseline_lr: 1.0e-3
+  baseline_sgd_steps_per_chunk: 3
+  chunk_size: 16384
+
+  # Same early-stop as the hidden=128 sibling — if hidden=512 also
+  # plateaus near 0.229, this lets it bail in minutes instead of hours.
+  baseline_early_stop_patience: 20
+  baseline_early_stop_min_delta: 1.0e-4
+
+  held_out_fraction: 0.05
+  max_held_out: 20000
+  eval_every_chunks: 5
