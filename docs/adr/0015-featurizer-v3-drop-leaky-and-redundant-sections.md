@@ -76,12 +76,29 @@ with three blocks removed and `cursor` arithmetic adjusted.
 
 1. **Storage gates the corpus path.** ADR-0014 adopted pre-featurise
    (β') as an additive training source. At v2 the materialised bundle
-   sized at ~4 TB for the 100k-game subset and ~13 TB for the full
-   2.4M-game corpus — the full-corpus number was the binding "is this
-   architecturally viable" question. At v3 the same workloads are
-   ~492 GB and ~1.48 TB respectively (raw f32, no quantisation, no
-   sparsity). **The full 2.4M-game corpus now fits on a single 2 TB
-   NVMe.** Storage stops being the question.
+   sized at ~4 TB for the 100k-game subset (~64M decisions per the
+   real parse_bsw manifest) and ~100 TB for the full 2.4M-game corpus
+   (~1.5B decisions, 24× the subset). The full-corpus number was the
+   binding "is this architecturally viable" question. At v3 the same
+   workloads land at:
+
+   | Layout | 100k subset (~64M dec) | Full 2.4M corpus (~1.5B dec) |
+   | --- | ---: | ---: |
+   | v3 raw f32 + raw mask | **~610 GB** | ~14.5 TB |
+   | v3 + bit-packed mask | ~520 GB | ~12.4 TB |
+   | v3 + bf16 + packed mask | ~270 GB | ~6.5 TB |
+   | v3 + int8 + packed mask | ~141 GB | **~3.4 TB** |
+
+   Per-row at v3 with raw mask: 7.7 KB features + 1.8 KB
+   legal_mask (play, dominant) + 13 B meta ≈ **9.5 KB/row**.
+
+   **The 100k-game subset is now trivially viable at raw f32 on a
+   1 TB drive.** That unblocks the active training workload (wider
+   BC, hyperparameter sweeps) which is what motivated ADR-0014.
+   **The full 2.4M-game corpus still needs quantisation** (int8 +
+   bit-packed mask brings it to ~3.4 TB, tight on a 4 TB NVMe) — but
+   the gap is now 4× instead of 25×, and quantisation is a tractable
+   follow-up rather than a load-bearing prerequisite.
 
 2. **`play_history`'s information content is small relative to its
    cost.** Round-wide card visibility lives in `seen_cards`; the
@@ -187,9 +204,14 @@ with three blocks removed and `cursor` arithmetic adjusted.
 
 - **Engine-level `played_by` / `tricks_won` in v3.** Deferred — see
   rationale #5. Featurizer-only v3 is the minimum-commitment path
-  that unlocks ADR-0014's full-corpus target.
+  that unblocks the active 100k-game workload and shrinks the
+  full-corpus problem from 25× over a 4 TB drive to 4× — quantisation
+  closes the rest.
 
 - **Quantisation (bf16 / int8) in v3.** Out of scope. v3's 1,983-dim
-  raw f32 already meets ADR-0014's full-corpus target on a single
-  2 TB drive. Quantisation can be layered later as an orthogonal
-  optimisation.
+  raw f32 is sufficient for the active 100k-game subset (fits
+  comfortably on a 1 TB drive). Quantisation is still required for
+  full-corpus pre-featurisation (raw v3 at ~14.5 TB exceeds a 4 TB
+  NVMe) and remains a tractable follow-up — likely its own ADR
+  scoping int8 + bit-packed mask (~3.4 TB) with calibration and
+  before/after BC accuracy validation.
