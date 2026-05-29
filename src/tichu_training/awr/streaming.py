@@ -271,6 +271,7 @@ def fit_value_baseline_streaming(
         bar.set_postfix(
             chunk_mse=f"{chunk_mse:.2f}",
             running_mse=f"{running_mse:.2f}",
+            last_batch_mse=f"{last_batch_mse:.2f}",
             refresh=False,
         )
 
