@@ -172,6 +172,49 @@ def test_fit_value_baseline_streaming_filters_incomplete_sessions(tmp_path):
     )
 
 
+def test_fit_value_baseline_streaming_early_stop_caps_chunks(tmp_path):
+    """With early_stop_patience set, the fit terminates before the
+    stream is exhausted when running_mse plateaus. Verified by
+    comparing chunks written to baseline.csv against an uncapped run
+    on the same stream — the early-stop run must write fewer rows."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    # Lots of identical examples so running_mse plateaus immediately:
+    # one ex repeated yields a single-target stream, V hits a constant
+    # predictor in the first chunk and stays there.
+    base = next(iter(SyntheticBCDataset(seed=0, n_per_head=1, feature_dim=feature_dim)))
+    examples = [base] * 4000
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+
+    uncapped_csv = tmp_path / "uncapped.csv"
+    fit_value_baseline_streaming(
+        baseline, _factory(examples),
+        batch_size=32, lr=1e-2, chunk_size=200, sgd_steps_per_chunk=1,
+        held_out_filter=lambda e: False,
+        log_path=uncapped_csv,
+        show_progress=False,
+    )
+
+    baseline2 = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    capped_csv = tmp_path / "capped.csv"
+    fit_value_baseline_streaming(
+        baseline2, _factory(examples),
+        batch_size=32, lr=1e-2, chunk_size=200, sgd_steps_per_chunk=1,
+        held_out_filter=lambda e: False,
+        log_path=capped_csv,
+        early_stop_patience=2,
+        early_stop_min_delta=0.0,
+        show_progress=False,
+    )
+
+    uncapped_chunks = sum(1 for _ in csv.DictReader(uncapped_csv.open("r", encoding="utf-8")))
+    capped_chunks = sum(1 for _ in csv.DictReader(capped_csv.open("r", encoding="utf-8")))
+    assert capped_chunks < uncapped_chunks, (
+        f"early stop must terminate early: uncapped={uncapped_chunks}, "
+        f"capped={capped_chunks}"
+    )
+
+
 def test_fit_value_baseline_streaming_writes_baseline_csv(tmp_path):
     """When log_path is given, one row per chunk is written with the
     aggregate diagnostics, not just the per-batch noise."""

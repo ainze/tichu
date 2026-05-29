@@ -42,6 +42,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from tichu_training.awr.early_stop import EarlyStop
 from tichu_training.awr.refine import (
     _CSV_FIELDS,
     _append_csv,
@@ -159,6 +160,8 @@ def fit_value_baseline_streaming(
     held_out_filter: HeldOutFilter | None = None,
     log_path: Path | None = None,
     value_target: str = "round",
+    early_stop_patience: int = 0,
+    early_stop_min_delta: float = 0.0,
     show_progress: bool = True,
 ) -> float:
     """SGD-fit the value baseline by streaming the dataset once.
@@ -245,6 +248,9 @@ def fit_value_baseline_streaming(
 
     chunks_done = 0
     examples_seen = 0
+    early_stop = EarlyStop(
+        patience=early_stop_patience, min_delta=early_stop_min_delta,
+    )
 
     def _flush_chunk(buf: list[BCExample]) -> None:
         nonlocal chunks_done, examples_seen
@@ -252,6 +258,7 @@ def fit_value_baseline_streaming(
         chunks_done += 1
         examples_seen += len(buf)
         running_mse = running_sse / max(1, running_n)
+        early_stop.update(running_mse)
         if csv_writer is not None:
             csv_writer.writerow({
                 "chunk_idx": chunks_done,
@@ -276,7 +283,15 @@ def fit_value_baseline_streaming(
             if len(chunk) >= chunk_size:
                 _flush_chunk(chunk)
                 chunk.clear()
-        if chunk:
+                # Opt-in early stop: when running_mse plateaus past
+                # `patience` chunks, drop out of the dataset iteration
+                # instead of streaming the rest for no gain.
+                if early_stop.should_stop():
+                    break
+        # Flush whatever's left if we exhausted the stream (no early
+        # stop fired) — but skip the trailing partial chunk if we did
+        # stop early, since the user signalled "stop now."
+        if chunk and not early_stop.should_stop():
             _flush_chunk(chunk)
     finally:
         bar.close()

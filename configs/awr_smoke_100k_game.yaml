@@ -81,6 +81,13 @@ awr:
   baseline_sgd_steps_per_chunk: 3
   chunk_size: 16384
 
+  # Opt-in early stop for Phase 2 (disabled by default). At smoke scale
+  # this is unlikely to help — Phase 2 finishes in minutes. Documented
+  # here so the knob is visible on the same surface as the full-arch
+  # config. See `configs/awr_full_100k_game.yaml` for typical values.
+  # baseline_early_stop_patience: 0
+  # baseline_early_stop_min_delta: 0.0
+
   held_out_fraction: 0.05
   max_held_out: 20000
   eval_every_chunks: 5

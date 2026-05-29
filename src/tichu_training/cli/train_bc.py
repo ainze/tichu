@@ -359,9 +359,19 @@ def _run_awr_refinement_streaming(
         hidden=int(awr_cfg.get("baseline_hidden", 128)),
     )
 
+    # Opt-in early stop for the baseline fit. Disabled by default — set
+    # `baseline_early_stop_patience > 0` to enable. Useful at corpus
+    # scale where Phase 2 otherwise iterates the full dataset (~hours)
+    # even after running_mse has visibly plateaued. Default
+    # `min_delta=0` means any non-improvement counts as a bad chunk;
+    # set a small positive value (e.g. 1e-4) to require meaningful
+    # improvement against noise.
+    early_stop_patience = int(awr_cfg.get("baseline_early_stop_patience", 0))
+    early_stop_min_delta = float(awr_cfg.get("baseline_early_stop_min_delta", 0.0))
     log.info(
-        "[awr/stream] phase 2: fitting value baseline by stream (value_target=%s)",
-        value_target,
+        "[awr/stream] phase 2: fitting value baseline by stream "
+        "(value_target=%s, early_stop_patience=%d, min_delta=%g)",
+        value_target, early_stop_patience, early_stop_min_delta,
     )
     baseline_mse = fit_value_baseline_streaming(
         baseline, dataset_factory,
@@ -372,6 +382,8 @@ def _run_awr_refinement_streaming(
         held_out_filter=held_out_filter,
         log_path=run_dir / "baseline.csv",
         value_target=value_target,
+        early_stop_patience=early_stop_patience,
+        early_stop_min_delta=early_stop_min_delta,
     )
     log.info("[awr/stream] baseline MSE after fit (running mean): %.4f", baseline_mse)
 
