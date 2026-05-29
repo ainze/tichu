@@ -51,13 +51,18 @@ def _build_indexed_archive(samples_dir: Path, archive_path: Path) -> None:
 def _fingerprint(ex: BCExample) -> tuple:
     """Order-independent identity for a BCExample. SHA-256 of the numpy
     payloads keeps the multiset comparison exact without dragging the
-    raw arrays into Python set hashing."""
+    raw arrays into Python set hashing.
+
+    Every BCExample field must appear here — otherwise a parallel-only
+    bug that mis-populates a field (e.g. shipping `game_won=None` while
+    sequential ships True/False) silently passes parity."""
     return (
         ex.decision_type,
         int(ex.target),
         float(ex.sample_weight),
         int(ex.skill_decile),
         float(ex.round_outcome),
+        ex.game_won,
         hashlib.sha256(ex.features.tobytes()).hexdigest(),
         hashlib.sha256(ex.legal_mask.tobytes()).hexdigest(),
     )
