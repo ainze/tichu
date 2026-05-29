@@ -130,6 +130,54 @@ _ENUMERATORS = [
 ]
 
 
+def bench_hash() -> None:
+    """Micro-bench __hash__ on the engine value types. py-spy on a
+    parse_bsw worker (2026-05-29) attributed ~14% of CPU to __hash__
+    across auto-generated dataclass paths — this characterises how
+    much of that is Card / SpecialCard vs the combination classes.
+    """
+    from tichu_engine.combinations import (
+        FourOfAKindBomb, FullHouse, Pair, PairStep, Single, Straight,
+        StraightFlushBomb, Triple,
+    )
+
+    iters = 1_000_000
+    card = Card(Suit.JADE, 7)
+    targets: list[tuple[str, object]] = [
+        ("Card", card),
+        ("SpecialCard (DRAGON)", PHOENIX),  # singleton path
+        ("Single(card)", Single(card)),
+        ("Pair", Pair(Card(Suit.JADE, 7), Card(Suit.SWORD, 7))),
+        ("Triple", Triple(
+            Card(Suit.JADE, 7), Card(Suit.SWORD, 7), Card(Suit.PAGODA, 7),
+        )),
+        ("Straight (5-card)", Straight(tuple(
+            Card(Suit.JADE, r) for r in range(2, 7)
+        ))),
+        ("FourOfAKindBomb", FourOfAKindBomb(
+            Card(Suit.JADE, 7), Card(Suit.SWORD, 7),
+            Card(Suit.PAGODA, 7), Card(Suit.STAR, 7),
+        )),
+        ("StraightFlushBomb (5)", StraightFlushBomb(tuple(
+            Card(Suit.JADE, r) for r in range(2, 7)
+        ))),
+        ("Suit.JADE", Suit.JADE),
+        ("(suit, rank) tuple", (Suit.JADE, 7)),
+    ]
+    print(f"\n__hash__ microbench, {iters:,} hashes per type:\n")
+    print(f"{'type':<28}{'ns/hash':>12}")
+    print("-" * 40)
+    for name, obj in targets:
+        # Warm up.
+        hash(obj)
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            hash(obj)
+        elapsed = time.perf_counter() - t0
+        ns_per = elapsed * 1e9 / iters
+        print(f"{name:<28}{ns_per:>11.1f}")
+
+
 def _bench(name: str, fn, hand: frozenset, iters: int) -> tuple[float, int]:
     # Warm up + JIT-friendly: one call to amortise the dispatch cost.
     fn(hand)
@@ -150,7 +198,14 @@ def main() -> int:
     p.add_argument("--enumerator", choices=[name for name, _ in _ENUMERATORS],
                    default=None,
                    help="Bench only one enumerator. Default: all.")
+    p.add_argument("--hash", action="store_true",
+                   help="Run the __hash__ microbench instead of the "
+                        "enumerator bench.")
     args = p.parse_args()
+
+    if args.hash:
+        bench_hash()
+        return 0
 
     hands = {args.hand: _HANDS[args.hand]} if args.hand else _HANDS
     enumerators = (
