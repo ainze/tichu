@@ -89,75 +89,76 @@ _GAME_WON_NONE_CODE: int = -1
 # Writer
 # ----------------------------------------------------------------------
 
+_DEFAULT_CHUNK_SIZE: int = 25_000
+
+
 def materialise(
     stream: Iterable[BCExample],
     out_dir: str | Path,
     *,
-    max_examples: int,
+    max_examples: int | None = None,
+    chunk_size: int = _DEFAULT_CHUNK_SIZE,
     progress_every: int = 25_000,
 ) -> dict[str, int]:
-    """Drive `stream` for up to `max_examples`, bucket by decision_type,
-    and write the per-type memmap files + order.dat + manifest.json.
+    """Drive `stream`, bucket by decision_type, and write per-type memmap
+    files + order.dat + manifest.json in a streaming, chunked fashion.
+
+    `max_examples=None` (the default) drains the stream until exhaustion.
+    Pass an int to cap the bundle at that many examples (counts against
+    the stream after the decision-type filter, so the wall total is at
+    most `max_examples`).
+
+    `chunk_size` bounds peak RAM. Each per-type buffer holds at most
+    `chunk_size` BCExamples before being stacked + appended to the
+    on-disk file and cleared. With default 25,000 and the production
+    16,624-float feature vector, the per-type buffer peak is ~1.7 GB.
+    The order-pair buffer flushes on the same cadence.
 
     Returns a dict mapping decision_type -> rows written. The total is
-    `sum(counts.values())` which may be less than `max_examples` if the
-    stream exhausted first.
+    `sum(counts.values())` which may be less than `max_examples` (if
+    the stream exhausted first) or equal to it (if the cap was hit).
 
-    The transient peak RSS is ~ (rows * feature_bytes_per_row) until
-    all three per-type buffers are stacked + written; for 250k examples
-    that's about 17 GB. Long materialise passes should chunk via the
-    CLI (which calls this once per chunk).
+    Re-running with the same `out_dir` truncates the prior bundle's
+    files before writing, so the operation is idempotent.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    per_type: dict[str, list[BCExample]] = {h: [] for h in TYPE_ORDER}
-    order_pairs: list[tuple[int, int]] = []
     type_idx_for = {h: i for i, h in enumerate(TYPE_ORDER)}
+    per_type_buf: dict[str, list[BCExample]] = {h: [] for h in TYPE_ORDER}
+    # `rows_written[type]` is the number of rows ALREADY on disk for that
+    # type. The row_idx of an example currently in the buffer is
+    # `rows_written[type] + offset_in_buffer`, which matches its final
+    # on-disk index after the next flush.
+    rows_written: dict[str, int] = {h: 0 for h in TYPE_ORDER}
+    order_buf: list[tuple[int, int]] = []
+    bytes_written: dict[str, int] = {h: 0 for h in TYPE_ORDER}
 
-    t0 = time.perf_counter()
-    n = 0
-    last_t = t0
-    last_n = 0
-    log.info(
-        "materialising up to %d BCExamples to %s ...", max_examples, out_dir,
-    )
-    for ex in stream:
-        bucket = per_type.get(ex.decision_type)
-        if bucket is None:
-            # Decision type outside HEAD_LOGIT_DIMS; defensive skip.
-            continue
-        order_pairs.append((type_idx_for[ex.decision_type], len(bucket)))
-        bucket.append(ex)
-        n += 1
-        if n >= max_examples:
-            break
-        if n - last_n >= progress_every:
-            now = time.perf_counter()
-            rate = (n - last_n) / max(1e-9, now - last_t)
-            log.info("  ... %d/%d  (%.0f ex/s)", n, max_examples, rate)
-            last_t = now
-            last_n = n
+    # Truncate any prior bundle's files so the writer is idempotent.
+    # Open in "wb" (truncating) once up-front, close immediately, then
+    # all subsequent writes use "ab" (append) — keeps fd churn low.
+    _feat_paths = {h: out_dir / f"{h}_features.dat" for h in TYPE_ORDER}
+    _mask_paths = {h: out_dir / f"{h}_legal_mask.dat" for h in TYPE_ORDER}
+    _meta_paths = {h: out_dir / f"{h}_meta.dat" for h in TYPE_ORDER}
+    _order_path = out_dir / "order.dat"
+    for p in (
+        list(_feat_paths.values())
+        + list(_mask_paths.values())
+        + list(_meta_paths.values())
+        + [_order_path]
+    ):
+        with p.open("wb"):
+            pass  # truncate
 
-    elapsed = time.perf_counter() - t0
-    counts = {h: len(per_type[h]) for h in TYPE_ORDER}
-    log.info(
-        "streamed %d ex in %.1fs (%.0f ex/s); per-type counts: %s",
-        n, elapsed, n / max(1e-9, elapsed), counts,
-    )
-
-    for type_name in TYPE_ORDER:
-        examples = per_type[type_name]
+    def _flush_type(type_name: str) -> None:
+        """Stack + append the per-type buffer to disk, clear it."""
+        examples = per_type_buf[type_name]
         if not examples:
-            log.info("  %s: 0 examples (skipping write)", type_name)
-            continue
+            return
         mask_dim = HEAD_LOGIT_DIMS[type_name]
-        t_write = time.perf_counter()
-        log.info(
-            "  %s: writing %d rows (features %d f32, mask %d u8) ...",
-            type_name, len(examples), FEATURIZER_OUTPUT_DIM, mask_dim,
+        feat = np.stack([e.features for e in examples]).astype(
+            np.float32, copy=False,
         )
-        feat = np.stack([e.features for e in examples])
         mask = np.stack(
             [np.asarray(e.legal_mask, dtype=np.uint8) for e in examples]
         )
@@ -171,30 +172,88 @@ def materialise(
                 _GAME_WON_NONE_CODE if e.game_won is None
                 else (1 if e.game_won else 0)
             )
-        feat.tofile(out_dir / f"{type_name}_features.dat")
-        mask.tofile(out_dir / f"{type_name}_legal_mask.dat")
-        meta.tofile(out_dir / f"{type_name}_meta.dat")
-        # Drop references aggressively so the next type's stack doesn't
-        # compete for RAM peak.
-        per_type[type_name] = []
-        del feat, mask, meta, examples
-        dt = time.perf_counter() - t_write
-        bytes_written = (
+        with _feat_paths[type_name].open("ab") as fh:
+            feat.tofile(fh)
+        with _mask_paths[type_name].open("ab") as fh:
+            mask.tofile(fh)
+        with _meta_paths[type_name].open("ab") as fh:
+            meta.tofile(fh)
+        n_rows = len(examples)
+        rows_written[type_name] += n_rows
+        bytes_written[type_name] += (
             (FEATURIZER_OUTPUT_DIM * 4 + mask_dim + META_DTYPE.itemsize)
-            * counts[type_name]
+            * n_rows
         )
-        log.info(
-            "    wrote %.2f GB in %.1fs (%.2f GB/s)",
-            bytes_written / 1e9, dt, bytes_written / 1e9 / max(1e-9, dt),
-        )
+        per_type_buf[type_name] = []
+        # Drop the np arrays so the next chunk's stack doesn't pile up
+        # before GC sweeps.
+        del feat, mask, meta, examples
 
-    # order.dat preserves the original stream order so the reader can
-    # re-emit a mixed-type sequence matching the source.
-    order_arr = np.array(order_pairs, dtype=np.uint32)
-    order_arr.tofile(out_dir / "order.dat")
+    def _flush_order() -> None:
+        if not order_buf:
+            return
+        arr = np.array(order_buf, dtype=np.uint32)
+        with _order_path.open("ab") as fh:
+            arr.tofile(fh)
+        order_buf.clear()
+
+    t0 = time.perf_counter()
+    n = 0
+    last_t = t0
+    last_n = 0
+    cap_str = "all" if max_examples is None else f"up to {max_examples}"
+    log.info(
+        "materialising %s BCExamples to %s (chunk_size=%d) ...",
+        cap_str, out_dir, chunk_size,
+    )
+    for ex in stream:
+        bucket = per_type_buf.get(ex.decision_type)
+        if bucket is None:
+            # Decision type outside HEAD_LOGIT_DIMS; defensive skip.
+            continue
+        order_buf.append((
+            type_idx_for[ex.decision_type],
+            rows_written[ex.decision_type] + len(bucket),
+        ))
+        bucket.append(ex)
+        n += 1
+        if len(bucket) >= chunk_size:
+            _flush_type(ex.decision_type)
+        if len(order_buf) >= chunk_size:
+            _flush_order()
+        if max_examples is not None and n >= max_examples:
+            break
+        if n - last_n >= progress_every:
+            now = time.perf_counter()
+            rate = (n - last_n) / max(1e-9, now - last_t)
+            total_str = (
+                f"/{max_examples}" if max_examples is not None else ""
+            )
+            log.info("  ... %d%s  (%.0f ex/s)", n, total_str, rate)
+            last_t = now
+            last_n = n
+
+    # Drain remaining partial buffers.
+    for type_name in TYPE_ORDER:
+        _flush_type(type_name)
+    _flush_order()
+
+    elapsed = time.perf_counter() - t0
+    counts = dict(rows_written)
+    log.info(
+        "streamed %d ex in %.1fs (%.0f ex/s); per-type counts: %s",
+        n, elapsed, n / max(1e-9, elapsed), counts,
+    )
+    for type_name in TYPE_ORDER:
+        if counts[type_name] == 0:
+            continue
+        log.info(
+            "  %s: wrote %d rows, %.2f GB",
+            type_name, counts[type_name], bytes_written[type_name] / 1e9,
+        )
     log.info(
         "  order.dat: %.2f MB (%d rows)",
-        order_arr.nbytes / 1e6, len(order_arr),
+        _order_path.stat().st_size / 1e6, n,
     )
 
     manifest = {

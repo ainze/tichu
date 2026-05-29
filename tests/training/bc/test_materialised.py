@@ -174,6 +174,84 @@ def test_n_rows_matches_manifest(materialised_smoke):
     assert ds.total == ds.n_rows
 
 
+def test_chunked_write_equivalent_to_unchunked(tmp_path: Path):
+    """A bundle materialised with chunk_size=7 must be byte-identical to
+    one materialised with a chunk_size larger than the stream — the
+    chunking is a memory optimisation, not a semantic change. Tests the
+    streaming append path is correct on the row-index bookkeeping
+    (which differs between chunked vs single-shot writes).
+    """
+    src = list(SyntheticBCDataset(seed=11, n_per_head=23, skill_buckets=10))
+    big = tmp_path / "big_chunk"
+    tiny = tmp_path / "tiny_chunk"
+    materialise(iter(src), big, chunk_size=10_000)  # one chunk per type
+    materialise(iter(src), tiny, chunk_size=7)      # many chunks per type
+
+    # All .dat files must be byte-identical.
+    for name in (
+        "play_features.dat", "play_legal_mask.dat", "play_meta.dat",
+        "wish_features.dat", "wish_legal_mask.dat", "wish_meta.dat",
+        "dragon_assignment_features.dat",
+        "dragon_assignment_legal_mask.dat",
+        "dragon_assignment_meta.dat",
+        "order.dat",
+    ):
+        assert (big / name).read_bytes() == (tiny / name).read_bytes(), (
+            f"chunked mismatch in {name}"
+        )
+
+    # And the round-tripped streams must match.
+    big_examples = list(MemmapBCDataset(big))
+    tiny_examples = list(MemmapBCDataset(tiny))
+    assert len(big_examples) == len(tiny_examples)
+    for a, b in zip(big_examples, tiny_examples):
+        assert a.decision_type == b.decision_type
+        assert a.target == b.target
+        np.testing.assert_array_equal(a.features, b.features)
+
+
+def test_no_cap_drains_stream(tmp_path: Path):
+    """`max_examples=None` (the default) must consume the entire input
+    iterable. Production runs rely on this — the CLI default is no-cap."""
+    src = list(SyntheticBCDataset(seed=5, n_per_head=11, skill_buckets=10))
+    out_dir = tmp_path / "uncapped"
+    counts = materialise(iter(src), out_dir)  # no max_examples kwarg
+    assert sum(counts.values()) == len(src)
+
+
+def test_max_examples_caps_at_target(tmp_path: Path):
+    """Cap semantics: at most `max_examples` rows written, even if the
+    stream is longer."""
+    src = list(SyntheticBCDataset(seed=5, n_per_head=20, skill_buckets=10))
+    assert len(src) > 30  # sanity
+    out_dir = tmp_path / "capped"
+    counts = materialise(iter(src), out_dir, max_examples=30)
+    assert sum(counts.values()) == 30
+
+
+def test_idempotent_rerun_overwrites_prior_bundle(tmp_path: Path):
+    """Running materialise twice into the same out_dir must produce the
+    same bundle as one run — the prior .dat files are truncated, not
+    appended-to. Without truncation, a re-run would corrupt the bundle.
+    """
+    src = list(SyntheticBCDataset(seed=3, n_per_head=12, skill_buckets=10))
+    out_dir = tmp_path / "rerun"
+    materialise(iter(src), out_dir)
+    first_sizes = {
+        p.name: p.stat().st_size
+        for p in out_dir.iterdir() if p.suffix == ".dat"
+    }
+    materialise(iter(src), out_dir)  # same data, same out_dir
+    second_sizes = {
+        p.name: p.stat().st_size
+        for p in out_dir.iterdir() if p.suffix == ".dat"
+    }
+    assert first_sizes == second_sizes
+    # And the bundle still reads correctly.
+    got = list(MemmapBCDataset(out_dir))
+    assert len(got) == len(src)
+
+
 def test_game_won_none_roundtrips(materialised_smoke):
     """SyntheticBCDataset emits ~10% game_won=None rows; the i1 sentinel
     encoding (-1) must roundtrip through materialise + read."""

@@ -59,10 +59,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out-dir", required=True, metavar="DIR",
                    help="Where the manifest + memmaps land. Created if "
                         "absent. Existing files are overwritten.")
-    p.add_argument("--max-examples", type=int, required=True, metavar="N",
-                   help="Cap on BCExamples to write. Use a small N for "
-                        "smoke (250k = ~17 GB), or the full corpus row "
-                        "count for production.")
+    p.add_argument("--max-examples", type=int, default=None, metavar="N",
+                   help="Optional cap on BCExamples to write. Default: "
+                        "drain the stream until exhaustion. Use a small N "
+                        "for smoke (e.g. 250000 ≈ 17 GB) to validate the "
+                        "pipeline end-to-end before committing to a full "
+                        "pass; omit for production runs.")
+    p.add_argument("--chunk-size", type=int, default=25_000, metavar="N",
+                   help="Per-type buffer size before flushing to disk. "
+                        "Bounds peak RAM at ~chunk_size × 67 KB per type "
+                        "(default 25,000 → ~1.7 GB peak). Lower this on "
+                        "small-RAM boxes; raise it to amortise flush "
+                        "overhead on long runs.")
     p.add_argument("--workers", type=int, default=10, metavar="N",
                    help="ParallelParquetBCDataset worker processes "
                         "(default 10). Each owns a hash-sharded slice of "
@@ -93,7 +101,11 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=args.workers,
     )
 
-    counts = materialise(ds, out_dir, max_examples=args.max_examples)
+    counts = materialise(
+        ds, out_dir,
+        max_examples=args.max_examples,
+        chunk_size=args.chunk_size,
+    )
     log.info("done: counts=%s, out_dir=%s", counts, out_dir)
     return 0
 
