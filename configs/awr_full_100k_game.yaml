@@ -1,0 +1,82 @@
+# AWR offline-RL refinement against the v3 100k parquet manifest,
+# fitting the Value Baseline on `game_won`, refining the **full-arch**
+# BC checkpoint (the canonical 84% play-acc reference from
+# `bc_full_100k_v2/checkpoints/step_e000_b00050000.bin`).
+#
+# Pair-runs against `configs/awr_full_100k.yaml` (round target) for the
+# A/B comparison at full-arch BC scale.
+#
+# Run from the worktree:
+#
+#   py -3.14 -m tichu_training.cli.train_bc `
+#     --config configs/awr_full_100k_game.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\awr_full_100k_v3_game `
+#     --refine-from C:\workbench\tichu\data\runs\bc_full_100k_v2\checkpoints\step_e000_b00050000.bin `
+#     --device cuda --workers 6 -v
+#
+# Differences from `configs/awr_smoke_100k_game.yaml`:
+#   * model: full-arch (1024 x 4 / 512 / 64 / 256) — MUST match the BC
+#     checkpoint's architecture exactly
+#   * baseline_hidden: 128 (was 64) — give V more capacity to learn
+#     calibrated probabilities at the larger trunk feature dim (512 vs 128)
+#
+# Differences from `configs/awr_smoke_100k.yaml`:
+#   * shards_dir: parquet_100k_v3 (carries the `game_won` column)
+#   * awr.value_target: game
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_100k_v3
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
+  expected_featurizer_version: v2
+  expected_action_space_version: v1
+
+# MUST match `bc_full_100k_v2` checkpoint architecture exactly.
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 1
+seed: 0
+
+awr:
+  streaming: true
+  standardize_advantages: true
+  beta: 1.0
+  max_weight: 20.0
+
+  # Fit V on game_won. See [ADR-0013](../docs/adr/0013-...).
+  value_target: game
+
+  # Larger trunk feeds 512-dim features into V; bump hidden from 64 to
+  # 128 vs the smoke-arch variant. Still smaller than the round-target
+  # baseline (which uses 128 at smoke scale because round_outcome has
+  # wider dynamic range to fit).
+  baseline_hidden: 128
+  baseline_lr: 1.0e-3
+  baseline_sgd_steps_per_chunk: 3
+  chunk_size: 16384
+
+  # Early stop for Phase 2. The first awr_full_100k_v3_game run (2026-05-29)
+  # showed V plateauing at running_mse ≈ 0.229 by chunk ~100 and
+  # oscillating thereafter — the remaining ~8h of Phase 2 added nothing.
+  # patience=20 chunks at chunk_size=16384 ≈ 330k examples of "no further
+  # improvement" before bailing; min_delta=1e-4 ignores per-chunk noise.
+  baseline_early_stop_patience: 20
+  baseline_early_stop_min_delta: 1.0e-4
+
+  held_out_fraction: 0.05
+  max_held_out: 20000
+  eval_every_chunks: 5

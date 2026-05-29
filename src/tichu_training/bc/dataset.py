@@ -57,6 +57,11 @@ class BCExample:
     # Used as the reward signal for AWR offline refinement (#012). Defaults
     # to 0.0 — BC training ignores it.
     round_outcome: float = 0.0
+    # Team-relative game-level outcome: True if the row's acting player's
+    # team won the Complete Game, False if it lost, None for an Incomplete
+    # Session (no game-level outcome to predict). Used by AWR when
+    # `value_target='game'`; None rows are filtered out of that fit.
+    game_won: bool | None = None
 
 
 class SyntheticBCDataset(Iterable[BCExample]):
@@ -99,6 +104,14 @@ class SyntheticBCDataset(Iterable[BCExample]):
                 # AWR value baseline has signal to fit. Magnitude (~ ±50) is
                 # plausible for Tichu Ergebnis values.
                 round_outcome = float(features[: min(4, features.size)].sum() * 10.0)
+                # Deterministic game_won so AWR's `value_target='game'` path
+                # has a fittable signal in synthetic tests. 10% None to
+                # exercise the Incomplete-Session filter.
+                roll = rng.random()
+                if roll < 0.1:
+                    game_won: bool | None = None
+                else:
+                    game_won = round_outcome > 0.0
                 yield BCExample(
                     decision_type=decision_type,
                     features=features,
@@ -107,6 +120,7 @@ class SyntheticBCDataset(Iterable[BCExample]):
                     sample_weight=1.0,
                     skill_decile=skill,
                     round_outcome=round_outcome,
+                    game_won=game_won,
                 )
 
 
@@ -231,6 +245,7 @@ class ParquetBCDataset(Iterable[BCExample]):
         # Deferred imports so the dataset module stays cheap to import.
         from tichu_training.bsw.archive import iter_archive
         from tichu_training.bsw.parser import parse_tch
+        from tichu_training.bsw.records import game_team_totals
         from tichu_training.bsw.replay import replay_round
         from tichu_training.action_space import bc_target_for_concrete, legal_mask
         from tichu_training.featurizer import featurize
@@ -245,6 +260,9 @@ class ParquetBCDataset(Iterable[BCExample]):
             except Exception:  # noqa: BLE001
                 continue
             sample_weight = self._sample_weight_for(stem)
+            # Computed once per game; per-row game_won is team-relative from
+            # the row's acting player's seat. None for an Incomplete Session.
+            team_totals = game_team_totals(game)
             valid_rounds = self._manifest[stem]
             for parsed_round in game.rounds:
                 if parsed_round.round_index not in valid_rounds:
@@ -308,6 +326,11 @@ class ParquetBCDataset(Iterable[BCExample]):
                         continue
                     handle = parsed_round.handles[player]
                     skill = self._skill_lookup.get(handle, self._neutral_decile)
+                    team = player % 2
+                    if team_totals is None:
+                        game_won: bool | None = None
+                    else:
+                        game_won = team_totals[team] > team_totals[1 - team]
                     yield BCExample(
                         decision_type=decision_type,
                         features=features,
@@ -316,6 +339,7 @@ class ParquetBCDataset(Iterable[BCExample]):
                         sample_weight=sample_weight,
                         skill_decile=skill,
                         round_outcome=team_outcome,
+                        game_won=game_won,
                     )
 
     def _sample_weight_for(self, game_id: str) -> float:

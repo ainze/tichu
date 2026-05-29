@@ -111,6 +111,110 @@ def test_fit_value_baseline_streaming_reduces_mse():
     assert final_mse < init_mse, f"expected MSE to drop, init={init_mse:.4f} final={final_mse:.4f}"
 
 
+def test_fit_value_baseline_streaming_under_game_target(tmp_path):
+    """value_target='game' fits V on game_won (0.0/1.0) instead of
+    round_outcome. Baseline must still reduce MSE on the new target."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    examples = list(SyntheticBCDataset(seed=0, n_per_head=200, feature_dim=feature_dim))
+    # Keep only examples with a defined game_won (drop synthetic Incomplete
+    # Sessions) so the initial-MSE baseline is well-defined.
+    examples = [e for e in examples if e.game_won is not None]
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+
+    feats = np.stack([e.features for e in examples])
+    targets = np.array(
+        [1.0 if e.game_won else 0.0 for e in examples], dtype=np.float32,
+    )
+    with torch.no_grad():
+        init_mse = float(((baseline(torch.from_numpy(feats)) - torch.from_numpy(targets)) ** 2).mean())
+
+    final_mse = fit_value_baseline_streaming(
+        baseline, _factory(examples),
+        batch_size=32, lr=1e-2, chunk_size=64, sgd_steps_per_chunk=2,
+        held_out_filter=lambda e: False,
+        value_target="game",
+        show_progress=False,
+    )
+    assert final_mse < init_mse, (
+        f"game-target MSE must drop, init={init_mse:.4f} final={final_mse:.4f}"
+    )
+    # Sanity: targets are bounded [0, 1] so MSE is bounded above by 1.0.
+    assert final_mse < 1.0
+
+
+def test_fit_value_baseline_streaming_filters_incomplete_sessions(tmp_path):
+    """Under value_target='game', rows with game_won=None must be filtered
+    out of the fit. Feeding only None rows yields final_mse=0.0 (nothing
+    was fit, no examples contributed to running_sse)."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    base = list(SyntheticBCDataset(seed=0, n_per_head=50, feature_dim=feature_dim))
+    # Force every example to be an Incomplete Session.
+    examples = [
+        BCExample(
+            decision_type=e.decision_type, features=e.features, target=e.target,
+            legal_mask=e.legal_mask, sample_weight=e.sample_weight,
+            skill_decile=e.skill_decile, round_outcome=e.round_outcome,
+            game_won=None,
+        ) for e in base
+    ]
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    final_mse = fit_value_baseline_streaming(
+        baseline, _factory(examples),
+        batch_size=32, lr=1e-2, chunk_size=64, sgd_steps_per_chunk=2,
+        held_out_filter=lambda e: False,
+        value_target="game",
+        show_progress=False,
+    )
+    assert final_mse == 0.0, (
+        f"expected 0.0 MSE when every row is filtered out, got {final_mse}"
+    )
+
+
+def test_fit_value_baseline_streaming_early_stop_caps_chunks(tmp_path):
+    """With early_stop_patience set, the fit terminates before the
+    stream is exhausted when running_mse plateaus. Verified by
+    comparing chunks written to baseline.csv against an uncapped run
+    on the same stream — the early-stop run must write fewer rows."""
+    torch.manual_seed(0)
+    feature_dim = 8
+    # Lots of identical examples so running_mse plateaus immediately:
+    # one ex repeated yields a single-target stream, V hits a constant
+    # predictor in the first chunk and stays there.
+    base = next(iter(SyntheticBCDataset(seed=0, n_per_head=1, feature_dim=feature_dim)))
+    examples = [base] * 4000
+    baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
+
+    uncapped_csv = tmp_path / "uncapped.csv"
+    fit_value_baseline_streaming(
+        baseline, _factory(examples),
+        batch_size=32, lr=1e-2, chunk_size=200, sgd_steps_per_chunk=1,
+        held_out_filter=lambda e: False,
+        log_path=uncapped_csv,
+        show_progress=False,
+    )
+
+    baseline2 = ValueBaseline(feature_dim=feature_dim, hidden=16)
+    capped_csv = tmp_path / "capped.csv"
+    fit_value_baseline_streaming(
+        baseline2, _factory(examples),
+        batch_size=32, lr=1e-2, chunk_size=200, sgd_steps_per_chunk=1,
+        held_out_filter=lambda e: False,
+        log_path=capped_csv,
+        early_stop_patience=2,
+        early_stop_min_delta=0.0,
+        show_progress=False,
+    )
+
+    uncapped_chunks = sum(1 for _ in csv.DictReader(uncapped_csv.open("r", encoding="utf-8")))
+    capped_chunks = sum(1 for _ in csv.DictReader(capped_csv.open("r", encoding="utf-8")))
+    assert capped_chunks < uncapped_chunks, (
+        f"early stop must terminate early: uncapped={uncapped_chunks}, "
+        f"capped={capped_chunks}"
+    )
+
+
 def test_fit_value_baseline_streaming_writes_baseline_csv(tmp_path):
     """When log_path is given, one row per chunk is written with the
     aggregate diagnostics, not just the per-batch noise."""

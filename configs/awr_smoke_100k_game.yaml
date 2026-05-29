@@ -1,0 +1,93 @@
+# AWR offline-RL refinement against the v3 100k parquet manifest,
+# fitting the Value Baseline on `game_won` instead of `round_outcome`.
+# Pair-runs against `configs/awr_smoke_100k.yaml` for the A/B comparing
+# round-outcome vs game-outcome targets on the same BC checkpoint.
+#
+# Run from the worktree:
+#
+#   python -m tichu_training.cli.train_bc `
+#     --config configs/awr_smoke_100k_game.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\awr_smoke_100k_v3_game `
+#     --refine-from C:\workbench\tichu\data\runs\bc_smoke_100k_v2\checkpoints\<latest>.bin `
+#     --device cuda --workers 6 -v
+#
+# Differences from awr_smoke_100k.yaml:
+#   * shards_dir bumped to parquet_100k_v3 (carries the `game_won` column)
+#   * awr.value_target: game (default is "round")
+#   * awr.baseline_hidden: 64 (was 128 — binary target needs less capacity)
+#   * loss stays MSE (Brier score on 0/1). BCE swap deferred to a v2 PR
+#     once we see whether MSE-on-binary converges adequately.
+#
+# Incomplete Sessions (ParsedGame where neither team reaches 1000) carry
+# game_won=NULL and are filtered out of the baseline fit and the AWR
+# refine pass under value_target=game. They still contribute to BC-only
+# training paths and to the held-out scan for win_rate_proxy.
+# See ADR-0013 and CONTEXT.md (Value Target, Complete Game / Incomplete
+# Session) for the schema-version + filter mechanics.
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:\workbench\tichu\data\parquet_100k_v3
+  archive_path: C:\workbench\tichu\data\archive.zst
+  ratings_path: C:\workbench\tichu\data\ratings_100k.parquet
+  expected_featurizer_version: v2
+  expected_action_space_version: v1
+
+# MUST match the BC checkpoint's architecture exactly — the model is
+# instantiated from this config and the checkpoint weights loaded in.
+# These match configs/bc_smoke_parquet.yaml.
+model:
+  trunk_hidden: 256
+  trunk_depth: 2
+  trunk_out_dim: 128
+  skill_dim: 32
+  head_hidden: 64
+
+# Smaller LR than BC: AWR is refining an already-converged policy. A
+# large step would undo the BC pretraining before the gradient becomes
+# meaningful.
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 1
+seed: 0
+
+awr:
+  streaming: true
+
+  # Standardise advantages to unit variance per chunk before computing
+  # weights. Less critical for the binary game_won target than for the
+  # heavy-tailed round_outcome, but harmless and keeps beta calibrated.
+  standardize_advantages: true
+
+  beta: 1.0
+  max_weight: 20.0
+
+  # Fit V on game_won (team-relative bool, 0.0/1.0) rather than
+  # round_outcome (signed int). See [ADR-0013](../docs/adr/0013-...).
+  value_target: game
+
+  # Smaller V than the round-target variant: binary target has lower
+  # intrinsic dynamic range, so the baseline doesn't need 128 hidden
+  # units to express well-calibrated probabilities. Start small; bump
+  # if running_mse plateaus higher than the round-target baseline.
+  baseline_hidden: 64
+  baseline_lr: 1.0e-3
+  baseline_sgd_steps_per_chunk: 3
+  chunk_size: 16384
+
+  # Opt-in early stop for Phase 2 (disabled by default). At smoke scale
+  # this is unlikely to help — Phase 2 finishes in minutes. Documented
+  # here so the knob is visible on the same surface as the full-arch
+  # config. See `configs/awr_full_100k_game.yaml` for typical values.
+  # baseline_early_stop_patience: 0
+  # baseline_early_stop_min_delta: 0.0
+
+  held_out_fraction: 0.05
+  max_held_out: 20000
+  eval_every_chunks: 5

@@ -42,6 +42,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from tichu_training.awr.early_stop import EarlyStop
 from tichu_training.awr.refine import (
     _CSV_FIELDS,
     _append_csv,
@@ -49,6 +50,7 @@ from tichu_training.awr.refine import (
     _play_head_top1,
     _to_tensors,
 )
+from tichu_training.awr.targets import target_value
 from tichu_training.awr.weights import awr_weights
 from tichu_training.awr.value_baseline import ValueBaseline
 from tichu_training.bc.dataset import BCExample
@@ -157,6 +159,9 @@ def fit_value_baseline_streaming(
     sgd_steps_per_chunk: int = 3,
     held_out_filter: HeldOutFilter | None = None,
     log_path: Path | None = None,
+    value_target: str = "round",
+    early_stop_patience: int = 0,
+    early_stop_min_delta: float = 0.0,
     show_progress: bool = True,
 ) -> float:
     """SGD-fit the value baseline by streaming the dataset once.
@@ -200,11 +205,29 @@ def fit_value_baseline_streaming(
     )
 
     def _fit_chunk(buf: list[BCExample]) -> float:
-        """Train one chunk; return its mean MSE across all mini-batches."""
+        """Train one chunk; return its mean MSE across all mini-batches.
+
+        Examples whose `value_target` resolves to None (e.g. Incomplete
+        Sessions when fitting the `"game"` target) are filtered out — V
+        learns from only the rows that carry the target signal.
+        """
         nonlocal last_batch_mse, running_sse, running_n
-        feats = torch.from_numpy(np.stack([e.features for e in buf]))
-        outs = torch.from_numpy(np.array([e.round_outcome for e in buf], dtype=np.float32))
-        n = len(buf)
+        target_vals: list[float] = []
+        keep: list[BCExample] = []
+        for e in buf:
+            t = target_value(
+                round_outcome=e.round_outcome,
+                game_won=e.game_won,
+                kind=value_target,
+            )
+            if t is not None:
+                target_vals.append(t)
+                keep.append(e)
+        if not keep:
+            return 0.0
+        feats = torch.from_numpy(np.stack([e.features for e in keep]))
+        outs = torch.from_numpy(np.array(target_vals, dtype=np.float32))
+        n = len(keep)
         chunk_sse = 0.0
         chunk_n = 0
         for _ in range(sgd_steps_per_chunk):
@@ -225,6 +248,9 @@ def fit_value_baseline_streaming(
 
     chunks_done = 0
     examples_seen = 0
+    early_stop = EarlyStop(
+        patience=early_stop_patience, min_delta=early_stop_min_delta,
+    )
 
     def _flush_chunk(buf: list[BCExample]) -> None:
         nonlocal chunks_done, examples_seen
@@ -232,6 +258,7 @@ def fit_value_baseline_streaming(
         chunks_done += 1
         examples_seen += len(buf)
         running_mse = running_sse / max(1, running_n)
+        early_stop.update(running_mse)
         if csv_writer is not None:
             csv_writer.writerow({
                 "chunk_idx": chunks_done,
@@ -244,6 +271,7 @@ def fit_value_baseline_streaming(
         bar.set_postfix(
             chunk_mse=f"{chunk_mse:.2f}",
             running_mse=f"{running_mse:.2f}",
+            last_batch_mse=f"{last_batch_mse:.2f}",
             refresh=False,
         )
 
@@ -256,7 +284,15 @@ def fit_value_baseline_streaming(
             if len(chunk) >= chunk_size:
                 _flush_chunk(chunk)
                 chunk.clear()
-        if chunk:
+                # Opt-in early stop: when running_mse plateaus past
+                # `patience` chunks, drop out of the dataset iteration
+                # instead of streaming the rest for no gain.
+                if early_stop.should_stop():
+                    break
+        # Flush whatever's left if we exhausted the stream (no early
+        # stop fired) — but skip the trailing partial chunk if we did
+        # stop early, since the user signalled "stop now."
+        if chunk and not early_stop.should_stop():
             _flush_chunk(chunk)
     finally:
         bar.close()
@@ -288,6 +324,7 @@ def awr_refine_epoch_streaming(
     standardize_advantages: bool = True,
     eval_every_chunks: int = 0,
     intermediate_eval_callback: Callable[[dict], None] | None = None,
+    value_target: str = "round",
     show_progress: bool = True,
 ) -> dict[str, float | None]:
     """One streaming AWR refinement pass over the dataset.
@@ -348,8 +385,24 @@ def awr_refine_epoch_streaming(
         step += 1
 
     def _process_chunk(buf: list[BCExample]) -> None:
-        features = np.stack([e.features for e in buf])
-        outcomes = np.array([e.round_outcome for e in buf], dtype=np.float32)
+        # Filter examples that have no target signal under the current
+        # value_target (e.g. Incomplete Sessions for "game") — those rows
+        # contribute no AWR weight and are dropped from the refine pass.
+        target_vals: list[float] = []
+        keep: list[BCExample] = []
+        for e in buf:
+            t = target_value(
+                round_outcome=e.round_outcome,
+                game_won=e.game_won,
+                kind=value_target,
+            )
+            if t is not None:
+                target_vals.append(t)
+                keep.append(e)
+        if not keep:
+            return
+        features = np.stack([e.features for e in keep])
+        outcomes = np.array(target_vals, dtype=np.float32)
         with torch.no_grad():
             preds = baseline(torch.from_numpy(features)).cpu().numpy()
         advantages = outcomes - preds
@@ -365,7 +418,7 @@ def awr_refine_epoch_streaming(
             if std > 1e-8:
                 advantages = (advantages - float(advantages.mean())) / std
         weights = awr_weights(advantages, beta=beta, max_weight=max_weight)
-        for ex, w in zip(buf, weights):
+        for ex, w in zip(keep, weights):
             new_ex = BCExample(
                 decision_type=ex.decision_type,
                 features=ex.features,
@@ -374,6 +427,7 @@ def awr_refine_epoch_streaming(
                 sample_weight=float(ex.sample_weight * float(w)),
                 skill_decile=ex.skill_decile,
                 round_outcome=ex.round_outcome,
+                game_won=ex.game_won,
             )
             head_buf = per_head_buffer[ex.decision_type]
             head_buf.append(new_ex)

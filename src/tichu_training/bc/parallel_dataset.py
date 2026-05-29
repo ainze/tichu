@@ -82,6 +82,7 @@ def _worker_loop(
     try:
         from tichu_training.bsw.archive import iter_archive
         from tichu_training.bsw.parser import parse_tch
+        from tichu_training.bsw.records import game_team_totals
         from tichu_training.bsw.replay import replay_round
         from tichu_training.action_space import bc_target_for_concrete, legal_mask
         from tichu_training.featurizer import featurize
@@ -100,6 +101,9 @@ def _worker_loop(
             sample_weight = _sample_weight_for(
                 stem, recency_cutoff, recency_weight,
             )
+            # Computed once per game; per-row game_won is team-relative from
+            # the acting player's seat. None for an Incomplete Session.
+            team_totals = game_team_totals(game)
             valid_rounds = manifest_subset[stem]
             for parsed_round in game.rounds:
                 if stop_event.is_set():
@@ -153,6 +157,11 @@ def _worker_loop(
                         continue
                     handle = parsed_round.handles[player]
                     skill = skill_lookup.get(handle, neutral_decile)
+                    team = player % 2
+                    if team_totals is None:
+                        game_won: bool | None = None
+                    else:
+                        game_won = team_totals[team] > team_totals[1 - team]
                     example = BCExample(
                         decision_type=decision_type,
                         features=features,
@@ -161,6 +170,7 @@ def _worker_loop(
                         sample_weight=sample_weight,
                         skill_decile=skill,
                         round_outcome=team_outcome,
+                        game_won=game_won,
                     )
                     # Blocking put with periodic stop_event check so the
                     # worker can be torn down mid-game when the trainer

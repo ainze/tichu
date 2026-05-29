@@ -52,3 +52,24 @@ class ParsedGame:
     # moment. See ADR-0010.
     game_id: str | None
     rounds: tuple[ParsedRound, ...]
+
+
+# Tichu Game-to-1000 threshold. A `ParsedGame` is a Complete Game when at
+# least one team's cumulative ergebnis reaches this value; otherwise the
+# log represents an Incomplete Session (abandoned mid-game). See CONTEXT.md.
+_COMPLETE_GAME_THRESHOLD: int = 1000
+
+
+def game_team_totals(game: ParsedGame) -> tuple[int, int] | None:
+    """Sum per-round `ergebnis` across the game.
+
+    Returns `(team0_total, team1_total)` for a **Complete Game** (at least
+    one team's total ≥ 1000), or `None` for an **Incomplete Session**.
+    Callers use the None case to stamp `game_won` as NULL and exclude the
+    row from AWR's game-outcome value target.
+    """
+    t0 = sum(r.ergebnis[0] for r in game.rounds)
+    t1 = sum(r.ergebnis[1] for r in game.rounds)
+    if t0 < _COMPLETE_GAME_THRESHOLD and t1 < _COMPLETE_GAME_THRESHOLD:
+        return None
+    return (t0, t1)
