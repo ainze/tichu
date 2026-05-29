@@ -327,3 +327,27 @@ class Straight(_SameTypeSameLengthRankCompare):
     @property
     def length(self) -> int:
         return len(self.cards)
+
+    @classmethod
+    def _from_canonical_cards(
+        cls,
+        cards: tuple,
+        phoenix_as_rank: int | None,
+    ) -> "Straight":
+        """Skip `__post_init__` validation. Trusted construction path for
+        callers (notably `enumerate_straights`) that have already
+        verified inputs and pre-arranged `cards` in canonical order.
+
+        Canonical order: ascending effective rank (Mahjong at rank 1 if
+        present, Phoenix at `phoenix_as_rank` if present, normal cards
+        at their natural rank).
+
+        Misuse → equality/hash collisions with regularly-constructed
+        Straights silently break. Do not call this from anywhere that
+        hasn't been audited against the validation rules in
+        `__post_init__`.
+        """
+        obj = object.__new__(cls)
+        object.__setattr__(obj, "cards", cards)
+        object.__setattr__(obj, "phoenix_as_rank", phoenix_as_rank)
+        return obj
