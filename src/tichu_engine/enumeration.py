@@ -180,6 +180,42 @@ _MAHJONG_TUPLE: tuple = (MAHJONG,)
 _EMPTY_TUPLE: tuple = ()
 _PHOENIX_TUPLE: tuple = (PHOENIX,)
 
+# Length-5 windows are the shortest legal straight; a hand that can't
+# cover any one of them can't form a straight of any length. Start at
+# rank 1 (Mahjong slot) through rank 10 (the 10..14 window).
+_STRAIGHT_WINDOW_STARTS = range(1, 15 - _MIN_STRAIGHT_LENGTH + 1)
+
+
+def _no_straight_possible(
+    ranks_present: frozenset[int], has_phoenix: bool, has_mahjong: bool,
+) -> bool:
+    """True iff no length-5 rank window can be covered by `hand`.
+
+    A window [start, start+5) is coverable when every rank in it is
+    either backed by a real card, the Mahjong slot (rank 1), or fillable
+    by the single Phoenix. The Phoenix covers at most one missing slot.
+
+    This is an O(1)-window precheck (10 windows of 5) that lets the
+    ~65% of decision hands with no straight bail before the nested
+    window/product loop below — that loop costs ~30 µs/call building and
+    discarding per-window candidates even when nothing is emittable. The
+    precheck is exact: it returns False whenever the loop would emit at
+    least one Straight, so it never skips real output. See the
+    2026-05-29 enumerate-straights spike notes.
+    """
+    coverable = ranks_present | {1} if has_mahjong else ranks_present
+    phoenix_budget = 1 if has_phoenix else 0
+    for start in _STRAIGHT_WINDOW_STARTS:
+        missing = 0
+        for rank in range(start, start + _MIN_STRAIGHT_LENGTH):
+            if rank not in coverable:
+                missing += 1
+                if missing > phoenix_budget:
+                    break
+        else:
+            return False  # this window is coverable -> a straight exists
+    return True
+
 
 def enumerate_straights(hand: frozenset[CardOrSpecial]) -> frozenset[Straight]:
     """All Straight combinations (length >= 5), including Phoenix-bridged and
@@ -197,6 +233,13 @@ def enumerate_straights(hand: frozenset[CardOrSpecial]) -> frozenset[Straight]:
     by_rank = _group_by_rank(hand)
     has_phoenix = PHOENIX in hand
     has_mahjong = MAHJONG in hand
+
+    # Bail before the window/product loop when no length-5 window is
+    # coverable — the common case for small mid-round hands. Exact: this
+    # only short-circuits when the loop would emit nothing.
+    if _no_straight_possible(frozenset(by_rank), has_phoenix, has_mahjong):
+        return frozenset()
+
     straights: set[Straight] = set()
 
     # Windows starting at rank 1 are only valid when Mahjong is in hand
