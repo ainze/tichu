@@ -31,6 +31,7 @@ from tichu_training.bc.training import (
     load_checkpoint,
     save_checkpoint,
     train_one_epoch,
+    train_one_epoch_batched,
 )
 
 
@@ -152,30 +153,68 @@ def main(argv: list[str] | None = None) -> int:
             head_weights=head_weights, start_step=start_step,
         )
 
+    # Fast path: if the dataset exposes `iter_batches`, the trainer can
+    # consume already-stacked batches and skip the per-example route +
+    # `np.stack` cost. Currently only `MemmapBCDataset` provides it (per
+    # ADR-0014). Detected by capability, not by config name, so a future
+    # iter_batches-providing dataset is automatic.
+    use_batched = hasattr(dataset, "iter_batches")
+    if use_batched:
+        log.info(
+            "dataset %r exposes iter_batches; using train_one_epoch_batched "
+            "fast path", config["dataset"],
+        )
+
     step = start_step
     for epoch in range(int(config["epochs"])):
-        # Cap the per-epoch example count if requested. islice gives a
-        # bounded iterable that preserves the streaming nature of the
-        # underlying dataset — no materialisation up front.
-        epoch_iter = (
-            _capped(dataset, args.max_examples)
-            if args.max_examples is not None else dataset
-        )
         def _save_mid_epoch(batch_step: int) -> None:
             ckpt_path = ckpt_dir / f"step_e{epoch:03d}_b{batch_step:08d}.bin"
             save_checkpoint(model, optimizer, step=batch_step, path=ckpt_path)
             log.info("saved mid-epoch checkpoint %s", ckpt_path)
 
-        loss = train_one_epoch(
-            model,
-            epoch_iter,
-            optimizer,
-            batch_size=int(config["batch_size"]),
-            log_path=log_path,
-            head_weights=head_weights or None,
-            checkpoint_every_batches=checkpoint_every_batches,
-            checkpoint_fn=_save_mid_epoch if checkpoint_every_batches else None,
-        )
+        if use_batched:
+            # iter_batches handles batch boundaries; --max-examples maps
+            # to a batch-count cap so the per-epoch wall-clock cap is
+            # respected without slicing inside a batch.
+            batch_size = int(config["batch_size"])
+            batches_iter = dataset.iter_batches(batch_size)
+            if args.max_examples is not None:
+                batches_iter = _capped_batches(
+                    batches_iter, args.max_examples,
+                )
+            total_examples = (
+                args.max_examples
+                if args.max_examples is not None
+                else getattr(dataset, "n_rows", None)
+            )
+            loss = train_one_epoch_batched(
+                model,
+                batches_iter,
+                optimizer,
+                log_path=log_path,
+                head_weights=head_weights or None,
+                total_examples=total_examples,
+                checkpoint_every_batches=checkpoint_every_batches,
+                checkpoint_fn=_save_mid_epoch if checkpoint_every_batches else None,
+            )
+        else:
+            # Cap the per-epoch example count if requested. islice gives a
+            # bounded iterable that preserves the streaming nature of the
+            # underlying dataset — no materialisation up front.
+            epoch_iter = (
+                _capped(dataset, args.max_examples)
+                if args.max_examples is not None else dataset
+            )
+            loss = train_one_epoch(
+                model,
+                epoch_iter,
+                optimizer,
+                batch_size=int(config["batch_size"]),
+                log_path=log_path,
+                head_weights=head_weights or None,
+                checkpoint_every_batches=checkpoint_every_batches,
+                checkpoint_fn=_save_mid_epoch if checkpoint_every_batches else None,
+            )
         log.info("epoch %d final batch loss=%.4f", epoch, loss)
         # Conservative checkpoint cadence: one per epoch is fine for smoke.
         step += 1
@@ -504,6 +543,21 @@ def _capped(inner, cap: int):
     return _CappedIterable(inner, cap)
 
 
+def _capped_batches(batches, max_examples: int):
+    """Bound a `(decision_type, batch_dict)` iterator to roughly
+    `max_examples` examples. Stops once the cumulative batch-size sum
+    reaches the cap. The final yielded batch is **not** sliced — the
+    cap is a target, not an exact ceiling, because slicing a numpy
+    batch mid-row would defeat the fast path's zero-copy guarantee.
+    """
+    consumed = 0
+    for head, batch in batches:
+        if consumed >= max_examples:
+            return
+        yield head, batch
+        consumed += len(batch["target"])
+
+
 def _build_dataset(config, *, num_workers: int = 0):
     """Construct the BC training dataset.
 
@@ -516,6 +570,13 @@ def _build_dataset(config, *, num_workers: int = 0):
         worker processes — typical speedup is near-linear on CPU-bound
         runs since the Python data-loading loop releases nothing to
         MKL's threadpool.
+    `memmap`: ADR-0014 disk-backed pre-featurised bundle. Reads numpy
+        memmaps written by `python -m tichu_training.cli.materialise_bc`.
+        Yields `BCExample` for compat with `train_one_epoch`; the
+        train_bc loop routes to `train_one_epoch_batched` via
+        `iter_batches` when the dataset exposes it, for the fast path
+        that bypasses per-example object construction. `num_workers` is
+        ignored — the memmap is read sequentially from the main process.
     """
     name = config["dataset"]
     kwargs = dict(config.get("dataset_kwargs", {}))
@@ -526,6 +587,9 @@ def _build_dataset(config, *, num_workers: int = 0):
             from tichu_training.bc.parallel_dataset import ParallelParquetBCDataset
             return ParallelParquetBCDataset(num_workers=num_workers, **kwargs)
         return ParquetBCDataset(**kwargs)
+    if name == "memmap":
+        from tichu_training.bc.materialised import MemmapBCDataset
+        return MemmapBCDataset(**kwargs)
     raise ValueError(f"unknown dataset: {name!r}")
 
 

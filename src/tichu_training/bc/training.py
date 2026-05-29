@@ -1,21 +1,29 @@
 """BC training loop, CSV logging, and version-pinned checkpointing.
 
-The trainer consumes an `Iterable[BCExample]` (per ADR-0011), so it works
-with both:
-  - the in-memory `SyntheticBCDataset` (a list-like iterable for smoke),
-  - the streaming `ParquetBCDataset` (archive-driven replay-on-the-fly).
+Two consumer shapes are supported:
 
-Batches are formed by per-head fill-then-emit buffers: each example is
-routed into a buffer keyed by `decision_type`, and a step fires the
-moment a buffer reaches `batch_size`. At the end of the iterable, any
-partial buffers are flushed as final batches.
+  - `train_one_epoch(...)` over `Iterable[BCExample]` — the ADR-0011 path.
+    Works with `SyntheticBCDataset`, `ParquetBCDataset`, and (for
+    interop) `MemmapBCDataset.__iter__`. Per-example route into per-head
+    buffers; `_to_tensors` builds the batch from a `list[BCExample]`.
+  - `train_one_epoch_batched(...)` over the
+    `Iterator[(decision_type, dict[str, np.ndarray])]` shape produced by
+    `MemmapBCDataset.iter_batches`. The fast path of
+    [ADR-0014](../../../docs/adr/0014-pre-featurise-bc-corpus.md):
+    batches arrive already-stacked from the memmap, so the consumer
+    skips per-example dataclass construction, `np.stack`, and the
+    per-head buffering machinery. Same loss, CSV, checkpoint contract.
+
+Both paths fire one optimizer step per batch and write one CSV row per
+step. The batched path's progress bar counts examples (computed from
+the yielded batch sizes) so the bar's meaning is identical.
 """
 
 import csv
 import io
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 import numpy as np
 import torch
@@ -157,6 +165,132 @@ def train_one_epoch(
                 if buf:
                     _fire(head, buf)
                     buf.clear()
+        if bar is not None:
+            bar.set_postfix(
+                loss=f"{last_total:.3f}",
+                **{f"b_{h}": head_batch_counts[h] for h in HEAD_LOGIT_DIMS},
+            )
+    finally:
+        if bar is not None:
+            bar.close()
+
+    return last_total
+
+
+def train_one_epoch_batched(
+    model: BCModel,
+    batches: Iterator[tuple[str, dict[str, np.ndarray]]],
+    optimizer: torch.optim.Optimizer,
+    *,
+    log_path: Path,
+    head_weights: dict[str, float] | None = None,
+    show_progress: bool = True,
+    total_examples: int | None = None,
+    checkpoint_every_batches: int = 0,
+    checkpoint_fn: Callable[[int], None] | None = None,
+) -> float:
+    """Fast-path BC epoch over pre-stacked per-head batches.
+
+    `batches` yields `(decision_type, batch_dict)` where `batch_dict`
+    contains numpy arrays sized `(B, ...)` keyed exactly like the
+    output of `_to_tensors`. Typically produced by
+    `MemmapBCDataset.iter_batches`.
+
+    Same loss / CSV-row / checkpoint semantics as `train_one_epoch` —
+    one optimizer step per yielded batch, one row per step. The
+    progress bar counts *examples* (sum of yielded batch sizes), not
+    batches, so its meaning matches the per-example path even though
+    no per-example route happens here.
+
+    Why this exists: per the 2026-05-29 perf measurement, the
+    `__iter__` path through `MemmapBCDataset` delivers ~43% of the
+    in-RAM Phase A ceiling for the current full-BC arch — the gap is
+    Python object construction (BCExample dataclass + `np.stack` in
+    `_to_tensors`). The batched path bypasses both, recovering most of
+    the ceiling. See ADR-0014.
+    """
+    head_weights = head_weights or {h: 1.0 for h in HEAD_LOGIT_DIMS}
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    head_batch_counts: dict[str, int] = {h: 0 for h in HEAD_LOGIT_DIMS}
+    last_total = float("inf")
+    step = _next_step(log_path)
+    model_device = next(model.parameters()).device
+
+    def _fire(head: str, batch: dict[str, np.ndarray]) -> None:
+        nonlocal last_total, step
+        # Wrap the already-stacked numpy arrays as tensors. Zero-copy
+        # for the float32 / int8 / int64 paths produced by
+        # MemmapBCDataset.iter_batches.
+        tensors: dict[str, torch.Tensor] = {
+            "features": torch.from_numpy(batch["features"]),
+            "target": torch.from_numpy(batch["target"]),
+            "legal_mask": torch.from_numpy(batch["legal_mask"]),
+            "sample_weight": torch.from_numpy(batch["sample_weight"]),
+            "skill_decile": torch.from_numpy(batch["skill_decile"]),
+        }
+        if model_device.type != "cpu":
+            tensors = {
+                k: v.to(model_device, non_blocking=True)
+                for k, v in tensors.items()
+            }
+        out = model(tensors["features"], tensors["skill_decile"])
+        logits = out[head]
+        per_head_loss = masked_cross_entropy(
+            logits, tensors["target"], tensors["legal_mask"],
+            tensors["sample_weight"],
+        )
+        total = head_weights[head] * per_head_loss
+        optimizer.zero_grad()
+        total.backward()
+        optimizer.step()
+        with torch.no_grad():
+            pred = logits.masked_fill(
+                ~tensors["legal_mask"], float("-inf"),
+            ).argmax(dim=-1)
+            acc = (pred == tensors["target"]).float().mean().item()
+        row = {f: 0.0 for f in _CSV_FIELDS}
+        row["step"] = step
+        row["loss_total"] = float(total.detach())
+        row[f"loss_{head}"] = float(per_head_loss.detach())
+        row[f"acc_{head}"] = acc
+        _append_csv(log_path, [row])
+        last_total = row["loss_total"]
+        head_batch_counts[head] = head_batch_counts.get(head, 0) + 1
+        step += 1
+        if (
+            checkpoint_every_batches
+            and checkpoint_fn is not None
+            and step % checkpoint_every_batches == 0
+        ):
+            checkpoint_fn(step)
+
+    bar = tqdm(
+        total=total_examples,
+        unit="ex",
+        dynamic_ncols=True,
+        desc="train",
+        disable=not show_progress,
+    ) if show_progress else None
+
+    try:
+        try:
+            for head, batch in batches:
+                bs = len(batch["target"])
+                _fire(head, batch)
+                if bar is not None:
+                    bar.set_postfix(
+                        loss=f"{last_total:.3f}",
+                        **{f"b_{h}": head_batch_counts[h] for h in HEAD_LOGIT_DIMS},
+                        refresh=False,
+                    )
+                    bar.update(bs)
+        finally:
+            # No per-head partial-buffer drain — `batches` is the source
+            # of truth for batch boundaries (iter_batches handles
+            # drop_last). Nothing to flush here.
+            pass
         if bar is not None:
             bar.set_postfix(
                 loss=f"{last_total:.3f}",
