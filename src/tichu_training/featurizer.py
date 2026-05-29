@@ -1,41 +1,37 @@
-"""Featurizer v2: PrivateState → fixed-shape float32 ndarray.
+"""Featurizer v3: PrivateState → fixed-shape float32 ndarray.
 
 Pure function. No I/O, no globals, no hash-seed-sensitive ordering. Output
 shape is `(FEATURIZER_OUTPUT_DIM,)` for every legal PrivateState (including
-schupfen and dragon-give-pending phases).
+pending-decision phases).
 
-Section layout is documented in `SECTION_DIMS`. The trick-top-combo and
-play-history sections are one-hot over the v1 action space.
+Section layout is documented in `SECTION_DIMS`. The trick-top-combo section
+is one-hot over the v1 action space.
 
-v2 over v1: adds a 56-dim `seen_cards` multi-hot of every card played so far
-this round (from `PublicState.played_cards_this_round`). v1 only exposed
-played cards within the current trick via `play_history` / `phoenix_played`,
-which left late-trick callers blind to which key cards had already fallen.
+v3 over v2: drops three sections totalling 14,641 dims (~88% of v2).
+See [ADR-0015](../../docs/adr/0015-featurizer-v3-drop-leaky-and-redundant-sections.md)
+for the rationale. Summary:
 
-Notes / known simplifications:
-  - "Phoenix played" still reflects only the *current trick* (kept for
-    backwards-compatible feature semantics); for round-wide visibility use
-    the `seen_cards` section.
-  - "Schupfen received" is populated only while `SchupfenPending` is active;
-    once applied, the visible state no longer retains the per-direction
-    breakdown, so the section is zeros outside the pending phase.
+  - `play_history` (14,472 dims, 87% of v2): dropped. Encoded the last
+    8 plays of the *current trick* one-hot over ACTION_SPACE_SIZE. The
+    last play is already in `trick_top_combo`
+    (`trick.top_combination == trick.plays[-1].combination`), so the
+    only marginal information was within-trick sequence — not worth
+    87% of the corpus footprint.
+  - `schupfen_received` (168 dims): dropped — **rules violation**. The
+    v2 encoding gave per-giver attribution of received cards (3
+    direction slots × 56 cards), which a rule-abiding player does not
+    know. Training on this signal made the deployed model
+    structurally dependent on information unavailable at honest play.
+  - `phoenix_played` (1 dim): dropped — redundant with `seen_cards`.
+
+Net dim: 16,624 → 1,983. Per-row at f32: 66.5 KB → 7.7 KB (8.4×
+smaller bundle). v2 checkpoints are not loadable against v3 — the
+version pin catches this.
 """
-
-from typing import Iterable
 
 import numpy as np
 
 from tichu_engine.cards import Card, DOG, DRAGON, MAHJONG, PHOENIX, SpecialCard, Suit
-from tichu_engine.combinations import (
-    FourOfAKindBomb,
-    FullHouse,
-    Pair,
-    PairStep,
-    Single,
-    Straight,
-    StraightFlushBomb,
-    Triple,
-)
 from tichu_engine.state import (
     DragonGivePending,
     MahjongWishPending,
@@ -45,22 +41,14 @@ from tichu_engine.state import (
 )
 from tichu_training.action_space import (
     ACTION_SPACE_SIZE,
-    PlayFourBomb,
-    PlayFullHouse,
-    PlayPair,
-    PlayPairStep,
-    PlaySingle,
-    PlayStraight,
-    PlayStraightFlushBomb,
-    PlayTriple,
-    encode,
     play_intent_index,
 )
 
 
-FEATURIZER_VERSION: str = "v2"
+FEATURIZER_VERSION: str = "v3"
 
 # Section sizes — exact dims, ordered for the output concatenation.
+# v3: play_history / schupfen_received / phoenix_played removed.
 SECTION_DIMS: dict[str, int] = {
     "own_hand": 56,
     "hand_sizes": 4,
@@ -74,9 +62,6 @@ SECTION_DIMS: dict[str, int] = {
     "phase": 5,
     "trick_top_combo": ACTION_SPACE_SIZE,
     "trick_passes": 4,
-    "play_history": 8 * ACTION_SPACE_SIZE,
-    "schupfen_received": 168,
-    "phoenix_played": 1,
     "seen_cards": 56,
 }
 FEATURIZER_OUTPUT_DIM: int = sum(SECTION_DIMS.values())
@@ -122,31 +107,6 @@ _SUIT_NAME = {
     Suit.PAGODA: "pagoda",
     Suit.STAR: "star",
 }
-
-
-def _combo_cards(combo: object) -> tuple:
-    if isinstance(combo, Single):
-        return (combo.card,)
-    if isinstance(combo, Pair):
-        return (combo.a, combo.b)
-    if isinstance(combo, Triple):
-        return (combo.a, combo.b, combo.c)
-    if isinstance(combo, FullHouse):
-        return _combo_cards(combo.triple) + _combo_cards(combo.pair)
-    if isinstance(combo, PairStep):
-        out: list = []
-        for p in combo.pairs:
-            out.extend(_combo_cards(p))
-        return tuple(out)
-    if isinstance(combo, (Straight, StraightFlushBomb)):
-        return tuple(combo.cards)
-    if isinstance(combo, FourOfAKindBomb):
-        return (combo.a, combo.b, combo.c, combo.d)
-    return ()
-
-
-def _has_phoenix(cards: Iterable[object]) -> bool:
-    return any(c is PHOENIX for c in cards)
 
 
 def _combination_to_action_index(combo: object) -> int | None:
@@ -250,52 +210,7 @@ def featurize(private_state: PrivateState) -> np.ndarray:
             out[cursor + seat] = 1.0
     cursor += SECTION_DIMS["trick_passes"]
 
-    # 13. Play history (last 8 plays in the current trick, oldest→newest, right-aligned).
-    plays = pub.trick.plays[-8:]
-    pad = 8 - len(plays)
-    for i, play in enumerate(plays):
-        idx = _combination_to_action_index(play.combination)
-        if idx is not None:
-            slot = (pad + i) * ACTION_SPACE_SIZE + idx
-            out[cursor + slot] = 1.0
-    cursor += SECTION_DIMS["play_history"]
-
-    # 14. Schupfen received (3 × 56) — only meaningful while SchupfenPending.
-    pending = pub.pending_decision
-    if isinstance(pending, SchupfenPending):
-        # Submissions to *this* player from the other three seats.
-        my_seat = private_state.player
-        # Direction labels are relative to the giver. For receiver `my_seat`:
-        #   from previous-seat: giver = (my_seat - 1) % 4, gave-to-next is index 0 of giver's submission
-        #   from partner-seat:  giver = (my_seat + 2) % 4, gave-to-partner is index 1
-        #   from next-seat:     giver = (my_seat + 1) % 4, gave-to-previous is index 2
-        slots = [
-            ((my_seat - 1) % 4, 0),
-            ((my_seat + 2) % 4, 1),
-            ((my_seat + 1) % 4, 2),
-        ]
-        for direction_idx, (giver, sub_idx) in enumerate(slots):
-            submission = pending.submitted[giver] if giver < len(pending.submitted) else None
-            if submission is None:
-                continue
-            try:
-                card = submission[sub_idx]
-            except (TypeError, IndexError):
-                continue
-            if card is None:
-                continue
-            out[cursor + direction_idx * 56 + _card_slot(card)] = 1.0
-    cursor += SECTION_DIMS["schupfen_received"]
-
-    # 15. Phoenix-played flag — true iff Phoenix is visible in the current trick.
-    phoenix_in_trick = any(
-        any(c is PHOENIX for c in _combo_cards(play.combination))
-        for play in pub.trick.plays
-    )
-    out[cursor] = 1.0 if phoenix_in_trick else 0.0
-    cursor += SECTION_DIMS["phoenix_played"]
-
-    # 16. Seen-cards multi-hot over 56 slots — every card played so far this
+    # 13. Seen-cards multi-hot over 56 slots — every card played so far this
     # round, accumulated by the engine in `played_cards_this_round` and reset
     # at round boundaries by `_finalise_round`.
     for card in pub.played_cards_this_round:

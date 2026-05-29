@@ -16,10 +16,22 @@ from tichu_inference.codec import private_state_to_json
 
 
 def _dummy_policy_artifact(tmp_path: Path, name: str,
-                           featurizer_version: str = "v1",
-                           action_space_version: str = "v1") -> Path:
-    from tichu_training.action_space import ACTION_SPACE_SIZE
-    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+                           featurizer_version: str | None = None,
+                           action_space_version: str | None = None) -> Path:
+    # Defaults track the live module constants so the fixture stays
+    # current across featurizer / action-space version bumps. Tests that
+    # want to exercise mismatch behaviour pass an explicit override
+    # (e.g. "vBAD").
+    from tichu_training.action_space import (
+        ACTION_SPACE_SIZE, ACTION_SPACE_VERSION,
+    )
+    from tichu_training.featurizer import (
+        FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION,
+    )
+    if featurizer_version is None:
+        featurizer_version = FEATURIZER_VERSION
+    if action_space_version is None:
+        action_space_version = ACTION_SPACE_VERSION
 
     class _DummyPolicy(torch.nn.Module):
         def __init__(self) -> None:

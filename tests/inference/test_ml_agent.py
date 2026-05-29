@@ -14,8 +14,13 @@ from tichu_export.torchscript import export_torchscript
 from tichu_inference.ml_agent import MLAgent, VersionMismatchError as MLVersionMismatch
 
 
-_FEATURIZER_VERSION = "v1"
-_ACTION_SPACE_VERSION = "v1"
+# Track the live module constants so the fixture stays current across
+# featurizer / action-space version bumps. Hard-coding "v1" here used
+# to silently work because MLAgent's expected-version pin also tracked
+# the live constants — both halves moved together. Now we keep the
+# fixture explicit about that contract.
+from tichu_training.action_space import ACTION_SPACE_VERSION as _ACTION_SPACE_VERSION
+from tichu_training.featurizer import FEATURIZER_VERSION as _FEATURIZER_VERSION
 
 
 class _DummyPolicy(torch.nn.Module):

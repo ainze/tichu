@@ -12,8 +12,8 @@ from tichu_inference.cli.serve import build_app_for_config, main
 
 
 def _dummy_artifact(tmp_path: Path, name: str) -> Path:
-    from tichu_training.action_space import ACTION_SPACE_SIZE
-    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    from tichu_training.action_space import ACTION_SPACE_SIZE, ACTION_SPACE_VERSION
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
 
     class M(torch.nn.Module):
         def __init__(self):
@@ -29,11 +29,14 @@ def _dummy_artifact(tmp_path: Path, name: str) -> Path:
 
     torch.manual_seed(0)
     out = tmp_path / f"{name}.pt"
+    # Track the live module constants — see test_ml_agent.py for the
+    # contract: dummy artifacts paired with the MLAgent loader must
+    # stamp the version the loader is expecting.
     export_torchscript(
         M(),
         example_inputs=(torch.randn(1, FEATURIZER_OUTPUT_DIM), torch.tensor([0], dtype=torch.long)),
-        featurizer_version="v1",
-        action_space_version="v1",
+        featurizer_version=FEATURIZER_VERSION,
+        action_space_version=ACTION_SPACE_VERSION,
         output_path=out,
     )
     return out

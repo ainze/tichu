@@ -15,6 +15,8 @@ their matching rounds still contribute training rows.
 import argparse
 import logging
 import sys
+import time
+from collections import deque
 from pathlib import Path
 from typing import Iterator
 
@@ -22,6 +24,14 @@ from tqdm import tqdm
 
 from tichu_training.bsw.archive import count_entries, iter_archive, list_game_ids
 from tichu_training.bsw.to_parquet import StreamStats, stream_raw_to_parquet
+
+
+# Sliding-window size for the displayed games/sec rate. tqdm's default
+# rate uses an EMA over total elapsed time, which produces a curve that
+# wanders for a long time after rate changes. A fixed-N rolling mean
+# converges within N updates and ignores history older than that —
+# useful when one worker hits a slow shard mid-run.
+_RATE_WINDOW = 100
 
 
 log = logging.getLogger("parse_bsw")
@@ -80,11 +90,35 @@ def main(argv: list[str] | None = None) -> int:
         # parquet output so the user can read what the parser was given.
         source_pairs = _dumping(source_pairs, output_dir)
 
-    bar = tqdm(total=total, unit="game", dynamic_ncols=True)
+    # Custom bar_format drops tqdm's auto rate (`{rate_fmt}`) so we can
+    # surface a rolling-window rate of our own via the postfix instead.
+    # The rest matches tqdm's default rendering.
+    bar = tqdm(
+        total=total, unit="game", dynamic_ncols=True,
+        bar_format=(
+            "{l_bar}{bar}| {n_fmt}/{total_fmt} "
+            "[{elapsed}<{remaining}, {postfix}]"
+        ),
+    )
+
+    _recent_ts: deque[float] = deque(maxlen=_RATE_WINDOW)
 
     def _on_game_done(stats: StreamStats) -> None:
+        _recent_ts.append(time.perf_counter())
+        # Rolling mean over the (up-to) last _RATE_WINDOW completions.
+        # `len-1` intervals span the recorded timestamps, so the
+        # divisor is (n-1) not n.
+        if len(_recent_ts) >= 2:
+            span = _recent_ts[-1] - _recent_ts[0]
+            rate_str = (
+                f"{(len(_recent_ts) - 1) / span:.1f}game/s"
+                if span > 0 else "—"
+            )
+        else:
+            rate_str = "—"
         bar.update(1)
         bar.set_postfix(
+            rate=rate_str,
             valid=stats.games_fully_matched,
             failed=stats.games_with_failed_rounds + len(stats.parse_failures),
             rows=sum(stats.row_counts.values()),

@@ -1,4 +1,4 @@
-"""Featurizer (v2): shape, dtype, purity, version pinning."""
+"""Featurizer (v3): shape, dtype, purity, version pinning."""
 
 import subprocess
 import sys
@@ -50,8 +50,70 @@ def _simple_private_state(player: int = 0) -> PrivateState:
     return PrivateState(player=player, hand=hand, public=public)
 
 
-def test_version_is_pinned_to_v2():
-    assert FEATURIZER_VERSION == "v2"
+def test_version_is_pinned_to_v3():
+    assert FEATURIZER_VERSION == "v3"
+
+
+def test_dropped_v2_sections_are_absent():
+    """v3 drops play_history (87% of v2), schupfen_received (rules
+    violation — see ADR-0015), and phoenix_played (redundant with
+    seen_cards). These keys must not reappear in SECTION_DIMS."""
+    for dropped in ("play_history", "schupfen_received", "phoenix_played"):
+        assert dropped not in SECTION_DIMS, (
+            f"{dropped} was dropped in v3 — re-adding it needs an ADR "
+            f"and a featurizer version bump"
+        )
+
+
+def test_v3_total_dim_is_1983():
+    assert FEATURIZER_OUTPUT_DIM == 1983
+
+
+def test_schupfen_pending_state_does_not_leak_per_giver_attribution():
+    """ADR-0015 — schupfen_received was a rules violation that revealed
+    which opponent gave the player which card. Regression: featurising a
+    SchupfenPending state with all four submissions filled must produce
+    the same output as featurising the same state with no submissions
+    (modulo the phase one-hot). The featurizer must not encode anything
+    about `pending.submitted`."""
+    from tichu_engine.state import SchupfenPending
+
+    hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
+
+    # Empty schupfen pending (no one submitted yet).
+    empty_pending = PrivateState(
+        player=0, hand=hand,
+        public=PublicState(
+            current_player=0, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+            trick=Trick.empty(),
+            pending_decision=SchupfenPending(
+                submitted=(None, None, None, None),
+            ),
+        ),
+    )
+    # Same state but with all four players having submitted distinctive
+    # 3-card piles — the leaky v2 featurizer would have surfaced this
+    # via the schupfen_received section.
+    filled_pending = PrivateState(
+        player=0, hand=hand,
+        public=PublicState(
+            current_player=0, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+            trick=Trick.empty(),
+            pending_decision=SchupfenPending(
+                submitted=(
+                    (Card(Suit.SWORD, 2), Card(Suit.SWORD, 3), Card(Suit.SWORD, 4)),
+                    (Card(Suit.PAGODA, 5), Card(Suit.PAGODA, 6), Card(Suit.PAGODA, 7)),
+                    (Card(Suit.STAR, 8), Card(Suit.STAR, 9), Card(Suit.STAR, 10)),
+                    (Card(Suit.SWORD, 11), Card(Suit.SWORD, 12), Card(Suit.SWORD, 13)),
+                ),
+            ),
+        ),
+    )
+    np.testing.assert_array_equal(
+        featurize(empty_pending), featurize(filled_pending),
+        err_msg="featurize() must not encode pending.submitted — that "
+                "leaks per-giver attribution of received cards (ADR-0015)",
+    )
 
 
 def test_output_is_float32_and_correct_shape():
