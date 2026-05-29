@@ -114,6 +114,15 @@ def main(argv: list[str] | None = None) -> int:
         (stats.rounds_matched / stats.rounds_total * 100) if stats.rounds_total else 0.0,
         stats.games_fully_matched, stats.games_with_failed_rounds, len(stats.parse_failures),
     )
+    # Game-level completeness split — drives the AWR `value_target=game`
+    # filter fraction. Counts parsed games only (parse failures excluded).
+    parsed_games = stats.complete_games + stats.incomplete_sessions
+    log.info(
+        "game outcomes: %d Complete Games, %d Incomplete Sessions (%.3f%% complete of %d parsed)",
+        stats.complete_games, stats.incomplete_sessions,
+        (stats.complete_games / parsed_games * 100) if parsed_games else 0.0,
+        parsed_games,
+    )
 
     known_bad_path = output_dir / "known_bad_games.txt"
     with known_bad_path.open("w", encoding="utf-8") as fh:
