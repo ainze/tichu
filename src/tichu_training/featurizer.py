@@ -1,32 +1,26 @@
-"""Featurizer v3: PrivateState → fixed-shape float32 ndarray.
+"""Featurizer v4: PrivateState → fixed-shape float32 ndarray.
 
 Pure function. No I/O, no globals, no hash-seed-sensitive ordering. Output
 shape is `(FEATURIZER_OUTPUT_DIM,)` for every legal PrivateState (including
 pending-decision phases).
 
 Section layout is documented in `SECTION_DIMS`. The trick-top-combo section
-is one-hot over the v1 action space.
+uses a 50-dim union-of-fields layout
+(`intent_kind[8] + primary_rank[15] + secondary_rank[13] + length[13]
++ phoenix_used[1]`) — see `TRICK_TOP_COMBO_SUBFIELDS` and
+[ADR-0017](../../docs/adr/0017-featurizer-v4-compact-trick-top-combo.md).
 
-v3 over v2: drops three sections totalling 14,641 dims (~88% of v2).
-See [ADR-0015](../../docs/adr/0015-featurizer-v3-drop-leaky-and-redundant-sections.md)
-for the rationale. Summary:
+v4 over v3: replaces the 1,809-dim one-hot over the v1 Action Space with
+a 50-dim compact encoding. 1,223 of the 1,809 v3 slots were phoenix-
+variants that each fire ~1 in tens of thousands of rows; their marginal
+information vs `seen_cards[phoenix]` and `(primary_rank, length)` is
+~zero. Net dim: 1,983 → 224 (−89%). Per-row at f32: 7.7 KB → 0.9 KB
+(8.85× smaller bundle). v3 checkpoints are not loadable against v4 —
+the version pin catches this.
 
-  - `play_history` (14,472 dims, 87% of v2): dropped. Encoded the last
-    8 plays of the *current trick* one-hot over ACTION_SPACE_SIZE. The
-    last play is already in `trick_top_combo`
-    (`trick.top_combination == trick.plays[-1].combination`), so the
-    only marginal information was within-trick sequence — not worth
-    87% of the corpus footprint.
-  - `schupfen_received` (168 dims): dropped — **rules violation**. The
-    v2 encoding gave per-giver attribution of received cards (3
-    direction slots × 56 cards), which a rule-abiding player does not
-    know. Training on this signal made the deployed model
-    structurally dependent on information unavailable at honest play.
-  - `phoenix_played` (1 dim): dropped — redundant with `seen_cards`.
-
-Net dim: 16,624 → 1,983. Per-row at f32: 66.5 KB → 7.7 KB (8.4×
-smaller bundle). v2 checkpoints are not loadable against v3 — the
-version pin catches this.
+v3 over v2 (kept for context): dropped `play_history` (14,472 dims),
+`schupfen_received` (168 dims — rules violation, ADR-0015), and
+`phoenix_played` (1 dim — redundant with `seen_cards`).
 """
 
 import numpy as np
@@ -45,10 +39,21 @@ from tichu_training.action_space import (
 )
 
 
-FEATURIZER_VERSION: str = "v3"
+FEATURIZER_VERSION: str = "v4"
+
+# v4: trick_top_combo is a 50-dim union-of-fields layout, NOT a one-hot
+# over the v1 Action Space. The action-space dependency is severed on
+# the input side; the play head still outputs ACTION_SPACE_SIZE logits.
+# See ADR-0017.
+TRICK_TOP_COMBO_SUBFIELDS: dict[str, int] = {
+    "intent_kind": 8,       # Single/Pair/Triple/FullHouse/PairStep/Straight/FourBomb/SFBomb
+    "primary_rank": 15,     # slot 0 = Mahjong (rank 1); 1..13 = ranks 2..14; 14 = Dragon
+    "secondary_rank": 13,   # FullHouse pair_rank only; slots 0..12 = ranks 2..14
+    "length": 13,           # PairStep / Straight / SFBomb; slots 0..12 = lengths 2..14
+    "phoenix_used": 1,      # 1 iff Phoenix participates in the combo
+}
 
 # Section sizes — exact dims, ordered for the output concatenation.
-# v3: play_history / schupfen_received / phoenix_played removed.
 SECTION_DIMS: dict[str, int] = {
     "own_hand": 56,
     "hand_sizes": 4,
@@ -60,11 +65,28 @@ SECTION_DIMS: dict[str, int] = {
     "mahjong_wish": 15,
     "current_player": 4,
     "phase": 5,
-    "trick_top_combo": ACTION_SPACE_SIZE,
+    "trick_top_combo": sum(TRICK_TOP_COMBO_SUBFIELDS.values()),
     "trick_passes": 4,
     "seen_cards": 56,
 }
 FEATURIZER_OUTPUT_DIM: int = sum(SECTION_DIMS.values())
+
+# Internal offsets inside the 50-dim trick_top_combo section.
+_OFF_INTENT_KIND = 0
+_OFF_PRIMARY_RANK = _OFF_INTENT_KIND + TRICK_TOP_COMBO_SUBFIELDS["intent_kind"]
+_OFF_SECONDARY_RANK = _OFF_PRIMARY_RANK + TRICK_TOP_COMBO_SUBFIELDS["primary_rank"]
+_OFF_LENGTH = _OFF_SECONDARY_RANK + TRICK_TOP_COMBO_SUBFIELDS["secondary_rank"]
+_OFF_PHOENIX_USED = _OFF_LENGTH + TRICK_TOP_COMBO_SUBFIELDS["length"]
+
+# intent_kind slot per combination type — matches action_space canonical order.
+_KIND_SINGLE = 0
+_KIND_PAIR = 1
+_KIND_TRIPLE = 2
+_KIND_FULL_HOUSE = 3
+_KIND_PAIR_STEP = 4
+_KIND_STRAIGHT = 5
+_KIND_FOUR_BOMB = 6
+_KIND_SF_BOMB = 7
 
 
 # ---------------------------------------------------------------------------
@@ -196,12 +218,10 @@ def featurize(private_state: PrivateState) -> np.ndarray:
     out[cursor + phase_idx] = 1.0
     cursor += SECTION_DIMS["phase"]
 
-    # 11. Trick top combo one-hot over action space.
+    # 11. Trick top combo: v4 union-of-fields layout. See ADR-0017.
     top = pub.trick.top_combination
     if top is not None:
-        idx = _combination_to_action_index(top)
-        if idx is not None:
-            out[cursor + idx] = 1.0
+        _emit_trick_top_combo(out, cursor, top)
     cursor += SECTION_DIMS["trick_top_combo"]
 
     # 12. Trick passes one-hot.
@@ -232,3 +252,94 @@ def _phase_index(public: PublicState) -> int:
     if isinstance(pending, MahjongWishPending):
         return 3
     return 4  # terminal / unknown
+
+
+def _emit_trick_top_combo(out: np.ndarray, cursor: int, combo: object) -> None:
+    """Write the 50-dim trick_top_combo section for the given top combination.
+
+    Caller guarantees `combo is not None`. Unrecognised shapes leave the
+    section all-zero (defensive — matches v3 behaviour for shapes the
+    encoder cannot represent).
+    """
+    # Deferred to avoid module-load cycle: tichu_engine.combinations does
+    # not import featurizer, but the rest of tichu_engine pulls in modules
+    # that import this one transitively when run through certain entry
+    # points. Local import keeps the import graph clean.
+    from tichu_engine.combinations import (
+        FourOfAKindBomb, FullHouse, Pair, PairStep, Single, Straight,
+        StraightFlushBomb, Triple,
+    )
+
+    if isinstance(combo, Single):
+        card = combo.card
+        out[cursor + _OFF_INTENT_KIND + _KIND_SINGLE] = 1.0
+        # combo.rank is a float for Phoenix (1.5 lead, N+0.5 following) and
+        # Dragon (25), an int for naturals (2..14) and Mahjong (1), and NaN
+        # for Dog (which can never be a trick top in practice).
+        r = combo.rank
+        if r == 25:
+            out[cursor + _OFF_PRIMARY_RANK + 14] = 1.0
+        elif r == r:  # not NaN
+            # int truncation collapses 1.5→1 (slot 0), N.5→N (slot N-1).
+            out[cursor + _OFF_PRIMARY_RANK + (int(r) - 1)] = 1.0
+        if card is PHOENIX:
+            out[cursor + _OFF_PHOENIX_USED] = 1.0
+        return
+
+    if isinstance(combo, Pair):
+        out[cursor + _OFF_INTENT_KIND + _KIND_PAIR] = 1.0
+        out[cursor + _OFF_PRIMARY_RANK + (combo.rank - 1)] = 1.0
+        if combo.a is PHOENIX or combo.b is PHOENIX:
+            out[cursor + _OFF_PHOENIX_USED] = 1.0
+        return
+
+    if isinstance(combo, Triple):
+        out[cursor + _OFF_INTENT_KIND + _KIND_TRIPLE] = 1.0
+        out[cursor + _OFF_PRIMARY_RANK + (combo.rank - 1)] = 1.0
+        if combo.a is PHOENIX or combo.b is PHOENIX or combo.c is PHOENIX:
+            out[cursor + _OFF_PHOENIX_USED] = 1.0
+        return
+
+    if isinstance(combo, FullHouse):
+        out[cursor + _OFF_INTENT_KIND + _KIND_FULL_HOUSE] = 1.0
+        out[cursor + _OFF_PRIMARY_RANK + (combo.triple.rank - 1)] = 1.0
+        # secondary_rank slot R-2 = rank R for R in 2..14.
+        out[cursor + _OFF_SECONDARY_RANK + (combo.pair.rank - 2)] = 1.0
+        triple_has_phx = combo.triple.a is PHOENIX or combo.triple.b is PHOENIX or combo.triple.c is PHOENIX
+        pair_has_phx = combo.pair.a is PHOENIX or combo.pair.b is PHOENIX
+        if triple_has_phx or pair_has_phx:
+            out[cursor + _OFF_PHOENIX_USED] = 1.0
+        return
+
+    if isinstance(combo, PairStep):
+        out[cursor + _OFF_INTENT_KIND + _KIND_PAIR_STEP] = 1.0
+        # combo.rank is the start_rank (lowest pair's rank); combo.length is len(pairs).
+        out[cursor + _OFF_PRIMARY_RANK + (combo.rank - 1)] = 1.0
+        out[cursor + _OFF_LENGTH + (combo.length - 2)] = 1.0
+        if any(p.a is PHOENIX or p.b is PHOENIX for p in combo.pairs):
+            out[cursor + _OFF_PHOENIX_USED] = 1.0
+        return
+
+    if isinstance(combo, Straight):
+        out[cursor + _OFF_INTENT_KIND + _KIND_STRAIGHT] = 1.0
+        # combo.rank is the lowest effective rank (1 for mahjong-led).
+        out[cursor + _OFF_PRIMARY_RANK + (combo.rank - 1)] = 1.0
+        out[cursor + _OFF_LENGTH + (combo.length - 2)] = 1.0
+        if PHOENIX in combo.cards:
+            out[cursor + _OFF_PHOENIX_USED] = 1.0
+        return
+
+    if isinstance(combo, FourOfAKindBomb):
+        # FourOfAKindBomb cannot contain Phoenix (engine enforces this) — no
+        # phoenix_used branch needed.
+        out[cursor + _OFF_INTENT_KIND + _KIND_FOUR_BOMB] = 1.0
+        out[cursor + _OFF_PRIMARY_RANK + (combo.rank - 1)] = 1.0
+        return
+
+    if isinstance(combo, StraightFlushBomb):
+        # StraightFlushBomb cannot contain Phoenix (engine enforces this).
+        # Suit dropped from v4 encoding — see ADR-0017, zero beat-relevant signal.
+        out[cursor + _OFF_INTENT_KIND + _KIND_SF_BOMB] = 1.0
+        out[cursor + _OFF_PRIMARY_RANK + (combo.rank - 1)] = 1.0
+        out[cursor + _OFF_LENGTH + (combo.length - 2)] = 1.0
+        return

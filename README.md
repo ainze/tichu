@@ -535,7 +535,7 @@ src/
     belief/                 #   opponent-hand prediction model + training
     cli/                    #   one module per CLI tool
     action_space.py         #   the canonical 1,809-action space
-    featurizer.py           #   PrivateState -> 16,568-dim feature vector
+    featurizer.py           #   PrivateState -> 224-dim feature vector (v4)
     checkpoint.py           #   versioned on-disk checkpoint wrapper
   tichu_eval/               # tournament harness + held-out move prediction
   tichu_export/             # TorchScript export primitive + latency benchmark
