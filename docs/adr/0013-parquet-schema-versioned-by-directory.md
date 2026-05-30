@@ -128,3 +128,35 @@ Concrete shape:
   Rejected: parquet schemas don't have a meaningful "minor version"
   concept — every change is additive-or-not, and we either re-parse
   or we don't. Integer suffix is sufficient.
+
+## 2026-05-30 addendum: empirical 100k findings on value_target choice
+
+This ADR established the mechanism for adding `game_won` alongside
+`round_outcome`; it did not prescribe which to use at AWR runtime
+(that's the `awr.value_target` config knob). May 2026 v4 100k runs on
+the `bc_full_100k_v4_memmap` checkpoint exposed that **both targets
+produce null-or-negative AWR outcomes at 100k scale**, and the two
+failure modes are distinct:
+
+| `value_target` | V baseline R² (vs predict-mean) | win_rate_proxy vs BC | Failure mode |
+|---|---|---|---|
+| `game` | 6.6% (MSE 0.234 / var 0.250) | drift to −0.5pp | **Signal-bound:** game_won shares a single label across all ~8 rounds of a game (~100k unique labels for ~800k rows); V can't extract per-state signal. |
+| `round` | 35.3% (MSE 23,562 / var 36,392) | stable at **−1.3pp** for 4 epochs | **Objective-mismatched:** V learns round_outcome well, but AWR-refining toward round_outcome diverges from optimal play at game-to-1000 (slam-chase, Tichu-conditioned play distortion). |
+
+Both diagnoses are scale-dependent. At 1M+ games:
+- `game` should escape signal-bound (~8× more game-outcome labels per
+  state); revisit as the principled default.
+- `round` is unlikely to escape objective-mismatch at any scale — the
+  bias is in the target definition, not the data volume.
+
+**Implications for the schema mechanism this ADR specifies (unchanged):**
+both `round_outcome` and `game_won` should keep co-existing in the
+v3+ schema. The v4 corpus retained both; future re-parses should too.
+Choosing one over the other is a runtime knob, not a schema decision.
+
+**Implications for shipping Refined Checkpoints:** do not promote a
+100k-scale AWR-Refined Checkpoint to `master` Difficulty regardless of
+target. The bc_full v4 BC Checkpoint remains the canonical
+`master`-candidate until 1M-scale AWR is run. See run-dirs
+`awr_full_100k_v4_memmap_game` and `awr_full_100k_v4_memmap_round` for
+the underlying data.

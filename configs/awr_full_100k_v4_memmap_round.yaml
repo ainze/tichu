@@ -1,0 +1,97 @@
+# AWR offline-RL refinement of the v4 bc_full checkpoint, fitting V on
+# round_outcome (the original v1/v2 target, pre-ADR-0013).
+#
+# Sibling to configs/awr_full_100k_v4_memmap_game.yaml — only the
+# value_target switches. Run as a diagnostic to disambiguate the
+# game-target run's null result:
+#
+#   * The game-target run on this BC checkpoint plateaued at V MSE ~0.234
+#     (~6% variance explained on a 0/1 label) and the policy DRIFTED
+#     DOWN on win_rate_proxy (~0.851 -> ~0.846 over epoch 0).
+#     Diagnosis: at 100k scale, game_won shares a single label across
+#     all rounds in a game (~100k unique labels for ~800k rows), and V
+#     can't extract a useful per-state signal. Standardising noise and
+#     exponentiating it gives noise weights -> random-walk gradient
+#     drift off the BC optimum.
+#
+#   * round_outcome carries ~8x more effectively-independent labels
+#     (one per round, not per game) and a continuous wide-range target
+#     V can take finer gradients on. Trade-off: round_outcome is NOT
+#     the objective (Tichu is played to 1000 points), and AWR with
+#     round-target is known to over-reward Grand-Tichu calls (~200pt
+#     swings) and slams. See ADR-0013 for why the project moved off
+#     this target. Run this as a diagnostic, not as a path to a
+#     shippable `master` checkpoint without first checking the call
+#     rate by skill decile on the resulting policy.
+#
+#   * Expected outcomes:
+#     - win_rate_proxy moves outside the +-0.005pp noise envelope ->
+#       AWR machinery works, the game-target failure was signal-bound,
+#       wait for 1M and revisit game-target.
+#     - win_rate_proxy also drifts/flat -> AWR isn't 100k-viable on
+#       this corpus regardless of target; defer all refinement to 1M+.
+#
+# Knob deltas from the game-target sibling:
+#   * awr.value_target: game -> round
+#   * awr.baseline_early_stop_patience: 20 -> 0 (disabled). Early-stop
+#     min_delta=1e-4 was calibrated to MSE on a 0/1 label (~0.25
+#     scale). round_outcome variance is ~100-1000x larger so the same
+#     min_delta would never trigger; disabling avoids a misleading
+#     "early stop never fired" log line. Phase 2 runs to completion;
+#     it's a few minutes either way.
+#
+# Run from the worktree:
+#   py -3.14 -m tichu_training.cli.train_bc `
+#     --config configs/awr_full_100k_v4_memmap_round.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\awr_full_100k_v4_memmap_round `
+#     --refine-from C:\workbench\tichu\data\runs\bc_full_100k_v4_memmap\checkpoints\step_000001.bin `
+#     --device cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_100k_v4
+
+# MUST match bc_full_100k_v4_memmap checkpoint architecture exactly.
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 1
+seed: 0
+
+awr:
+  streaming: true
+  standardize_advantages: true
+  beta: 1.0
+  max_weight: 20.0
+
+  # Fit V on round_outcome (per-round signed score delta, team-relative).
+  # The original v1/v2 target before ADR-0013. See header for the
+  # round-vs-game trade-off.
+  value_target: round
+
+  baseline_hidden: 128
+  baseline_lr: 1.0e-3
+  baseline_sgd_steps_per_chunk: 3
+  chunk_size: 16384
+
+  # Early stop disabled — the min_delta=1e-4 sibling value was sized
+  # for the 0/1 game_won target's ~0.25 MSE scale and would never
+  # trigger against round_outcome's ~100-1000x larger MSE. Phase 2
+  # runs to completion; a few minutes either way.
+  baseline_early_stop_patience: 0
+
+  held_out_fraction: 0.05
+  max_held_out: 20000
+  eval_every_chunks: 5
