@@ -1,0 +1,53 @@
+# BC training on the 100k materialised bundle at featurizer v4 (ADR-0017).
+#
+# A/B vs configs/bc_full_100k_memmap.yaml: only delta is the v4 bundle
+# path. Same bc_full arch (1024x4 trunk, 256-hidden heads), same LR,
+# batch size, epochs, head weights, seed, and checkpoint cadence — so a
+# quality / wall-clock comparison attributes cleanly to featurizer v3
+# vs v4. The v3 baseline run flattened at 1 epoch (converged, not a
+# budget cutoff), so 1 epoch here is matching the saturation point.
+#
+# v4 collapses the 1,809-dim trick-top-combo one-hot to a 50-dim union-
+# of-fields encoding (per-row: 7.7 KB -> 0.9 KB, 8.85x smaller bundle).
+# Measured ~3x faster than v3 on the memmap fast path (~131k ex/s on
+# this box vs ~44k ex/s at v3). The input-projection matmul
+# ((feature_dim + skill_dim) x trunk_hidden) shrinks 8.85x at v4, and
+# that layer was a larger share of per-batch time than expected — the
+# speedup is not just I/O.
+#
+# Prereqs (already done):
+#   py -3.14 -m tichu_training.cli.parse_bsw `
+#     --archive        C:\workbench\tichu\data\archive.zst `
+#     --output         C:\workbench\tichu\data\parquet_100k_feat_v4 `
+#     --bundle-out-dir C:\workbench\tichu\data\materialised_100k_v4 `
+#     --trueskill      C:\workbench\tichu\data\ratings_100k.parquet `
+#     --subset         100000 --workers 12
+#
+# Use:
+#   py -3.14 -m tichu_training.cli.train_bc `
+#     --config  configs/bc_full_100k_v4_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_100k_v4_memmap `
+#     --device cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_100k_v4
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 100000          # won't fire — epochs=1
+checkpoint_every_batches: 5000    # mid-epoch saves so AWR / resume have recent targets
+seed: 0

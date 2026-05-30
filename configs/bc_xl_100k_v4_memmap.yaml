@@ -1,0 +1,56 @@
+# BC training on the 100k v4 materialised bundle with the bc_xl
+# architecture (1536x6 trunk, 384-hidden heads).
+#
+# Capacity sweep against configs/bc_full_100k_v4_memmap.yaml:
+# +50% on trunk_hidden, trunk_depth, and head_hidden simultaneously.
+# Net ~2.25x params. Everything else (LR, batch size, epochs, head
+# weights, seed, checkpoint cadence) is held constant so a quality
+# delta attributes cleanly to capacity.
+#
+# Gating question: is BC capacity-bound or data-bound at 100k?
+# - bc_xl wins meaningfully over bc_full -> capacity matters; follow up
+#   with depth-only / width-only attribution runs, then scale to 1M.
+# - bc_xl ties or loses -> data-bound; skip capacity, scale bc_full to 1M.
+#
+# Expected risks:
+# - Overfit. No dropout / weight-decay knob in BCModel — overfit-on-train
+#   is itself the signal (train loss drops past bc_full, final acc
+#   doesn't move = capacity-without-data).
+# - LR. 3e-4 may be too high for a 2.25x larger model. Kept here as the
+#   "match the baseline" choice for the first run; if loss diverges or
+#   plateaus high, retry with 1e-4.
+#
+# Use:
+#   py -3.14 -m tichu_training.cli.train_bc `
+#     --config  configs/bc_xl_100k_v4_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_xl_100k_v4_memmap `
+#     --device cuda -v
+#
+# Compare after:
+#   py -3.14 scripts/compare_bc_runs.py `
+#     --a C:\workbench\tichu\data\runs\bc_full_100k_v4_memmap --label-a bc_full `
+#     --b C:\workbench\tichu\data\runs\bc_xl_100k_v4_memmap   --label-b bc_xl `
+#     --weights configs/bc_xl_100k_v4_memmap.yaml
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_100k_v4
+
+model:
+  trunk_hidden: 1536          # 1024 -> 1536 (+50%)
+  trunk_depth: 6              # 4    -> 6    (+50%)
+  trunk_out_dim: 512          # unchanged — representation width, not capacity
+  skill_dim: 64               # unchanged — skill embedding has only 11 rows
+  head_hidden: 384            # 256  -> 384  (+50%)
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 100000          # won't fire — epochs=1
+checkpoint_every_batches: 5000    # mid-epoch saves so AWR / resume have recent targets
+seed: 0
