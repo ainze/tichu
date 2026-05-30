@@ -43,7 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", required=True, metavar="FILE", help="YAML config file")
     p.add_argument("--run-dir", required=True, metavar="DIR",
                    help="Directory to write checkpoints, logs, and config copy")
-    p.add_argument("--resume", metavar="CHECKPOINT", help="Checkpoint to resume from")
+    p.add_argument("--resume", metavar="CHECKPOINT",
+                   help="Checkpoint to resume from. Pass `auto` to pick the "
+                        "most-recently-modified .bin under <run-dir>/checkpoints; "
+                        "if the directory is empty, starts fresh.")
     p.add_argument("--refine-from", metavar="CHECKPOINT",
                    help="BC checkpoint to refine with AWR")
     p.add_argument("--max-examples", type=int, default=None, metavar="N",
@@ -99,8 +102,20 @@ def main(argv: list[str] | None = None) -> int:
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["learning_rate"]))
 
     start_step = 0
-    if args.resume:
-        start_step = load_checkpoint(args.resume, model, optimizer)
+    resume_path: str | None = args.resume
+    if resume_path == "auto":
+        latest = _find_latest_checkpoint(run_dir / "checkpoints")
+        if latest is None:
+            log.info(
+                "--resume auto: no checkpoints in %s; starting fresh",
+                run_dir / "checkpoints",
+            )
+            resume_path = None
+        else:
+            resume_path = str(latest)
+            log.info("--resume auto: picked %s", resume_path)
+    if resume_path:
+        start_step = load_checkpoint(resume_path, model, optimizer)
         log.info("resumed from step %d", start_step)
     if args.refine_from:
         start_step = load_checkpoint(args.refine_from, model)
@@ -498,6 +513,26 @@ def _run_awr_refinement_streaming(
     save_checkpoint(model, optimizer, step=step, path=ckpt_path)
     log.info("saved AWR checkpoint %s", ckpt_path)
     return 0
+
+
+def _find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
+    """Return the most-recently-modified .bin under `ckpt_dir`, or None
+    if the directory is missing or holds no checkpoints.
+
+    Uses mtime rather than filename order on purpose: the BC trainer
+    writes both mid-epoch (`step_e{epoch:03d}_b{batch_step:08d}.bin`)
+    and epoch-boundary (`step_{step:06d}.bin`) checkpoints, and AWR
+    refinement writes `awr_epoch_{...}_step_{...}.bin` /
+    `awr_final_step_{...}.bin`. None of those schemes sort
+    lexicographically into the right chronological order across schemes;
+    mtime always does.
+    """
+    if not ckpt_dir.is_dir():
+        return None
+    candidates = list(ckpt_dir.glob("*.bin"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _resolve_device(choice: str) -> torch.device:
