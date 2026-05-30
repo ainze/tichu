@@ -96,7 +96,7 @@ _Avoid_: observation, view, perspective, info-set.
 A field on PublicState that marks the engine as mid-resolving a special Decision (`DragonGivePending` | `MahjongWishPending` | `SchupfenPending`). Not a separate state type — a flag inside PublicState.
 
 **Feature Vector**:
-The 16,568-float tensor produced by `featurize(PrivateState)`. Version-pinned via the featurizer version stamped on every Checkpoint.
+The fixed-shape float32 tensor produced by `featurize(PrivateState)`. Width is set by `FEATURIZER_OUTPUT_DIM` (currently 1,983 at v3; targeting 224 at v4 — see [ADR-0017](docs/adr/0017-featurizer-v4-compact-trick-top-combo.md)). Version-pinned via the featurizer version stamped on every Checkpoint.
 _Avoid_: encoded state, observation, input, x, featurized state.
 
 **Wire PrivateState**:
@@ -188,7 +188,7 @@ The in-memory `torch.nn.Module` reconstructed from a Checkpoint's payload. Creat
 _Avoid_: using "Model" for the file on disk.
 
 **Featurizer**:
-The pure function `featurize(PrivateState) -> Feature Vector`. Version-pinned (currently `"v1"`); the version is stamped on every Checkpoint.
+The pure function `featurize(PrivateState) -> Feature Vector`. Version-pinned (currently `"v3"`; v4 in design — see [ADR-0017](docs/adr/0017-featurizer-v4-compact-trick-top-combo.md)); the version is stamped on every Checkpoint.
 _Avoid_: encoder, feature extractor.
 
 **Trunk**:
