@@ -1,11 +1,31 @@
-# Production call-network scaffold. Not invoked in CI — the parquet path
-# requires negative-example synthesis that is a deferred follow-up.
+# Production Call-Network config — 100k v4 bundle.
+#
+# Negative synthesis is performed in-process by `ParquetCallDataset` (per
+# ADR-0007 follow-up): the play shard is the manifest of validated rounds,
+# and the adapter enumerates all four seats per round, joining against
+# `parsed_round.{grand_tichu,tichu}_callers` for the binary target.
+#
+# Tichu featurises at each seat's first non-Pass Play state (ADR-0018);
+# Grand-Tichu at a synthetic 8-card deal-time state. Class balance is the
+# natural BSW prior — no rebalancing (Q3 of the design discussion).
+#
+# `workers` fans replay+featurize over a ProcessPoolExecutor. featurize
+# is ~half the per-game cost and isn't reduced by the Tichu early-stop;
+# parallelism is what makes 100k+ tractable.
+#
+# `materialize: true` means dataset is built once across all workers, then
+# every epoch trains on the in-memory list (~3.5 GB per call type at 100k).
 
 dataset: parquet
 dataset_kwargs:
-  shards_dir: artifacts/parquet
-  expected_featurizer_version: v2
+  shards_dir: C:/workbench/tichu/data/parquet_100k_feat_v4
+  archive_path: C:/workbench/tichu/data/archive.zst
+  ratings_path: C:/workbench/tichu/data/ratings_100k.parquet
+  expected_featurizer_version: v4
   expected_action_space_version: v1
+  # 12-core machine → leave 2 for the main process + OS.
+  workers: 10
+  materialize: true
 
 model:
   hidden: 256

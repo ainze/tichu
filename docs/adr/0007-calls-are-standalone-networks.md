@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-25
-- **Related:** [ADR-0001](0001-trunk-architecture.md), [ADR-0003](0003-easy-difficulty-is-a-baseline.md)
+- **Related:** [ADR-0001](0001-trunk-architecture.md), [ADR-0003](0003-easy-difficulty-is-a-baseline.md), [ADR-0018](0018-tichu-call-featurises-at-first-non-pass-play.md) (precise Tichu featurise moment)
 
 ## Context
 

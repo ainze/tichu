@@ -41,6 +41,24 @@ def test_training_reduces_loss_on_synthetic(tmp_path):
     assert final < initial
 
 
+def test_training_accepts_generator_iterable(tmp_path):
+    """`train_one_call_epoch` must consume an `Iterable[CallExample]`,
+    not require a `Sequence`. Generators are the canonical non-Sequence
+    iterable; the parquet adapter is one. This guards Q7 (streaming)."""
+    torch.manual_seed(0)
+    net = GrandTichuCallNetwork(feature_dim=8, skill_dim=2, hidden=8)
+    optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+
+    def gen():
+        yield from SyntheticCallDataset(
+            seed=0, n_examples=12, positive_rate=0.5, feature_dim=8,
+        )
+
+    log_path = tmp_path / "step.csv"
+    # Should not raise — one epoch over the generator.
+    train_one_call_epoch(net, gen(), optimizer, batch_size=4, log_path=log_path)
+
+
 def test_csv_log_format(tmp_path):
     net = GrandTichuCallNetwork(feature_dim=8, skill_dim=2, hidden=8)
     optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
