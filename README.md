@@ -222,6 +222,7 @@ Flag highlights:
 - `--workers N` spawns N data-loader processes that shard the manifest by `hash(game_id)`. Default 0 = sequential. **The single-threaded Python data loop is the throughput bottleneck on small-model configs**; with N workers, CPU utilisation scales toward 100% × N cores.
 - `--device {auto,cpu,cuda}` — where the model runs. `auto` picks CUDA if `torch.cuda.is_available()`, else CPU. Useful for the large-model `bc_full.yaml` config. Note: the default `pip install torch` on Windows pulls the CPU-only wheel; install via `pip install torch --index-url https://download.pytorch.org/whl/cu{NNN}` to enable GPU.
 - `--max-examples N` caps each epoch to the first N yielded BCExamples — useful for smoking the full 100k/2.4M manifest without committing to a full sweep. In AWR streaming mode the cap applies per stream pass (i.e. per epoch).
+- `--resume CHECKPOINT` reloads weights, optimizer state, and step counter from a prior `.bin`. Pass `--resume auto` to pick the most-recently-modified checkpoint under `<run-dir>/checkpoints`; if the directory is empty (first run), training starts fresh and the flag is a no-op. Note: only model + optimizer are restored — the dataset iterator restarts from row 0, so within-epoch resume re-trains on examples already seen.
 
 Two config keys worth knowing about for long runs:
 

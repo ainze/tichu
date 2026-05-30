@@ -1,0 +1,39 @@
+# BC training on the materialised 100k bundle (ADR-0014).
+#
+# Reads the per-type memmaps produced by `parse_bsw --bundle-out-dir`
+# (or `materialise_bc`). Skips parquet replay entirely — train_bc
+# routes to train_one_epoch_batched via the dataset's iter_batches
+# fast path, so per-batch cost is dominated by GPU forward/backward,
+# not engine replay.
+#
+# Same bc_full architecture as bc_full_100k.yaml (1024x4 trunk,
+# 256-hidden heads).
+#
+# Use:
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs/bc_full_100k_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_100k_memmap `
+#     --device cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_100k
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 100000
+checkpoint_every_batches: 5000
+seed: 0
