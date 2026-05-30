@@ -1,0 +1,80 @@
+# AWR offline-RL refinement of the v4 bc_full checkpoint against the
+# v4 materialised bundle. Fits the Value Baseline on `game_won` and
+# refines the canonical 84% play-acc reference from
+# `bc_full_100k_v4_memmap/checkpoints/step_000001.bin`.
+#
+# Delta from configs/awr_full_100k_game.yaml (the v3 sibling):
+#   * dataset: parquet -> memmap (no replay; streaming loop makes 3+
+#     full passes, memmap pays that cost cheaply)
+#   * dataset_kwargs.data_dir: the v4 bundle
+#   * expected_featurizer_version pin removed (MemmapBCDataset checks
+#     it against the manifest, not config — and the manifest stamps v4)
+#
+# Everything else (model arch, LR, batch_size, head_weights, AWR knobs,
+# baseline_hidden=128, early-stop) matches the v3 config so the
+# refinement methodology stays a controlled A/B with the prior run.
+#
+# Run from the worktree:
+#   py -3.14 -m tichu_training.cli.train_bc `
+#     --config configs/awr_full_100k_v4_memmap_game.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\awr_full_100k_v4_memmap_game `
+#     --refine-from C:\workbench\tichu\data\runs\bc_full_100k_v4_memmap\checkpoints\step_000001.bin `
+#     --device cuda -v
+#
+# Note: --workers is ignored for the memmap dataset (single-threaded
+# reader). The streaming AWR loop spins up its own per-phase passes.
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_100k_v4
+
+# MUST match bc_full_100k_v4_memmap checkpoint architecture exactly —
+# the model is instantiated from this config and the checkpoint weights
+# loaded in.
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+# Smaller LR than BC: AWR is refining an already-converged policy. A
+# large step would undo the BC pretraining before the gradient becomes
+# meaningful.
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 1
+seed: 0
+
+awr:
+  streaming: true
+  standardize_advantages: true
+  beta: 1.0
+  max_weight: 20.0
+
+  # Fit V on game_won (team-relative bool) rather than round_outcome.
+  # See ADR-0013 and CONTEXT.md's Value Target entry.
+  value_target: game
+
+  baseline_hidden: 128
+  baseline_lr: 1.0e-3
+  baseline_sgd_steps_per_chunk: 3
+  chunk_size: 16384
+
+  # Early stop for Phase 2. The v3 run showed V plateauing at
+  # running_mse ~0.229 by chunk ~100 and oscillating thereafter — the
+  # remaining ~8h of Phase 2 added nothing. patience=20 chunks at
+  # chunk_size=16384 ~= 330k examples of "no improvement" before
+  # bailing; min_delta=1e-4 ignores per-chunk noise.
+  baseline_early_stop_patience: 20
+  baseline_early_stop_min_delta: 1.0e-4
+
+  held_out_fraction: 0.05
+  max_held_out: 20000
+  eval_every_chunks: 5
