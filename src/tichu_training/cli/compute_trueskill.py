@@ -7,7 +7,9 @@ with one row per player_handle: mu, sigma, n_games.
 
 import argparse
 import logging
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import trueskill
@@ -69,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     call_stats: dict[str, CallStats] = {}
     parsed_ok = 0
     parse_failures = 0
+    # Categorise parse failures by error message so the end-of-run summary
+    # surfaces real format regressions (a sudden spike in some new message)
+    # without spamming one WARNING per game. Most failures are "truncated
+    # log" — incomplete BSW dumps that genuinely can't be scored.
+    failure_categories: Counter[str] = Counter()
     bar = tqdm(total=total, unit="game", dynamic_ncols=True, desc="sweep")
     try:
         for game_id, text in iter_tch_sources(
@@ -77,7 +84,9 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 game = parse_tch(text, game_id=str(game_id))
             except Exception as exc:  # noqa: BLE001
-                log.warning("skipping game %s: parse failed: %s", game_id, exc)
+                category = _categorise_parse_error(exc)
+                failure_categories[category] += 1
+                log.debug("skipping game %s: parse failed: %s", game_id, exc)
                 parse_failures += 1
                 bar.update(1)
                 bar.set_postfix(
@@ -96,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         bar.close()
     log.info("parsed %d games successfully (%d skipped)", parsed_ok, parse_failures)
+    if parse_failures:
+        breakdown = ", ".join(
+            f"{count}× {cat}" for cat, count in failure_categories.most_common()
+        )
+        log.warning("%d games skipped due to parse failures: %s", parse_failures, breakdown)
     log.info("rated %d distinct player handles", len(ratings))
 
     surviving = apply_min_games(ratings, min_games=args.min_games)
@@ -116,6 +130,20 @@ def main(argv: list[str] | None = None) -> int:
     _log_decile_share(deciles)
     _log_spearman(surviving, call_stats)
     return 0
+
+
+_ROUND_PREFIX_RE = re.compile(r"^round \d+: ")
+
+
+def _categorise_parse_error(exc: Exception) -> str:
+    """Collapse per-round error messages into a stable bucket key.
+
+    `"round 4: truncated log"` and `"round 11: truncated log"` are the same
+    failure mode for summary purposes — strip the round-index prefix so the
+    Counter buckets them together.
+    """
+    msg = str(exc) or type(exc).__name__
+    return _ROUND_PREFIX_RE.sub("", msg, count=1)
 
 
 def _log_decile_share(deciles: dict[str, int]) -> None:
