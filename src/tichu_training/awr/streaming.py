@@ -258,7 +258,13 @@ def fit_value_baseline_streaming(
         chunks_done += 1
         examples_seen += len(buf)
         running_mse = running_sse / max(1, running_n)
-        early_stop.update(running_mse)
+        # Feed per-chunk MSE (not running_mse) to the plateau detector:
+        # running_mse is a cumulative average that strictly decreases for
+        # a converging model (every chunk below the historical mean pulls
+        # it down), so it plateaus only via per-chunk noise. chunk_mse is
+        # the instantaneous training signal — it actually flattens when
+        # the fit stops improving.
+        early_stop.update(chunk_mse)
         if csv_writer is not None:
             csv_writer.writerow({
                 "chunk_idx": chunks_done,

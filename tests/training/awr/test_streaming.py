@@ -174,14 +174,14 @@ def test_fit_value_baseline_streaming_filters_incomplete_sessions(tmp_path):
 
 def test_fit_value_baseline_streaming_early_stop_caps_chunks(tmp_path):
     """With early_stop_patience set, the fit terminates before the
-    stream is exhausted when running_mse plateaus. Verified by
+    stream is exhausted when per-chunk MSE plateaus. Verified by
     comparing chunks written to baseline.csv against an uncapped run
     on the same stream — the early-stop run must write fewer rows."""
     torch.manual_seed(0)
     feature_dim = 8
-    # Lots of identical examples so running_mse plateaus immediately:
-    # one ex repeated yields a single-target stream, V hits a constant
-    # predictor in the first chunk and stays there.
+    # Lots of identical examples so chunk_mse plateaus near zero
+    # after the first few chunks: one ex repeated yields a single-
+    # target stream, V converges to a constant predictor quickly.
     base = next(iter(SyntheticBCDataset(seed=0, n_per_head=1, feature_dim=feature_dim)))
     examples = [base] * 4000
     baseline = ValueBaseline(feature_dim=feature_dim, hidden=16)
