@@ -13,15 +13,13 @@ from collections import OrderedDict
 import torch
 from torch import nn
 
-from tichu_training.action_space import ACTION_SPACE_SIZE
+# Re-exported for backward compatibility — `HEAD_LOGIT_DIMS` lives in
+# `bc/decision_types.py` so torch-free readers (bc/dataset, bc/materialised,
+# bsw/to_parquet, parse_bsw) can import it without pulling torch.
+from tichu_training.bc.decision_types import HEAD_LOGIT_DIMS
 from tichu_training.bc.model import SkillEmbedding, TichuTrunk
 
-
-HEAD_LOGIT_DIMS: "OrderedDict[str, int]" = OrderedDict([
-    ("play", ACTION_SPACE_SIZE),
-    ("wish", 14),
-    ("dragon_assignment", 2),
-])
+__all__ = ["HEAD_LOGIT_DIMS", "BCModel"]
 
 
 class _Head(nn.Module):

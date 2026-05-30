@@ -22,7 +22,7 @@ from typing import Iterable, Iterator
 import numpy as np
 import pyarrow.parquet as pq
 
-from tichu_training.bc.heads import HEAD_LOGIT_DIMS
+from tichu_training.bc.decision_types import HEAD_LOGIT_DIMS
 from tichu_training.checkpoint import VersionMismatchError
 from tichu_training.records import load_shards
 
