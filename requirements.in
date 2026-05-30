@@ -5,3 +5,7 @@
 pytest>=8.0
 pip-tools>=7.0
 hypothesis>=6.0
+
+# Analysis scripts (scripts/profile_ratings.py)
+matplotlib>=3.8
+seaborn>=0.13
