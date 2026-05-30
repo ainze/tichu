@@ -78,6 +78,21 @@ Concrete shape:
    resolve to; carrying them in the canonical Action Space keeps the
    single-source-of-truth for "an Intent" intact.
 
+**Implementation pass (2026-05-30).** The output-shape decision deferred
+in §Decision.2 lands as **three independent 56-way heads** (one per
+`{to_next, to_partner, to_previous}`) on a shared MLP trunk +
+`SkillEmbedding`. Loss = sum of three hand-masked cross-entropies ×
+`sample_weight`, batch-mean — heads independent at train time; the
+distinct-three-cards constraint is resolved by a greedy decode at
+inference, not in the loss. Featurise moment: synthetic pre-schupfen
+`GameState` from `parsed_round.start_hands`, no replay.
+`grand_tichu_callers` is populated from the parsed round (the calls are
+public by schupfen time — round order: Grand-Tichu → Schupfen → Tichu →
+Tricks); `tichu_callers` is left empty (ADR-0018 times Tichu calls at
+first-non-pass-play, after schupfen). Card↔slot mapping extracted to
+public torch-free `tichu_training/card_slots.py` and re-exported by the
+featurizer to remove the duplicate-table drift risk.
+
 ## Rationale
 
 1. **The shared trunk handles single-discrete-decision heads cleanly;

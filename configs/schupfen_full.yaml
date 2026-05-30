@@ -1,0 +1,37 @@
+# Production Schupfen-Network config — 100k v4 bundle.
+#
+# Per ADR-0012: Schupfen is a standalone network, not a BC head, because
+# the 3-of-14 → 3-labeled-destinations target shape does not fit the
+# multi-head single-discrete BC pattern. This config mirrors
+# `calls_full.yaml` — same archive, same parquet manifest source (the
+# play shard), same ratings table, same featurizer/action-space pins.
+#
+# Unlike calls_full, no replay: schupfen featurises from a synthetic
+# pre-schupfen GameState built directly from `parsed_round.start_hands`.
+# `grand_tichu_callers` is populated (calls are public by schupfen time);
+# `tichu_callers` is left empty (ADR-0018 times Tichu calls at
+# first-non-pass-play, after schupfen). See the design pass notes
+# appended to ADR-0012.
+#
+# `materialize: true` keeps the dataset in memory across epochs — at
+# 100k games × ~7 rounds/game × 4 seats ≈ 2.8M examples, the in-memory
+# list is comfortably small (much smaller than the call dataset).
+
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:/workbench/tichu/data/parquet_100k_feat_v4
+  archive_path: C:/workbench/tichu/data/archive.zst
+  ratings_path: C:/workbench/tichu/data/ratings_100k.parquet
+  expected_featurizer_version: v4
+  expected_action_space_version: v1
+  workers: 10
+  materialize: true
+
+model:
+  hidden: 256
+  skill_dim: 64
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 4
+seed: 0
