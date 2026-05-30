@@ -119,7 +119,20 @@ def _parse_round(lines: list[str], start: int, *, round_index: int) -> tuple[_Ro
 
     Returns the populated builder and the index of the first line after the
     round's `Ergebnis:` line.
+
+    A small fraction of BSW logs (~0.6 %) are truncated mid-round — the dump
+    cuts off before the final `Ergebnis:` line. Any IndexError raised while
+    indexing past the end of `lines` is normalised to a single
+    `"round N: truncated log"` ValueError so the caller doesn't have to
+    distinguish bounds-overrun from the explicit missing-Ergebnis check.
     """
+    try:
+        return _parse_round_body(lines, start, round_index=round_index)
+    except IndexError:
+        raise ValueError(f"round {round_index}: truncated log") from None
+
+
+def _parse_round_body(lines: list[str], start: int, *, round_index: int) -> tuple[_RoundBuilder, int]:
     builder = _RoundBuilder(round_index)
     i = start + 1  # skip Gr.Tichukarten header
 
@@ -219,7 +232,7 @@ def _parse_round(lines: list[str], start: int, *, round_index: int) -> tuple[_Ro
         i += 1
 
     if builder.ergebnis is None:
-        raise ValueError(f"round {round_index}: Ergebnis not found")
+        raise ValueError(f"round {round_index}: truncated log")
     return builder, i
 
 
