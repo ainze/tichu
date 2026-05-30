@@ -71,6 +71,34 @@ SECTION_DIMS: dict[str, int] = {
 }
 FEATURIZER_OUTPUT_DIM: int = sum(SECTION_DIMS.values())
 
+# Sections whose `featurize()` output is a continuous ratio (negatives
+# possible) rather than a 0/1 indicator. Every *other* section is written
+# as exactly 1.0 (one-hot / multi-hot), so the materialised bundle bit-packs
+# all indicator columns and stores only these as float. This is the single
+# source of truth for the binary/continuous split; the materialised writer
+# records the resulting column list into the bundle manifest, and the reader
+# reconstructs the dense (D,) vector from it. Changing the featurizer layout
+# bumps FEATURIZER_VERSION, which the bundle pin already enforces. See
+# [ADR-0019](../../docs/adr/0019-bit-pack-materialised-bundle.md).
+CONTINUOUS_SECTIONS: frozenset[str] = frozenset(
+    {"hand_sizes", "team_scores", "round_points"}
+)
+
+
+def _continuous_feature_columns() -> tuple[int, ...]:
+    cols: list[int] = []
+    cursor = 0
+    for name, dim in SECTION_DIMS.items():
+        if name in CONTINUOUS_SECTIONS:
+            cols.extend(range(cursor, cursor + dim))
+        cursor += dim
+    return tuple(cols)
+
+
+# Ascending column indices of the continuous (non-bit-packable) features.
+# For v4 this is (56..65): hand_sizes[4] + team_scores[2] + round_points[4].
+CONTINUOUS_FEATURE_COLUMNS: tuple[int, ...] = _continuous_feature_columns()
+
 # Internal offsets inside the 50-dim trick_top_combo section.
 _OFF_INTENT_KIND = 0
 _OFF_PRIMARY_RANK = _OFF_INTENT_KIND + TRICK_TOP_COMBO_SUBFIELDS["intent_kind"]

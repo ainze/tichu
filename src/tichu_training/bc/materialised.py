@@ -6,22 +6,47 @@ in the 2026-05-29 profile). Materialising the BCExample stream once,
 to per-decision-type numpy memmaps, bypasses replay entirely. See
 [ADR-0014](../../../docs/adr/0014-pre-featurise-bc-corpus.md) for the
 trade analysis vs ADR-0011's α.2 (replay) and rejected β (parquet-
-cached state) / γ (dense feature memmap, no per-type split).
+cached state) / γ (dense feature memmap, no per-type split), and
+[ADR-0019](../../../docs/adr/0019-bit-pack-materialised-bundle.md) for the
+schema-v2 bit-packing of the mask + indicator feature columns below.
 
 On-disk layout for a slice of N examples:
 
   <out_dir>/
     manifest.json
-    play_features.dat               (N_play, D_feat)  float32
-    play_legal_mask.dat             (N_play, 1809)    uint8
+    play_feat_bits.dat              (N_play, 27)      uint8  (packbits of 214 flags)
+    play_feat_cont.dat              (N_play, 10)      float32 (continuous columns)
+    play_legal_mask.dat             (N_play, 227)     uint8  (packbits of 1809 bits)
     play_meta.dat                   (N_play,)         structured (META_DTYPE)
-    wish_features.dat               (N_wish, D_feat)  float32
-    wish_legal_mask.dat             (N_wish, 14)      uint8
+    wish_feat_bits.dat              (N_wish, 27)      uint8
+    wish_feat_cont.dat              (N_wish, 10)      float32
+    wish_legal_mask.dat             (N_wish, 2)       uint8  (packbits of 14 bits)
     wish_meta.dat                   (N_wish,)         structured
-    dragon_assignment_features.dat  (N_da, D_feat)    float32
-    dragon_assignment_legal_mask.dat (N_da, 2)        uint8
+    dragon_assignment_feat_bits.dat (N_da, 27)        uint8
+    dragon_assignment_feat_cont.dat (N_da, 10)        float32
+    dragon_assignment_legal_mask.dat (N_da, 1)        uint8  (packbits of 2 bits)
     dragon_assignment_meta.dat      (N_da,)           structured
     order.dat                       (N_total, 2)      uint32: (type_idx, row_idx_in_type)
+
+Schema v2 bit-packs every 0/1 column to save disk:
+
+  * Legal masks are 0/1 boolean. Storing one byte per action wastes 8×;
+    they are bit-packed with `np.packbits(mask, axis=1)` to `ceil(K/8)`
+    bytes per row (K = the head's logit width): a 1809-wide play mask
+    becomes 227 bytes.
+
+  * Feature vectors are 214 indicator columns (set to exactly 1.0) plus
+    10 continuous ratio columns (`hand_sizes`/`team_scores`/`round_points`,
+    can be negative). The bundle splits them: indicator columns are packed
+    to `<type>_feat_bits.dat` (27 bytes/row) and the continuous columns are
+    kept bit-exact float32 in `<type>_feat_cont.dat` (40 bytes/row). The
+    column split comes from `featurizer.CONTINUOUS_FEATURE_COLUMNS` and is
+    recorded in the manifest. Net play feature row: 896 → 67 bytes (13.4×).
+
+The reader unpacks both on read and reconstructs the dense float32 vector
+/ K-wide bool mask. The manifest flags (`legal_mask_packed`,
+`features_packed`) gate this; their absence marks a pre-v2 bundle, which
+the schema pin rejects anyway.
 
 The reader preserves the original emission order via `order.dat`. The
 fast batched path ignores it and walks each type's contiguous memmap
@@ -49,7 +74,11 @@ from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bc.dataset import BCExample
 from tichu_training.bc.decision_types import HEAD_LOGIT_DIMS
 from tichu_training.checkpoint import VersionMismatchError
-from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
+from tichu_training.featurizer import (
+    CONTINUOUS_FEATURE_COLUMNS,
+    FEATURIZER_OUTPUT_DIM,
+    FEATURIZER_VERSION,
+)
 
 
 log = logging.getLogger("tichu_training.bc.materialised")
@@ -60,7 +89,12 @@ log = logging.getLogger("tichu_training.bc.materialised")
 # FEATURIZER_VERSION (which invalidates the feature *content* not the
 # layout) and ACTION_SPACE_VERSION (which invalidates target / mask
 # semantics not layout).
-MATERIALISED_SCHEMA_VERSION = 1
+#   v1 -> v2: legal masks AND feature indicator columns bit-packed via
+#             np.packbits (manifest gains "legal_mask_packed" +
+#             "features_packed" + "continuous_feature_columns"). v1 bundles
+#             stored one uint8 per action and f32 per feature column; the
+#             pin rejects them so they're re-materialised.
+MATERIALISED_SCHEMA_VERSION = 2
 
 
 # Stable type-index ordering encoded in order.dat. Baked into the
@@ -83,6 +117,42 @@ META_DTYPE: np.dtype = np.dtype([
 
 
 _GAME_WON_NONE_CODE: int = -1
+
+
+def _packed_mask_bytes(mask_dim: int) -> int:
+    """Bytes per row after `np.packbits` of a `mask_dim`-bit boolean row."""
+    return (mask_dim + 7) // 8
+
+
+def _binary_feature_columns(
+    feature_dim: int, continuous_columns: Iterable[int],
+) -> list[int]:
+    """Ascending indicator-column indices = all columns minus the continuous
+    ones. The writer packs these (in this order) and the reader unpacks back
+    into the same slots, so both sides must derive them identically."""
+    cont = set(continuous_columns)
+    return [c for c in range(feature_dim) if c not in cont]
+
+
+def _contiguous_runs(cols: list[int]) -> list[tuple[int, int, int]]:
+    """Group an ascending column list into `(dst_start, dst_stop, src_start)`
+    runs so a scatter into the dense vector becomes a handful of slice copies
+    instead of one fancy-index assignment. `src_start` is the offset of the
+    run's first column within the packed/continuous source block.
+
+    For v4's layout this collapses the 214 indicator columns to two runs
+    (0:56, 66:224) and the 10 continuous columns to one (56:66) — three
+    slice copies per batch, not a 224-wide gather.
+    """
+    runs: list[tuple[int, int, int]] = []
+    i = 0
+    while i < len(cols):
+        j = i
+        while j + 1 < len(cols) and cols[j + 1] == cols[j] + 1:
+            j += 1
+        runs.append((cols[i], cols[j] + 1, i))
+        i = j + 1
+    return runs
 
 
 # ----------------------------------------------------------------------
@@ -132,6 +202,14 @@ def materialise(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Feature column split: indicator columns (packed to bits) vs the
+    # continuous columns (kept f32). Derived once from the featurizer.
+    cont_cols = list(CONTINUOUS_FEATURE_COLUMNS)
+    bin_cols = _binary_feature_columns(FEATURIZER_OUTPUT_DIM, cont_cols)
+    _bin_idx = np.asarray(bin_cols, dtype=np.intp)
+    _cont_idx = np.asarray(cont_cols, dtype=np.intp)
+    feat_bits_bytes = (len(bin_cols) + 7) // 8
+
     type_idx_for = {h: i for i, h in enumerate(TYPE_ORDER)}
     per_type_buf: dict[str, list[BCExample]] = {h: [] for h in TYPE_ORDER}
     # `rows_written[type]` is the number of rows ALREADY on disk for that
@@ -145,12 +223,14 @@ def materialise(
     # Truncate any prior bundle's files so the writer is idempotent.
     # Open in "wb" (truncating) once up-front, close immediately, then
     # all subsequent writes use "ab" (append) — keeps fd churn low.
-    _feat_paths = {h: out_dir / f"{h}_features.dat" for h in TYPE_ORDER}
+    _bits_paths = {h: out_dir / f"{h}_feat_bits.dat" for h in TYPE_ORDER}
+    _cont_paths = {h: out_dir / f"{h}_feat_cont.dat" for h in TYPE_ORDER}
     _mask_paths = {h: out_dir / f"{h}_legal_mask.dat" for h in TYPE_ORDER}
     _meta_paths = {h: out_dir / f"{h}_meta.dat" for h in TYPE_ORDER}
     _order_path = out_dir / "order.dat"
     for p in (
-        list(_feat_paths.values())
+        list(_bits_paths.values())
+        + list(_cont_paths.values())
         + list(_mask_paths.values())
         + list(_meta_paths.values())
         + [_order_path]
@@ -167,8 +247,34 @@ def materialise(
         feat = np.stack([e.features for e in examples]).astype(
             np.float32, copy=False,
         )
-        mask = np.stack(
-            [np.asarray(e.legal_mask, dtype=np.uint8) for e in examples]
+        # Split features: bit-pack the indicator columns (exactly 0/1), keep
+        # the continuous columns as f32. Both packbits calls work per-row
+        # (axis=1), so a chunked write is byte-identical to a single-shot
+        # write — no cross-row dependency.
+        bin_block = feat[:, _bin_idx]
+        # Guard against silent corruption: packbits collapses anything
+        # non-zero to 1, so a column we *think* is an indicator but isn't
+        # 0/1 would be wrecked. This catches a featurizer change that made a
+        # section continuous without updating CONTINUOUS_SECTIONS, or a
+        # non-featurizer stream being materialised.
+        if ((bin_block != 0.0) & (bin_block != 1.0)).any():
+            bad = np.unique(np.asarray(_bin_idx)[
+                np.where(((bin_block != 0.0) & (bin_block != 1.0)).any(axis=0))[0]
+            ])
+            raise ValueError(
+                f"materialise() bit-packs indicator feature columns but found "
+                f"non-0/1 values in column(s) {bad.tolist()[:10]} of type "
+                f"'{type_name}'. The stream must be real featurizer output; if "
+                f"the featurizer layout changed, update "
+                f"featurizer.CONTINUOUS_SECTIONS."
+            )
+        feat_bits = np.packbits(bin_block.astype(np.uint8), axis=1)
+        feat_cont = np.ascontiguousarray(feat[:, _cont_idx], dtype=np.float32)
+        mask = np.packbits(
+            np.stack(
+                [np.asarray(e.legal_mask, dtype=np.uint8) for e in examples]
+            ),
+            axis=1,
         )
         meta = np.zeros(len(examples), dtype=META_DTYPE)
         for i, e in enumerate(examples):
@@ -180,8 +286,10 @@ def materialise(
                 _GAME_WON_NONE_CODE if e.game_won is None
                 else (1 if e.game_won else 0)
             )
-        with _feat_paths[type_name].open("ab") as fh:
-            feat.tofile(fh)
+        with _bits_paths[type_name].open("ab") as fh:
+            feat_bits.tofile(fh)
+        with _cont_paths[type_name].open("ab") as fh:
+            feat_cont.tofile(fh)
         with _mask_paths[type_name].open("ab") as fh:
             mask.tofile(fh)
         with _meta_paths[type_name].open("ab") as fh:
@@ -189,13 +297,18 @@ def materialise(
         n_rows = len(examples)
         rows_written[type_name] += n_rows
         bytes_written[type_name] += (
-            (FEATURIZER_OUTPUT_DIM * 4 + mask_dim + META_DTYPE.itemsize)
+            (
+                feat_bits_bytes
+                + len(cont_cols) * 4
+                + _packed_mask_bytes(mask_dim)
+                + META_DTYPE.itemsize
+            )
             * n_rows
         )
         per_type_buf[type_name] = []
         # Drop the np arrays so the next chunk's stack doesn't pile up
         # before GC sweeps.
-        del feat, mask, meta, examples
+        del feat, feat_bits, feat_cont, mask, meta, examples
 
     def _flush_order() -> None:
         if not order_buf:
@@ -288,6 +401,9 @@ def materialise(
         "featurizer_version": FEATURIZER_VERSION,
         "action_space_version": ACTION_SPACE_VERSION,
         "feature_dim": FEATURIZER_OUTPUT_DIM,
+        "legal_mask_packed": True,
+        "features_packed": True,
+        "continuous_feature_columns": cont_cols,
         "head_logit_dims": dict(HEAD_LOGIT_DIMS),
         "type_order": TYPE_ORDER,
         "meta_dtype": [(name, str(t)) for name, t in META_DTYPE.descr],
@@ -295,12 +411,18 @@ def materialise(
         "total": n,
         "files": {
             type_name: {
-                "features": f"{type_name}_features.dat",
+                "feat_bits": f"{type_name}_feat_bits.dat",
+                "feat_cont": f"{type_name}_feat_cont.dat",
                 "legal_mask": f"{type_name}_legal_mask.dat",
                 "meta": f"{type_name}_meta.dat",
-                "shape_features": [counts[type_name], FEATURIZER_OUTPUT_DIM],
+                "shape_feat_bits": [counts[type_name], feat_bits_bytes],
+                "shape_feat_cont": [counts[type_name], len(cont_cols)],
                 "shape_legal_mask": [
                     counts[type_name], HEAD_LOGIT_DIMS[type_name],
+                ],
+                "shape_legal_mask_packed": [
+                    counts[type_name],
+                    _packed_mask_bytes(HEAD_LOGIT_DIMS[type_name]),
                 ],
             }
             for type_name in TYPE_ORDER if counts[type_name] > 0
@@ -330,11 +452,12 @@ class MemmapBCDataset(Iterable[BCExample]):
     don't match the live code's expectations. Modelled on the existing
     `ParquetBCDataset` pin behaviour.
 
-    The reader holds memmap views, not copies. Per-row access via
-    `__iter__` is zero-copy until the consumer's `_to_tensors` calls
-    `np.stack` to build a batch. The batched path indexes the memmap
-    with a fancy-index list, which produces a single contiguous copy
-    sized exactly to the batch tensor — what the training loop needs.
+    The reader holds memmap views, not copies. Per-row/per-batch access
+    reconstructs the dense feature vector from its bit-packed indicator block
+    + continuous f32 block, and unpacks the legal mask from its bit-packed
+    form — small copies sized exactly to what the consumer needs. The batched
+    path fancy-indexes the memmaps (one contiguous copy per block) then does
+    the reconstruction once for the whole batch.
     """
 
     def __init__(
@@ -377,6 +500,18 @@ class MemmapBCDataset(Iterable[BCExample]):
         self.counts: dict[str, int] = self.manifest["counts"]
         self.head_logit_dims: dict[str, int] = self.manifest["head_logit_dims"]
 
+        # Feature reconstruction plan. The bundle stores indicator columns
+        # bit-packed (feat_bits) and continuous columns as f32 (feat_cont);
+        # rebuild the dense (D,) vector by scattering each block back into its
+        # original columns. Precompute the contiguous runs once so per-batch
+        # reconstruction is a few slice copies, not a fancy-index gather.
+        cont_cols = list(self.manifest["continuous_feature_columns"])
+        bin_cols = _binary_feature_columns(self.feature_dim, cont_cols)
+        self._n_bin = len(bin_cols)
+        self._feat_bits_bytes = (self._n_bin + 7) // 8
+        self._bin_runs = _contiguous_runs(bin_cols)
+        self._cont_runs = _contiguous_runs(cont_cols)
+
         # Reconstruct the meta dtype from the manifest's recorded
         # (name, dtype-str) pairs. A future bundle adding fields stays
         # readable as long as the existing fields keep their slots.
@@ -384,21 +519,27 @@ class MemmapBCDataset(Iterable[BCExample]):
             (n, np.dtype(t)) for n, t in self.manifest["meta_dtype"]
         ])
 
-        self._features: dict[str, np.memmap] = {}
+        self._feat_bits: dict[str, np.memmap] = {}
+        self._feat_cont: dict[str, np.memmap] = {}
         self._mask: dict[str, np.memmap] = {}
         self._meta: dict[str, np.memmap] = {}
         for type_name, info in self.manifest["files"].items():
             n_rows = self.counts[type_name]
             mask_dim = self.head_logit_dims[type_name]
-            self._features[type_name] = np.memmap(
-                self.data_dir / info["features"],
+            self._feat_bits[type_name] = np.memmap(
+                self.data_dir / info["feat_bits"],
+                dtype=np.uint8, mode="r",
+                shape=(n_rows, self._feat_bits_bytes),
+            )
+            self._feat_cont[type_name] = np.memmap(
+                self.data_dir / info["feat_cont"],
                 dtype=np.float32, mode="r",
-                shape=(n_rows, self.feature_dim),
+                shape=(n_rows, len(cont_cols)),
             )
             self._mask[type_name] = np.memmap(
                 self.data_dir / info["legal_mask"],
                 dtype=np.uint8, mode="r",
-                shape=(n_rows, mask_dim),
+                shape=(n_rows, _packed_mask_bytes(mask_dim)),
             )
             self._meta[type_name] = np.memmap(
                 self.data_dir / info["meta"],
@@ -420,19 +561,38 @@ class MemmapBCDataset(Iterable[BCExample]):
     def total(self) -> int:
         return self.n_rows
 
+    def _reconstruct_features(
+        self, bits: np.ndarray, cont: np.ndarray,
+    ) -> np.ndarray:
+        """Rebuild a dense `(B, D)` float32 feature batch from its bit-packed
+        indicator block + continuous f32 block. `bits` is `(B, feat_bits_bytes)`
+        uint8, `cont` is `(B, n_cont)` f32. Scatter is done as a few slice
+        copies over the precomputed contiguous runs (cheap, uint8→f32 casts
+        on assignment)."""
+        feat = np.empty((bits.shape[0], self.feature_dim), dtype=np.float32)
+        binvals = np.unpackbits(bits, axis=1)
+        for dst0, dst1, src0 in self._bin_runs:
+            feat[:, dst0:dst1] = binvals[:, src0 : src0 + (dst1 - dst0)]
+        for dst0, dst1, src0 in self._cont_runs:
+            feat[:, dst0:dst1] = cont[:, src0 : src0 + (dst1 - dst0)]
+        return feat
+
     def __iter__(self) -> Iterator[BCExample]:
         """Yield one `BCExample` per row in original emission order.
 
-        Per-row reads are memmap slice views — no copy until the
-        consumer batches. Use this when interoperating with code that
-        expects `Iterable[BCExample]` (e.g. `ParallelParquetBCDataset`
-        compat). For training throughput, prefer `iter_batches`.
+        Use this when interoperating with code that expects
+        `Iterable[BCExample]` (e.g. `ParallelParquetBCDataset` compat). Each
+        row's features are reconstructed from the bit-packed + continuous
+        blocks and its mask is unpacked — small per-row copies. For training
+        throughput, prefer `iter_batches`.
         """
         type_order = self.type_order
-        features = self._features
+        feat_bits = self._feat_bits
+        feat_cont = self._feat_cont
         masks = self._mask
         meta = self._meta
         order = self._order
+        mask_dims = self.head_logit_dims
         for i in range(len(order)):
             type_idx = int(order[i, 0])
             row_idx = int(order[i, 1])
@@ -441,9 +601,14 @@ class MemmapBCDataset(Iterable[BCExample]):
             game_won_code = int(m["game_won"])
             yield BCExample(
                 decision_type=type_name,
-                features=features[type_name][row_idx],
+                features=self._reconstruct_features(
+                    feat_bits[type_name][row_idx][None, :],
+                    feat_cont[type_name][row_idx][None, :],
+                )[0],
                 target=int(m["target"]),
-                legal_mask=masks[type_name][row_idx].astype(bool),
+                legal_mask=np.unpackbits(masks[type_name][row_idx])[
+                    : mask_dims[type_name]
+                ].astype(bool),
                 sample_weight=float(m["sample_weight"]),
                 skill_decile=int(m["skill_decile"]),
                 round_outcome=float(m["round_outcome"]),
@@ -527,15 +692,24 @@ class MemmapBCDataset(Iterable[BCExample]):
     ) -> dict[str, np.ndarray]:
         """Vectorised gather of one batch worth of rows.
 
-        Memmap fancy-indexing copies the selected rows into a fresh
-        contiguous array — exactly the shape the training loop wants.
-        This is the single memcpy that replaces per-row BCExample
-        construction in the `__iter__` path. Avoids Python-object
-        allocation, dataclass __init__, and per-row attribute lookups.
+        Memmap fancy-indexing copies the selected rows into fresh contiguous
+        arrays; features are then reconstructed from their bit-packed +
+        continuous blocks and the mask is unpacked — exactly the shapes the
+        training loop wants. Replaces per-row BCExample construction in the
+        `__iter__` path: no Python-object allocation, dataclass __init__, or
+        per-row attribute lookups.
         """
         idx = np.asarray(row_indices, dtype=np.int64)
-        feat = np.asarray(self._features[type_name][idx])
-        mask = np.asarray(self._mask[type_name][idx]).astype(bool)
+        feat = self._reconstruct_features(
+            np.asarray(self._feat_bits[type_name][idx]),
+            np.asarray(self._feat_cont[type_name][idx]),
+        )
+        # Unpack the bit-packed mask rows back to (B, mask_dim) bool. packbits
+        # padded each row up to a byte boundary; slice off the padding bits.
+        packed = np.asarray(self._mask[type_name][idx])
+        mask = np.unpackbits(packed, axis=1)[
+            :, : self.head_logit_dims[type_name]
+        ].astype(bool)
         meta = np.asarray(self._meta[type_name][idx])
         return {
             "features": feat,

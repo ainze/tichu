@@ -74,6 +74,7 @@ class SyntheticBCDataset(Iterable[BCExample]):
         n_per_head: int = 100,
         feature_dim: int | None = None,
         skill_buckets: int = 10,
+        binary_features: bool = False,
     ) -> None:
         self.seed = seed
         self.n_per_head = n_per_head
@@ -83,12 +84,37 @@ class SyntheticBCDataset(Iterable[BCExample]):
             feature_dim = FEATURIZER_OUTPUT_DIM
         self.feature_dim = feature_dim
         self.skill_buckets = skill_buckets
+        # When True, emit features that honour the real featurizer's
+        # value contract: indicator columns are 0/1, only the columns in
+        # `CONTINUOUS_FEATURE_COLUMNS` carry arbitrary floats. Required by
+        # consumers that bit-pack the indicator columns (the materialised
+        # bundle). Default False keeps the historical all-Gaussian features
+        # that the AWR / value-baseline tests depend on.
+        self.binary_features = binary_features
 
     def __iter__(self) -> Iterator[BCExample]:
         rng = np.random.default_rng(self.seed)
+        cont_idx = None
+        if self.binary_features:
+            from tichu_training.featurizer import CONTINUOUS_FEATURE_COLUMNS
+            cont_idx = np.asarray(
+                [c for c in CONTINUOUS_FEATURE_COLUMNS if c < self.feature_dim],
+                dtype=np.intp,
+            )
         for decision_type, k in HEAD_LOGIT_DIMS.items():
             for _ in range(self.n_per_head):
-                features = rng.standard_normal(self.feature_dim).astype(np.float32)
+                if self.binary_features:
+                    features = (
+                        rng.random(self.feature_dim) < 0.5
+                    ).astype(np.float32)
+                    if cont_idx.size:
+                        features[cont_idx] = rng.standard_normal(
+                            cont_idx.size
+                        ).astype(np.float32)
+                else:
+                    features = rng.standard_normal(self.feature_dim).astype(
+                        np.float32
+                    )
                 # 50% of actions legal (minimum 1).
                 legal = rng.random(k) < 0.5
                 if not legal.any():

@@ -45,7 +45,7 @@ def bundle(tmp_path: Path) -> tuple[Path, int]:
     """
     feature_dim = FEATURIZER_OUTPUT_DIM
     examples = list(SyntheticBCDataset(
-        seed=0, n_per_head=32, feature_dim=feature_dim,
+        seed=0, n_per_head=32, feature_dim=feature_dim, binary_features=True,
     ))
     out_dir = tmp_path / "bundle"
     materialise(iter(examples), out_dir, max_examples=len(examples))
