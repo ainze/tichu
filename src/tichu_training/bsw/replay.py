@@ -19,7 +19,7 @@ Phoenix substitution rank is inferred when ambiguous:
 """
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Callable, Iterable
 
 from tichu_engine.cards import MAHJONG, PHOENIX
 from tichu_engine.combinations import CardOrSpecial
@@ -71,10 +71,28 @@ class ReplayResult:
     # instead of re-enumerating. `None` wherever the parallel pre-decision
     # state is `None`.
     legal_actions_at: list[frozenset | None] = field(default_factory=list)
+    # True when the caller's `early_stop` predicate halted the play loop
+    # before the round finished. When set, `final_state` holds the partial
+    # engine state at the stop point (non-None so consumers don't read it as
+    # a replay failure) — it is NOT the round-end state.
+    stopped_early: bool = False
 
 
-def replay_round(parsed: ParsedRound) -> ReplayResult:
-    """Step a `ParsedRound` through the engine. Stop at the first illegal action."""
+def replay_round(
+    parsed: ParsedRound,
+    *,
+    early_stop: Callable[["ReplayResult"], bool] | None = None,
+) -> ReplayResult:
+    """Step a `ParsedRound` through the engine. Stop at the first illegal action.
+
+    If `early_stop` is given, it is called with the in-progress `ReplayResult`
+    before each parsed Play is processed; returning True halts the loop. The
+    result is marked `stopped_early` and `final_state` is set to the partial
+    state at the stop point. Callers that only need early-round states (e.g.
+    the Tichu Call adapter, which needs each seat's first non-Pass Play) use
+    this to skip the bulk of the per-round legal-action enumeration — the
+    dominant replay cost per ADR-0009.
+    """
     state = _build_initial_state(parsed)
     result = ReplayResult(final_state=None, steps_taken=0)
 
@@ -117,6 +135,10 @@ def replay_round(parsed: ParsedRound) -> ReplayResult:
 
     # 2) Play sequence.
     for parsed_action in parsed.plays:
+        if early_stop is not None and early_stop(result):
+            result.stopped_early = True
+            result.final_state = state
+            return result
         if parsed_action.kind in ("tichu", "grand_tichu"):
             # Engine doesn't model these yet — capture but skip stepping.
             result.decisions.append((parsed_action, _CallPassthrough(parsed_action.kind)))
