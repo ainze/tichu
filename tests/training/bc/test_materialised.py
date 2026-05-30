@@ -23,7 +23,7 @@ from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
 @pytest.fixture
 def materialised_smoke(tmp_path: Path) -> tuple[list[BCExample], Path]:
     """Materialise a SyntheticBCDataset slice to disk and return (source, out_dir)."""
-    src = SyntheticBCDataset(seed=42, n_per_head=20, skill_buckets=10)
+    src = SyntheticBCDataset(seed=42, n_per_head=20, skill_buckets=10, binary_features=True)
     examples = list(src)
     out_dir = tmp_path / "bundle"
     materialise(iter(examples), out_dir, max_examples=len(examples))
@@ -39,10 +39,72 @@ def test_materialise_emits_manifest_and_per_type_files(materialised_smoke):
     assert manifest["type_order"] == TYPE_ORDER
     # All three heads should have written files in the synthetic case.
     for head in HEAD_LOGIT_DIMS:
-        assert (out_dir / f"{head}_features.dat").exists()
+        assert (out_dir / f"{head}_feat_bits.dat").exists()
+        assert (out_dir / f"{head}_feat_cont.dat").exists()
         assert (out_dir / f"{head}_legal_mask.dat").exists()
         assert (out_dir / f"{head}_meta.dat").exists()
     assert (out_dir / "order.dat").exists()
+
+
+def test_features_are_bit_packed_on_disk(materialised_smoke):
+    """Feature files must store indicator columns bit-packed (feat_bits) and
+    only the continuous columns as f32 (feat_cont) — schema v2. A raw f32
+    play row is 224*4 = 896 B; packed it is ceil(214/8) + 10*4 = 27 + 40 =
+    67 B (~13x). Locks the format against a silent revert to dense f32.
+    """
+    _, out_dir = materialised_smoke
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["features_packed"] is True
+    cont_cols = manifest["continuous_feature_columns"]
+    D = manifest["feature_dim"]
+    n_cont = len(cont_cols)
+    n_bin = D - n_cont
+    bits_bytes = (n_bin + 7) // 8
+    counts = manifest["counts"]
+    for head in HEAD_LOGIT_DIMS:
+        if counts.get(head, 0) == 0:
+            continue
+        rows = counts[head]
+        assert (out_dir / f"{head}_feat_bits.dat").stat().st_size == (
+            rows * bits_bytes
+        )
+        assert (out_dir / f"{head}_feat_cont.dat").stat().st_size == (
+            rows * n_cont * 4
+        )
+
+
+def test_materialise_rejects_non_binary_indicator_columns(tmp_path: Path):
+    """The writer bit-packs the indicator feature columns, which only works
+    if they are 0/1. A stream whose indicator columns carry other values
+    (e.g. SyntheticBCDataset's default all-Gaussian features) must raise,
+    not silently corrupt — guards against a featurizer layout drift.
+    """
+    src = list(SyntheticBCDataset(seed=0, n_per_head=4, skill_buckets=10))
+    with pytest.raises(ValueError, match="non-0/1"):
+        materialise(iter(src), tmp_path / "bad")
+
+
+def test_legal_mask_is_bit_packed_on_disk(materialised_smoke):
+    """The mask files must be packbits-compressed (schema v2): one byte per
+    8 actions, not one byte per action. This is the disk win — a raw play
+    mask would be 1809 B/row; packed it is 227 B/row (~8x smaller). Locks
+    the format so a regression can't silently revert to raw uint8 masks.
+    """
+    _, out_dir = materialised_smoke
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["legal_mask_packed"] is True
+    counts = manifest["counts"]
+    for head, mask_dim in HEAD_LOGIT_DIMS.items():
+        if counts.get(head, 0) == 0:
+            continue
+        packed_bytes = (mask_dim + 7) // 8
+        expected = counts[head] * packed_bytes
+        actual = (out_dir / f"{head}_legal_mask.dat").stat().st_size
+        assert actual == expected, (
+            f"{head} mask not packed: {actual} B != {expected} B "
+            f"({counts[head]} rows x {packed_bytes} B); raw would be "
+            f"{counts[head] * mask_dim} B"
+        )
 
 
 def test_roundtrip_iter_yields_same_examples_in_order(materialised_smoke):
@@ -181,7 +243,7 @@ def test_chunked_write_equivalent_to_unchunked(tmp_path: Path):
     streaming append path is correct on the row-index bookkeeping
     (which differs between chunked vs single-shot writes).
     """
-    src = list(SyntheticBCDataset(seed=11, n_per_head=23, skill_buckets=10))
+    src = list(SyntheticBCDataset(seed=11, n_per_head=23, skill_buckets=10, binary_features=True))
     big = tmp_path / "big_chunk"
     tiny = tmp_path / "tiny_chunk"
     materialise(iter(src), big, chunk_size=10_000)  # one chunk per type
@@ -189,9 +251,12 @@ def test_chunked_write_equivalent_to_unchunked(tmp_path: Path):
 
     # All .dat files must be byte-identical.
     for name in (
-        "play_features.dat", "play_legal_mask.dat", "play_meta.dat",
-        "wish_features.dat", "wish_legal_mask.dat", "wish_meta.dat",
-        "dragon_assignment_features.dat",
+        "play_feat_bits.dat", "play_feat_cont.dat",
+        "play_legal_mask.dat", "play_meta.dat",
+        "wish_feat_bits.dat", "wish_feat_cont.dat",
+        "wish_legal_mask.dat", "wish_meta.dat",
+        "dragon_assignment_feat_bits.dat",
+        "dragon_assignment_feat_cont.dat",
         "dragon_assignment_legal_mask.dat",
         "dragon_assignment_meta.dat",
         "order.dat",
@@ -213,7 +278,7 @@ def test_chunked_write_equivalent_to_unchunked(tmp_path: Path):
 def test_no_cap_drains_stream(tmp_path: Path):
     """`max_examples=None` (the default) must consume the entire input
     iterable. Production runs rely on this — the CLI default is no-cap."""
-    src = list(SyntheticBCDataset(seed=5, n_per_head=11, skill_buckets=10))
+    src = list(SyntheticBCDataset(seed=5, n_per_head=11, skill_buckets=10, binary_features=True))
     out_dir = tmp_path / "uncapped"
     counts = materialise(iter(src), out_dir)  # no max_examples kwarg
     assert sum(counts.values()) == len(src)
@@ -222,7 +287,7 @@ def test_no_cap_drains_stream(tmp_path: Path):
 def test_max_examples_caps_at_target(tmp_path: Path):
     """Cap semantics: at most `max_examples` rows written, even if the
     stream is longer."""
-    src = list(SyntheticBCDataset(seed=5, n_per_head=20, skill_buckets=10))
+    src = list(SyntheticBCDataset(seed=5, n_per_head=20, skill_buckets=10, binary_features=True))
     assert len(src) > 30  # sanity
     out_dir = tmp_path / "capped"
     counts = materialise(iter(src), out_dir, max_examples=30)
@@ -234,7 +299,7 @@ def test_idempotent_rerun_overwrites_prior_bundle(tmp_path: Path):
     same bundle as one run — the prior .dat files are truncated, not
     appended-to. Without truncation, a re-run would corrupt the bundle.
     """
-    src = list(SyntheticBCDataset(seed=3, n_per_head=12, skill_buckets=10))
+    src = list(SyntheticBCDataset(seed=3, n_per_head=12, skill_buckets=10, binary_features=True))
     out_dir = tmp_path / "rerun"
     materialise(iter(src), out_dir)
     first_sizes = {

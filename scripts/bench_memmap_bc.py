@@ -95,22 +95,39 @@ class MemmapBCDataset:
             (n, np.dtype(t)) for n, t in self.manifest["meta_dtype"]
         ])
 
+        # Feature reconstruction plan (schema v2: indicator columns packed,
+        # continuous columns kept f32). Mirrors MemmapBCDataset.
+        cont_cols = list(self.manifest["continuous_feature_columns"])
+        cont_set = set(cont_cols)
+        bin_cols = [c for c in range(self.feature_dim) if c not in cont_set]
+        self._n_bin = len(bin_cols)
+        self._feat_bits_bytes = (self._n_bin + 7) // 8
+        self._n_cont = len(cont_cols)
+        self._bin_cols = np.asarray(bin_cols, dtype=np.intp)
+        self._cont_cols = np.asarray(cont_cols, dtype=np.intp)
+
         # Memmap each per-type file.
-        self._features: dict[str, np.memmap] = {}
+        self._feat_bits: dict[str, np.memmap] = {}
+        self._feat_cont: dict[str, np.memmap] = {}
         self._mask: dict[str, np.memmap] = {}
         self._meta: dict[str, np.memmap] = {}
         for type_name, info in self.manifest["files"].items():
             n_rows = self.counts[type_name]
             mask_dim = self.head_logit_dims[type_name]
-            self._features[type_name] = np.memmap(
-                self.data_dir / info["features"],
+            self._feat_bits[type_name] = np.memmap(
+                self.data_dir / info["feat_bits"],
+                dtype=np.uint8, mode="r",
+                shape=(n_rows, self._feat_bits_bytes),
+            )
+            self._feat_cont[type_name] = np.memmap(
+                self.data_dir / info["feat_cont"],
                 dtype=np.float32, mode="r",
-                shape=(n_rows, self.feature_dim),
+                shape=(n_rows, self._n_cont),
             )
             self._mask[type_name] = np.memmap(
                 self.data_dir / info["legal_mask"],
                 dtype=np.uint8, mode="r",
-                shape=(n_rows, mask_dim),
+                shape=(n_rows, (mask_dim + 7) // 8),  # packbits, schema v2
             )
             self._meta[type_name] = np.memmap(
                 self.data_dir / info["meta"],
@@ -129,13 +146,21 @@ class MemmapBCDataset:
     def n_rows(self) -> int:
         return int(self.manifest["total"])
 
+    def _reconstruct_row(self, type_name: str, row_idx: int) -> np.ndarray:
+        feat = np.empty(self.feature_dim, dtype=np.float32)
+        feat[self._bin_cols] = np.unpackbits(
+            self._feat_bits[type_name][row_idx]
+        )[: self._n_bin]
+        feat[self._cont_cols] = self._feat_cont[type_name][row_idx]
+        return feat
+
     def __iter__(self) -> Iterator[BCExample]:
         type_order = self.type_order
         # Snapshot to locals — saves dict lookup overhead per row.
-        features = self._features
         masks = self._mask
         meta = self._meta
         order = self._order
+        mask_dims = self.head_logit_dims
         for i in range(len(order)):
             type_idx = int(order[i, 0])
             row_idx = int(order[i, 1])
@@ -144,9 +169,11 @@ class MemmapBCDataset:
             game_won_code = int(m["game_won"])
             yield BCExample(
                 decision_type=type_name,
-                features=features[type_name][row_idx],
+                features=self._reconstruct_row(type_name, row_idx),
                 target=int(m["target"]),
-                legal_mask=masks[type_name][row_idx].astype(bool),
+                legal_mask=np.unpackbits(masks[type_name][row_idx])[
+                    : mask_dims[type_name]
+                ].astype(bool),
                 sample_weight=float(m["sample_weight"]),
                 skill_decile=int(m["skill_decile"]),
                 round_outcome=float(m["round_outcome"]),

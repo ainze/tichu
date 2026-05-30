@@ -10,14 +10,17 @@ Layout:
 
   <out_dir>/
     manifest.json
-    play_features.dat              (N_play, 16624)  float32
-    play_legal_mask.dat            (N_play, 1809)   uint8 (raw, not packed)
+    play_feat_bits.dat             (N_play, 27)     uint8 (packbits of 214 flags)
+    play_feat_cont.dat             (N_play, 10)     float32 (continuous cols)
+    play_legal_mask.dat            (N_play, 227)    uint8 (packbits of 1809 bits)
     play_meta.dat                  (N_play,)        structured
-    wish_features.dat              (N_wish, 16624)  float32
-    wish_legal_mask.dat            (N_wish, 14)     uint8
+    wish_feat_bits.dat             (N_wish, 27)     uint8
+    wish_feat_cont.dat             (N_wish, 10)     float32
+    wish_legal_mask.dat            (N_wish, 2)      uint8 (packbits of 14 bits)
     wish_meta.dat                  (N_wish,)        structured
-    dragon_assignment_features.dat (N_da, 16624)    float32
-    dragon_assignment_legal_mask.dat (N_da, 2)      uint8
+    dragon_assignment_feat_bits.dat (N_da, 27)      uint8
+    dragon_assignment_feat_cont.dat (N_da, 10)      float32
+    dragon_assignment_legal_mask.dat (N_da, 1)      uint8 (packbits of 2 bits)
     dragon_assignment_meta.dat     (N_da,)          structured
     order.dat                      (N_total, 2)     uint32: (type_idx, row_idx)
 
@@ -28,9 +31,11 @@ Meta dtype:
   ("round_outcome", "f4"),
   ("game_won", "i1"),  # -1=None, 0=False, 1=True
 
-For ~100k examples the on-disk footprint is ~6.8 GB. For ~250k it's
-~17 GB, which is what Phase B benches against (50k warmup + 200k
-measure in one pass).
+With the v4 featurizer + schema-v2 packing, a play row is ~307 B on disk
+(27 B feat_bits + 40 B feat_cont + 227 B packed mask + 13 B meta), so
+~250k examples is well under 100 MB. (Note: this standalone collects all
+examples in RAM before writing — the streaming `materialise()` library
+writer is what the full corpus uses.)
 
 Usage (PowerShell):
 
@@ -55,7 +60,11 @@ import numpy as np
 from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bc.dataset import BCExample
 from tichu_training.bc.heads import HEAD_LOGIT_DIMS
-from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
+from tichu_training.featurizer import (
+    CONTINUOUS_FEATURE_COLUMNS,
+    FEATURIZER_OUTPUT_DIM,
+    FEATURIZER_VERSION,
+)
 
 
 META_DTYPE = np.dtype([
@@ -140,6 +149,15 @@ def main() -> int:
     # list once is much cheaper than per-row memmap writes; the OS will
     # flush the resulting contiguous buffer to disk via the normal write
     # path.
+    cont_cols = list(CONTINUOUS_FEATURE_COLUMNS)
+    cont_set = set(cont_cols)
+    bin_idx = np.asarray(
+        [c for c in range(FEATURIZER_OUTPUT_DIM) if c not in cont_set],
+        dtype=np.intp,
+    )
+    cont_idx = np.asarray(cont_cols, dtype=np.intp)
+    feat_bits_bytes = (len(bin_idx) + 7) // 8
+
     for type_name in TYPE_ORDER:
         examples = per_type[type_name]
         if not examples:
@@ -148,10 +166,16 @@ def main() -> int:
         mask_dim = HEAD_LOGIT_DIMS[type_name]
         t_write = time.perf_counter()
         print(f"  {type_name}: writing {len(examples)} rows "
-              f"(features {FEATURIZER_OUTPUT_DIM} f32, mask {mask_dim} u8) ...")
+              f"(feat {len(bin_idx)} bits + {len(cont_idx)} f32, "
+              f"mask {mask_dim} u8) ...")
         feat = np.stack([e.features for e in examples])
-        mask = np.stack(
-            [np.asarray(e.legal_mask, dtype=np.uint8) for e in examples]
+        feat_bits = np.packbits(feat[:, bin_idx].astype(np.uint8), axis=1)
+        feat_cont = np.ascontiguousarray(feat[:, cont_idx], dtype=np.float32)
+        mask = np.packbits(
+            np.stack(
+                [np.asarray(e.legal_mask, dtype=np.uint8) for e in examples]
+            ),
+            axis=1,
         )
         meta = np.zeros(len(examples), dtype=META_DTYPE)
         for i, e in enumerate(examples):
@@ -162,17 +186,23 @@ def main() -> int:
             meta[i]["game_won"] = (
                 -1 if e.game_won is None else (1 if e.game_won else 0)
             )
-        feat.tofile(out_dir / f"{type_name}_features.dat")
+        feat_bits.tofile(out_dir / f"{type_name}_feat_bits.dat")
+        feat_cont.tofile(out_dir / f"{type_name}_feat_cont.dat")
         mask.tofile(out_dir / f"{type_name}_legal_mask.dat")
         meta.tofile(out_dir / f"{type_name}_meta.dat")
         # Free the Python references right after writing so the next
         # type's stack doesn't compete for RAM. The list still holds
         # references; clear it.
         per_type[type_name] = []
-        del feat, mask, meta, examples
+        del feat, feat_bits, feat_cont, mask, meta, examples
         dt = time.perf_counter() - t_write
         bytes_written = (
-            (FEATURIZER_OUTPUT_DIM * 4 + mask_dim + META_DTYPE.itemsize)
+            (
+                feat_bits_bytes
+                + len(cont_idx) * 4
+                + ((mask_dim + 7) // 8)
+                + META_DTYPE.itemsize
+            )
             * counts[type_name]
         )
         print(f"    wrote {bytes_written / 1e9:.2f} GB in {dt:.1f}s "
@@ -189,10 +219,13 @@ def main() -> int:
     # pins, (b) memmap each file with the right shape/dtype, (c) walk
     # `order.dat` to recover the original sequence.
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "featurizer_version": FEATURIZER_VERSION,
         "action_space_version": ACTION_SPACE_VERSION,
         "feature_dim": FEATURIZER_OUTPUT_DIM,
+        "legal_mask_packed": True,
+        "features_packed": True,
+        "continuous_feature_columns": cont_cols,
         "head_logit_dims": dict(HEAD_LOGIT_DIMS),
         "type_order": TYPE_ORDER,
         "meta_dtype": [(n, str(t)) for n, t in META_DTYPE.descr],
@@ -200,12 +233,18 @@ def main() -> int:
         "total": n,
         "files": {
             type_name: {
-                "features": f"{type_name}_features.dat",
+                "feat_bits": f"{type_name}_feat_bits.dat",
+                "feat_cont": f"{type_name}_feat_cont.dat",
                 "legal_mask": f"{type_name}_legal_mask.dat",
                 "meta": f"{type_name}_meta.dat",
-                "shape_features": [counts[type_name], FEATURIZER_OUTPUT_DIM],
+                "shape_feat_bits": [counts[type_name], feat_bits_bytes],
+                "shape_feat_cont": [counts[type_name], len(cont_idx)],
                 "shape_legal_mask": [counts[type_name],
                                      HEAD_LOGIT_DIMS[type_name]],
+                "shape_legal_mask_packed": [
+                    counts[type_name],
+                    (HEAD_LOGIT_DIMS[type_name] + 7) // 8,
+                ],
             }
             for type_name in TYPE_ORDER if counts[type_name] > 0
         },

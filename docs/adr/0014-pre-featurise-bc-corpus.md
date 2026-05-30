@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-29
-- **Related:** [ADR-0011](0011-bc-training-replay-on-the-fly.md), [ADR-0009](0009-bsw-ingest-streaming-pipeline.md), [ADR-0013](0013-parquet-schema-versioned-by-directory.md)
+- **Related:** [ADR-0011](0011-bc-training-replay-on-the-fly.md), [ADR-0009](0009-bsw-ingest-streaming-pipeline.md), [ADR-0013](0013-parquet-schema-versioned-by-directory.md), [ADR-0019](0019-bit-pack-materialised-bundle.md) (bit-packs the raw layout chosen here)
 
 ## Context
 
@@ -80,7 +80,10 @@ as raw uint8 (not bit-packed) for zero-copy memmap views. Sizing:
 
 A quantised layout (int8 features + bit-packed mask) reduces this ~4×
 to ~1 TB for the 100k subset — within a single consumer 4 TB NVMe — but
-quantisation is out of scope for this ADR.
+quantisation is out of scope for this ADR. (Done in
+[ADR-0019](0019-bit-pack-materialised-bundle.md), which bit-packs both
+the mask and the indicator feature columns for ~8.6× — better than the
+~4× projected here, because the indicator columns are 1-bit not int8.)
 
 ## Decision
 
@@ -232,6 +235,9 @@ Concrete shape, all already shipped on this branch:
   corpus throughput ever matters, a follow-up ADR would have to look
   at quantisation (int8 features, bit-packed mask: ~4× reduction) or
   partial materialisation (high-skill rounds only).
+  [ADR-0019](0019-bit-pack-materialised-bundle.md) since took the
+  bit-packing step (~8.6× on the per-type bundle); full-corpus scale and
+  partial materialisation are still open.
 
 ## Rejected alternatives revisited from ADR-0011
 
