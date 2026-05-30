@@ -47,7 +47,7 @@ import numpy as np
 
 from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bc.dataset import BCExample
-from tichu_training.bc.heads import HEAD_LOGIT_DIMS
+from tichu_training.bc.decision_types import HEAD_LOGIT_DIMS
 from tichu_training.checkpoint import VersionMismatchError
 from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
 
