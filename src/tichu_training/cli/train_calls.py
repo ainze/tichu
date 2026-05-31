@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 import yaml
 
+from tichu_training.bc.call_materialised import MemmapCallDataset
 from tichu_training.bc.call_model import GrandTichuCallNetwork, TichuCallNetwork
 from tichu_training.bc.call_training import (
     ParquetCallDataset,
@@ -20,6 +21,7 @@ from tichu_training.bc.call_training import (
     write_calling_rate_csv,
 )
 from tichu_training.bc.training import save_checkpoint
+from tichu_training.cli._dataset_build import build_memmap_dataset
 
 
 log = logging.getLogger("train_calls")
@@ -148,9 +150,14 @@ def _append_val_row(path: Path, epoch: int, metrics: dict) -> None:
 
 
 def _build_dataset(config, call_type: str):
-    """Construct the per-tag dataset. Synthetic returns a list; parquet
-    returns a re-iterable `ParquetCallDataset` (or a materialised list
-    if `materialize: true` is set on the parquet path)."""
+    """Construct the per-tag dataset. Synthetic returns a list; parquet and
+    memmap return a re-iterable dataset (or a materialised list if
+    `materialize: true` is set).
+
+    The memmap path reads the packed calls bundle (ADR-0020) instead of
+    re-replaying the archive. The bundle's type keys carry a `call_` prefix
+    (`CALL_TYPE_ORDER`) while `call_type` here is the bare Decision name, so we
+    map `<call_type>` → `call_<call_type>`."""
     name = config["dataset"]
     kwargs = dict(config.get("dataset_kwargs", {}))
     if name == "synthetic":
@@ -159,6 +166,10 @@ def _build_dataset(config, call_type: str):
         materialize = bool(kwargs.pop("materialize", False))
         ds = ParquetCallDataset(call_type=call_type, **kwargs)
         return list(ds) if materialize else ds
+    if name == "memmap":
+        return build_memmap_dataset(
+            MemmapCallDataset, kwargs, call_type=f"call_{call_type}",
+        )
     raise ValueError(f"unknown dataset: {name!r}")
 
 

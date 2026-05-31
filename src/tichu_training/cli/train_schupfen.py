@@ -16,6 +16,7 @@ from pathlib import Path
 import torch
 import yaml
 
+from tichu_training.bc.schupfen_materialised import MemmapSchupfenDataset
 from tichu_training.bc.schupfen_model import SchupfenNetwork
 from tichu_training.bc.schupfen_training import (
     ParquetSchupfenDataset,
@@ -23,6 +24,7 @@ from tichu_training.bc.schupfen_training import (
     train_one_schupfen_epoch,
 )
 from tichu_training.bc.training import save_checkpoint
+from tichu_training.cli._dataset_build import build_memmap_dataset
 
 
 log = logging.getLogger("train_schupfen")
@@ -93,6 +95,10 @@ def _build_dataset(config):
         materialize = bool(kwargs.pop("materialize", False))
         ds = ParquetSchupfenDataset(**kwargs)
         return list(ds) if materialize else ds
+    if name == "memmap":
+        # Read the packed schupfen bundle (ADR-0020) instead of re-parsing the
+        # archive to rebuild synthetic pre-schupfen states.
+        return build_memmap_dataset(MemmapSchupfenDataset, kwargs)
     raise ValueError(f"unknown dataset: {name!r}")
 
 
