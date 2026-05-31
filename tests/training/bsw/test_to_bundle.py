@@ -115,7 +115,8 @@ def test_consolidated_bundle_is_byte_identical_to_legacy_path(tmp_path):
 
     # --- Byte-identical per-type .dat + order.dat -------------------------
     dat_names = (
-        [f"{t}_features.dat" for t in TYPE_ORDER]
+        [f"{t}_feat_bits.dat" for t in TYPE_ORDER]
+        + [f"{t}_feat_cont.dat" for t in TYPE_ORDER]
         + [f"{t}_legal_mask.dat" for t in TYPE_ORDER]
         + [f"{t}_meta.dat" for t in TYPE_ORDER]
         + ["order.dat"]

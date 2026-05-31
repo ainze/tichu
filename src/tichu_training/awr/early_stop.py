@@ -5,9 +5,13 @@ otherwise iterates the dataset to exhaustion. On the corpus that's
 ~9h for one Phase 2 pass even after the running-mean MSE has visibly
 plateaued — wasting wall-clock and yielding no further fit.
 
-This helper signals "stop" once `running_mse` has failed to improve
-by at least `min_delta` across `patience` consecutive chunks. Pure
-Python, no torch dependency, fully unit-testable.
+This helper signals "stop" once the per-chunk training MSE has
+failed to improve by at least `min_delta` across `patience`
+consecutive chunks. Per-chunk MSE is the instantaneous training
+signal; a cumulative running mean is the wrong input here — it
+strictly decreases for a converging model and only plateaus via
+per-chunk noise. Pure Python, no torch dependency, fully
+unit-testable.
 
 Disabled by setting `patience <= 0` (the default in
 `fit_value_baseline_streaming`). Opt-in only — existing runs are
@@ -16,11 +20,11 @@ byte-for-byte unaffected.
 
 
 class EarlyStop:
-    """Track per-chunk `running_mse` and signal when to stop.
+    """Track per-chunk MSE and signal when to stop.
 
     Stops when `patience` consecutive chunks fail to improve on the
-    best `running_mse` seen so far by at least `min_delta`. The
-    counter resets whenever a chunk does improve.
+    best MSE seen so far by at least `min_delta`. The counter resets
+    whenever a chunk does improve.
 
     `patience <= 0` disables the stopper — `update` is a no-op and
     `should_stop` always returns False.

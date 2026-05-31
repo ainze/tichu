@@ -1,0 +1,14 @@
+dataset: synthetic
+dataset_kwargs:
+  seed: 0
+  n_examples: 128
+  feature_dim: 32
+
+model:
+  hidden: 32
+  skill_dim: 4
+
+learning_rate: 5.0e-3
+batch_size: 16
+epochs: 6
+seed: 0

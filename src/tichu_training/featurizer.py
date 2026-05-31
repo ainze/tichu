@@ -110,7 +110,8 @@ def mask_self_tichu_call(features: np.ndarray, seat: int) -> None:
 # source of truth for the binary/continuous split; the materialised writer
 # records the resulting column list into the bundle manifest, and the reader
 # reconstructs the dense (D,) vector from it. Changing the featurizer layout
-# bumps FEATURIZER_VERSION, which the bundle pin already enforces.
+# bumps FEATURIZER_VERSION, which the bundle pin already enforces. See
+# [ADR-0019](../../docs/adr/0019-bit-pack-materialised-bundle.md).
 CONTINUOUS_SECTIONS: frozenset[str] = frozenset(
     {"hand_sizes", "team_scores", "round_points"}
 )
@@ -148,33 +149,11 @@ _KIND_FOUR_BOMB = 6
 _KIND_SF_BOMB = 7
 
 
-# ---------------------------------------------------------------------------
-# Card slot mapping (stable across processes).
-# ---------------------------------------------------------------------------
-
-
-_SUIT_ORDER = (Suit.JADE, Suit.SWORD, Suit.PAGODA, Suit.STAR)
-_NATURAL_SLOT_BY_CARD: dict[Card, int] = {}
-for _suit_idx, _suit in enumerate(_SUIT_ORDER):
-    for _rank in range(2, 15):
-        _slot = _suit_idx * 13 + (_rank - 2)
-        _NATURAL_SLOT_BY_CARD[Card(_suit, _rank)] = _slot
-
-# Special-card slots come after the 52 naturals, in a deterministic order.
-_SPECIAL_SLOT: dict[SpecialCard, int] = {
-    MAHJONG: 52,
-    DOG: 53,
-    PHOENIX: 54,
-    DRAGON: 55,
-}
-
-
-def _card_slot(card: object) -> int:
-    if isinstance(card, Card):
-        return _NATURAL_SLOT_BY_CARD[card]
-    if isinstance(card, SpecialCard):
-        return _SPECIAL_SLOT[card]
-    raise TypeError(f"unsupported card type: {type(card).__name__}")
+# Card slot mapping lives in `tichu_training.card_slots` (torch-free, public)
+# so the Schupfen Network's encoder and decoder both pull from one source.
+# Re-export the forward direction under the historic private name so call
+# sites inside this module keep their existing form.
+from tichu_training.card_slots import card_slot as _card_slot  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
