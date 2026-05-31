@@ -76,7 +76,7 @@ def test_bundle_out_dir_writes_readable_bundle(tmp_path):
     open and iterate."""
     parquet_dir = tmp_path / "parquet"
     bundle_dir = tmp_path / "bundle"
-    stream_to_parquet(_sample_games(), parquet_dir, bundle_out_dir=bundle_dir)
+    stream_to_parquet(_sample_games(), parquet_dir, bundle_dirs={"bc": bundle_dir})
 
     ds = MemmapBCDataset(bundle_dir)
     examples = list(ds)
@@ -110,7 +110,7 @@ def test_consolidated_bundle_is_byte_identical_to_legacy_path(tmp_path):
     consolidated_bundle = tmp_path / "consolidated_bundle"
     stream_to_parquet(
         _sample_games(), consolidated_parquet,
-        bundle_out_dir=consolidated_bundle,
+        bundle_dirs={"bc": consolidated_bundle},
     )
 
     # --- Byte-identical per-type .dat + order.dat -------------------------
@@ -143,7 +143,7 @@ def test_replay_failed_rounds_contribute_no_bundle_rows(tmp_path):
 
     # Positive control: the untouched game yields rows.
     good_stats = stream_to_parquet(
-        [game], tmp_path / "good_pq", bundle_out_dir=tmp_path / "good_bundle",
+        [game], tmp_path / "good_pq", bundle_dirs={"bc": tmp_path / "good_bundle"},
     )
     good_total = MemmapBCDataset(tmp_path / "good_bundle").total
     assert good_total > 0
@@ -158,7 +158,7 @@ def test_replay_failed_rounds_contribute_no_bundle_rows(tmp_path):
     )
     bad_bundle = tmp_path / "bad_bundle"
     bad_stats = stream_to_parquet(
-        [broken], tmp_path / "bad_pq", bundle_out_dir=bad_bundle,
+        [broken], tmp_path / "bad_pq", bundle_dirs={"bc": bad_bundle},
     )
     assert bad_stats.rounds_matched == 0, "expected every round to fail validation"
     # Assert on the writer's recorded total rather than opening the bundle:
@@ -196,23 +196,23 @@ def test_bundle_is_written_by_streaming_not_full_buffering(tmp_path, monkeypatch
             state["games_pulled"] += 1
             yield g
 
+    # The consolidated driver feeds each `_GameResult`'s examples to the
+    # bundle writer's `add_many` as results arrive. Spy on it to record how
+    # many games had been pulled from the source when the first non-empty
+    # batch reached the writer.
     import tichu_training.bc.materialised as mat
-    real_materialise = mat.materialise
+    real_add_many = mat.BCBundleWriter.add_many
 
-    def spying_materialise(stream, out_dir, **kwargs):
-        def watched():
-            first = True
-            for ex in stream:
-                if first:
-                    state["games_pulled_at_first_example"] = state["games_pulled"]
-                    first = False
-                yield ex
-        return real_materialise(watched(), out_dir, **kwargs)
+    def spying_add_many(self, stream, **kwargs):
+        examples = list(stream)
+        if examples and state["games_pulled_at_first_example"] is None:
+            state["games_pulled_at_first_example"] = state["games_pulled"]
+        return real_add_many(self, examples, **kwargs)
 
-    monkeypatch.setattr(mat, "materialise", spying_materialise)
+    monkeypatch.setattr(mat.BCBundleWriter, "add_many", spying_add_many)
 
     stream_to_parquet(
-        counting_source(), tmp_path / "pq", bundle_out_dir=tmp_path / "bundle",
+        counting_source(), tmp_path / "pq", bundle_dirs={"bc": tmp_path / "bundle"},
     )
 
     assert state["games_pulled_at_first_example"] is not None, (

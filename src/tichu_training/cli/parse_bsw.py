@@ -37,16 +37,47 @@ _RATE_WINDOW = 100
 log = logging.getLogger("parse_bsw")
 
 
+# Tasks the consolidated pass can materialise (ADR-0020). Belief is valid as
+# an explicit task (ADR-0021) but is GATED OUT of `all`: it is play-scale and
+# Phase-2-only, so it is materialised only when named explicitly.
+_IMPLEMENTED_BUNDLE_TASKS: tuple[str, ...] = ("bc", "calls", "schupfen", "belief")
+_DEFAULT_ALL_TASKS: tuple[str, ...] = ("bc", "calls", "schupfen")
+
+
+def _resolve_bundle_dirs(root: str | None, tasks_arg: str) -> dict[str, Path] | None:
+    """Map `--bundle-out-dir ROOT` + `--bundle-tasks` to a {task: ROOT/task}
+    dict, or None if no root was given. `all` expands to every task except the
+    gated belief. Raises ValueError on unknown tasks."""
+    if not root:
+        return None
+    if tasks_arg.strip() == "all":
+        tasks = list(_DEFAULT_ALL_TASKS)
+    else:
+        tasks = [t.strip() for t in tasks_arg.split(",") if t.strip()]
+    unknown = [t for t in tasks if t not in _IMPLEMENTED_BUNDLE_TASKS]
+    if unknown:
+        raise ValueError(
+            f"unknown --bundle-tasks {unknown}; valid: "
+            f"{list(_IMPLEMENTED_BUNDLE_TASKS)}"
+        )
+    root_path = Path(root)
+    return {t: root_path / t for t in tasks}
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Parse raw BSW log files into training Parquet shards.")
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", metavar="DIR", help="Directory containing BSW .tch log files")
     source.add_argument("--archive", metavar="FILE", help="Zstd archive (.zst) of .tch files; index sidecar must sit alongside")
     p.add_argument("--output", required=True, metavar="DIR", help="Output directory for Parquet shards")
-    p.add_argument("--bundle-out-dir", default=None, metavar="DIR",
-                   help="If set, also write a MemmapBCDataset-readable materialised bundle here, "
-                        "from the same replay pass (consolidates parse_bsw + materialise_bc into one "
-                        "engine replay). Omit for manifest-only runs.")
+    p.add_argument("--bundle-out-dir", default=None, metavar="ROOT",
+                   help="If set, also materialise task bundles from the same replay pass into "
+                        "ROOT/<task>/ subdirectories (one parse pass, many outputs — ADR-0020). "
+                        "Select tasks with --bundle-tasks. Omit for manifest-only runs.")
+    p.add_argument("--bundle-tasks", default="all", metavar="LIST",
+                   help="Comma-separated tasks to materialise when --bundle-out-dir is set: any of "
+                        f"{','.join(_IMPLEMENTED_BUNDLE_TASKS)}, or 'all' (= all implemented; belief "
+                        "is gated and must be named explicitly once available). Default 'all'.")
     p.add_argument("--subset", type=int, default=None, metavar="N", help="Limit to first N games (sorted by game_id)")
     p.add_argument("--game-id", action="append", default=None, metavar="ID", dest="game_ids",
                    help="Process only this game_id (repeatable). Also dumps the raw .tch text to "
@@ -71,6 +102,12 @@ def main(argv: list[str] | None = None) -> int:
 
     output_dir = Path(args.output)
     targeted_ids: set[str] | None = set(args.game_ids) if args.game_ids else None
+
+    try:
+        bundle_dirs = _resolve_bundle_dirs(args.bundle_out_dir, args.bundle_tasks)
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 2
 
     if args.input is not None:
         input_dir = Path(args.input)
@@ -141,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             recency_cutoff_game_id=args.recency_cutoff_game_id,
             recency_weight=args.recency_weight,
             workers=effective_workers,
-            bundle_out_dir=Path(args.bundle_out_dir) if args.bundle_out_dir else None,
+            bundle_dirs=bundle_dirs,
             on_game_done=_on_game_done,
         )
     finally:

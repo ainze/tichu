@@ -62,6 +62,12 @@ class CallExample:
     target: int  # 0 = no-call, 1 = call
     skill_decile: int
     sample_weight: float = 1.0
+    # Provenance (ADR-0020): the source (game_id, round_id). Populated by the
+    # consolidated parse pass; 0 for synthetic / standalone examples. Carried
+    # in the bundle meta so the in-flight train/val-split (by game_id) can use
+    # the materialised path.
+    game_id: int = 0
+    round_id: int = 0
 
 
 class SyntheticCallDataset(Iterable[CallExample]):
@@ -75,6 +81,7 @@ class SyntheticCallDataset(Iterable[CallExample]):
         positive_rate: float = 0.3,
         feature_dim: int | None = None,
         skill_buckets: int = 10,
+        binary_features: bool = False,
     ) -> None:
         if feature_dim is None:
             from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
@@ -84,12 +91,30 @@ class SyntheticCallDataset(Iterable[CallExample]):
         self.positive_rate = positive_rate
         self.feature_dim = feature_dim
         self.skill_buckets = skill_buckets
+        # 0/1 indicator columns + float continuous columns — the value
+        # contract the materialised bundle's bit-packer requires. Mirrors
+        # `SyntheticBCDataset`. Default False keeps the all-Gaussian features.
+        self.binary_features = binary_features
 
     def __iter__(self) -> Iterator[CallExample]:
         rng = np.random.default_rng(self.seed)
+        cont_idx = None
+        if self.binary_features:
+            from tichu_training.featurizer import CONTINUOUS_FEATURE_COLUMNS
+            cont_idx = np.asarray(
+                [c for c in CONTINUOUS_FEATURE_COLUMNS if c < self.feature_dim],
+                dtype=np.intp,
+            )
         for _ in range(self.n_examples):
             target = int(rng.random() < self.positive_rate)
-            features = rng.standard_normal(self.feature_dim).astype(np.float32)
+            if self.binary_features:
+                features = (rng.random(self.feature_dim) < 0.5).astype(np.float32)
+                if cont_idx.size:
+                    features[cont_idx] = rng.standard_normal(
+                        cont_idx.size
+                    ).astype(np.float32)
+            else:
+                features = rng.standard_normal(self.feature_dim).astype(np.float32)
             # 10% cold-start; otherwise rated.
             if rng.random() < 0.1:
                 skill = self.skill_buckets
@@ -124,9 +149,11 @@ def _call_examples_for_game(
     paths call this, which guarantees `workers=1` and `workers=N` yield
     identical examples (only the per-game order may differ in parallel).
     """
-    from tichu_engine.state import GameState, PublicState, Trick
+    from tichu_training.bc.call_emit import (
+        grand_tichu_examples_for_round,
+        tichu_examples_for_round,
+    )
     from tichu_training.bsw.parser import parse_tch
-    from tichu_training.featurizer import featurize
 
     out: list[CallExample] = []
     try:
@@ -143,67 +170,30 @@ def _call_examples_for_game(
             continue
 
         if call_type == "grand_tichu":
-            # Synthetic deal-time state from the 8-card pre-deal hands.
-            # current_player=0 is arbitrary — no engine step runs against this
-            # state; the featurizer reads PrivateState fields directly.
-            public = PublicState(
-                current_player=0,
-                hand_sizes=(8, 8, 8, 8),
-                scores=(0, 0),
-                trick=Trick.empty(),
-                pending_decision=None,
-            )
-            state = GameState(hands=parsed_round.pre_deal_hands, public=public)
-            callers = parsed_round.grand_tichu_callers
-            for seat in range(4):
-                private = state.private_view(seat)
-                features = featurize(private)
-                handle = parsed_round.handles[seat]
-                skill = skill_lookup.get(handle, neutral_decile)
-                out.append(CallExample(
-                    features=features,
-                    target=int(seat in callers),
-                    skill_decile=skill,
-                    sample_weight=sample_weight,
-                ))
+            out.extend(grand_tichu_examples_for_round(
+                parsed_round,
+                skill_lookup=skill_lookup,
+                neutral_decile=neutral_decile,
+                sample_weight=sample_weight,
+            ))
             continue
 
-        # Tichu: featurise at each seat's first non-Pass Play state (per
-        # Q2/Q5 — C-wide, symmetric). Early-stop once all four seats have made
-        # a first non-Pass Play — the rest of the round is unused, and the
-        # per-step legal-action enumeration is the dominant replay cost.
+        # Tichu: featurise at each seat's first non-Pass Play state (ADR-0018).
+        # Early-stop once all four seats have made a first non-Pass Play — the
+        # rest of the round is unused, and the per-step legal-action
+        # enumeration is the dominant replay cost. The consolidated parse pass
+        # instead reuses its full replay (see call_emit.tichu_examples_for_round).
         replay = replay_round(
             parsed_round, early_stop=_all_seats_have_first_play,
         )
         if replay.final_state is None:
             continue  # round failed replay; manifest disagrees, skip
-        callers = parsed_round.tichu_callers
-        first_play_state_for_seat: dict[int, object] = {}
-        for (parsed_action, _concrete), pre_state in zip(
-            replay.decisions, replay.pre_decision_states,
-        ):
-            if pre_state is None:
-                continue  # phantom pass / call-passthrough
-            if parsed_action.kind != "play":
-                continue  # excludes pass (the C-wide rule), schupfen, wish, …
-            seat = parsed_action.player
-            if seat in first_play_state_for_seat:
-                continue
-            first_play_state_for_seat[seat] = pre_state
-        for seat in range(4):
-            pre_state = first_play_state_for_seat.get(seat)
-            if pre_state is None:
-                continue  # seat never made a non-Pass Play this round (rare)
-            private = pre_state.private_view(seat)  # type: ignore[attr-defined]
-            features = featurize(private)
-            handle = parsed_round.handles[seat]
-            skill = skill_lookup.get(handle, neutral_decile)
-            out.append(CallExample(
-                features=features,
-                target=int(seat in callers),
-                skill_decile=skill,
-                sample_weight=sample_weight,
-            ))
+        out.extend(tichu_examples_for_round(
+            parsed_round, replay,
+            skill_lookup=skill_lookup,
+            neutral_decile=neutral_decile,
+            sample_weight=sample_weight,
+        ))
     return out
 
 

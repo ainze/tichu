@@ -26,18 +26,49 @@ class BeliefExample:
     features: np.ndarray   # (feature_dim,) float32
     labels: np.ndarray     # (3, 56) float32 — 1 where opp_i holds card_j
     mask: np.ndarray       # (3, 56) bool   — True where the answer is unknown
+    # Provenance + within-round progress (ADR-0021). `cards_played` =
+    # 56 - sum(hand_sizes); a read-time filter on it implements the
+    # "drop the low-information opening" cut without re-materialising.
+    cards_played: int = 0
+    game_id: int = 0
+    round_id: int = 0
 
 
 class SyntheticBeliefDataset:
-    def __init__(self, *, seed: int, n_examples: int, feature_dim: int) -> None:
+    def __init__(
+        self,
+        *,
+        seed: int,
+        n_examples: int,
+        feature_dim: int,
+        binary_features: bool = False,
+    ) -> None:
         self.seed = seed
         self.n_examples = n_examples
         self.feature_dim = feature_dim
+        # 0/1 indicator columns + float continuous columns — the value
+        # contract the materialised bundle's bit-packer requires. Default
+        # False keeps the historical all-Gaussian features.
+        self.binary_features = binary_features
 
     def __iter__(self):
         rng = np.random.default_rng(self.seed)
+        cont_idx = None
+        if self.binary_features:
+            from tichu_training.featurizer import CONTINUOUS_FEATURE_COLUMNS
+            cont_idx = np.asarray(
+                [c for c in CONTINUOUS_FEATURE_COLUMNS if c < self.feature_dim],
+                dtype=np.intp,
+            )
         for _ in range(self.n_examples):
-            features = rng.standard_normal(self.feature_dim).astype(np.float32)
+            if self.binary_features:
+                features = (rng.random(self.feature_dim) < 0.5).astype(np.float32)
+                if cont_idx.size:
+                    features[cont_idx] = rng.standard_normal(
+                        cont_idx.size
+                    ).astype(np.float32)
+            else:
+                features = rng.standard_normal(self.feature_dim).astype(np.float32)
             card_ids = np.arange(_NUM_CARDS)
             rng.shuffle(card_ids)
             own_hand = set(card_ids[:14].tolist())
