@@ -1,0 +1,27 @@
+# Production Call-Network config — 100k, featurizer v5 (ADR-0022).
+#
+# NOTE: train_calls still consumes the parquet manifest via ParquetCallDataset
+# (it re-replays/re-featurises from the play shard + archive). The packed
+# calls bundle that parse_bsw now also writes (materialised_100k_v5/calls) is
+# NOT yet read by train_calls — wiring a `dataset: memmap` path into
+# train_calls is the next follow-up. Until then this re-derives examples,
+# which is why `workers` parallelism matters.
+dataset: parquet
+dataset_kwargs:
+  shards_dir: C:/workbench/tichu/data/parquet_100k_feat_v5
+  archive_path: C:/workbench/tichu/data/archive.zst
+  ratings_path: C:/workbench/tichu/data/ratings_100k.parquet
+  expected_featurizer_version: v5
+  expected_action_space_version: v1
+  workers: 10
+  materialize: true
+
+model:
+  hidden: 256
+  skill_dim: 64
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 4
+checkpoint_every: 5000
+seed: 0

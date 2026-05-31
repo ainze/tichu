@@ -1,0 +1,26 @@
+# BC training on the 100k packed bundle, featurizer v5 (content == v4, ADR-0022).
+# The BC bundle now lives in the per-task subdir materialised_100k_v5/bc
+# (one parse pass, many task bundles — ADR-0020). Arch matches the v4 run so
+# quality/wall-clock compare cleanly.
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_100k_v5\bc
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 100000          # won't fire — epochs=1
+checkpoint_every_batches: 5000    # mid-epoch saves so AWR / resume have targets
+seed: 0

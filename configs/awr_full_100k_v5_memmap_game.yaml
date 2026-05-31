@@ -1,0 +1,40 @@
+# AWR refine of the v5 bc_full checkpoint, fitting V on game_won (the actual
+# objective; team-relative Complete-Game win). Sibling of the _round config —
+# only the value_target + early-stop patience differ. Arch MUST match
+# bc_full_100k_v5_memmap. Reads the packed BC bundle.
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_100k_v5\bc
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 1.0e-4
+batch_size: 256
+epochs: 4
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+checkpoint_every: 1
+seed: 0
+
+awr:
+  streaming: true
+  standardize_advantages: true
+  beta: 1.0
+  max_weight: 20.0
+  value_target: game
+  baseline_hidden: 128
+  baseline_lr: 1.0e-3
+  baseline_sgd_steps_per_chunk: 3
+  chunk_size: 16384
+  baseline_early_stop_patience: 20
+  held_out_fraction: 0.05
+  max_held_out: 20000
+  eval_every_chunks: 5
