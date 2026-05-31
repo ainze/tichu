@@ -71,6 +71,65 @@ SECTION_DIMS: dict[str, int] = {
 }
 FEATURIZER_OUTPUT_DIM: int = sum(SECTION_DIMS.values())
 
+
+def _compute_section_offsets() -> dict[str, int]:
+    offsets: dict[str, int] = {}
+    cursor = 0
+    for name, dim in SECTION_DIMS.items():
+        offsets[name] = cursor
+        cursor += dim
+    return offsets
+
+
+# Section-name → starting index in the output array. Lets callers reach
+# into a specific section (e.g. for task-specific masking) without
+# duplicating the layout.
+SECTION_OFFSETS: dict[str, int] = _compute_section_offsets()
+
+
+def mask_self_tichu_call(features: np.ndarray, seat: int) -> None:
+    """Zero `seat`'s own bit in the `tichu_callers` section, in-place.
+
+    Required when the features feed a *Tichu-call classifier*: the seat
+    decides whether to call before its first card play, but engine state
+    at the seat's first non-Pass Play (the call-classifier featurise
+    moment, per ADR-0018) already reflects that decision in
+    `pub.tichu_callers`. Without masking, slot `tichu_callers[seat]`
+    *is* the label → trivial 100% accuracy. The other three seats' bits
+    stay set: they are legitimate public context (opponents' calls).
+    """
+    if not 0 <= seat < 4:
+        raise ValueError(f"seat must be in 0..3, got {seat}")
+    features[SECTION_OFFSETS["tichu_callers"] + seat] = 0.0
+
+
+# Sections whose `featurize()` output is a continuous ratio (negatives
+# possible) rather than a 0/1 indicator. Every *other* section is written
+# as exactly 1.0 (one-hot / multi-hot), so the materialised bundle bit-packs
+# all indicator columns and stores only these as float. This is the single
+# source of truth for the binary/continuous split; the materialised writer
+# records the resulting column list into the bundle manifest, and the reader
+# reconstructs the dense (D,) vector from it. Changing the featurizer layout
+# bumps FEATURIZER_VERSION, which the bundle pin already enforces.
+CONTINUOUS_SECTIONS: frozenset[str] = frozenset(
+    {"hand_sizes", "team_scores", "round_points"}
+)
+
+
+def _continuous_feature_columns() -> tuple[int, ...]:
+    cols: list[int] = []
+    cursor = 0
+    for name, dim in SECTION_DIMS.items():
+        if name in CONTINUOUS_SECTIONS:
+            cols.extend(range(cursor, cursor + dim))
+        cursor += dim
+    return tuple(cols)
+
+
+# Ascending column indices of the continuous (non-bit-packable) features.
+# For v4 this is (56..65): hand_sizes[4] + team_scores[2] + round_points[4].
+CONTINUOUS_FEATURE_COLUMNS: tuple[int, ...] = _continuous_feature_columns()
+
 # Internal offsets inside the 50-dim trick_top_combo section.
 _OFF_INTENT_KIND = 0
 _OFF_PRIMARY_RANK = _OFF_INTENT_KIND + TRICK_TOP_COMBO_SUBFIELDS["intent_kind"]
