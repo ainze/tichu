@@ -51,8 +51,10 @@ def _simple_private_state(player: int = 0) -> PrivateState:
     return PrivateState(player=player, hand=hand, public=public)
 
 
-def test_version_is_pinned_to_v4():
-    assert FEATURIZER_VERSION == "v4"
+def test_version_is_pinned_to_v5():
+    # v5 == v4 feature content; the stamp bump is a version realignment for the
+    # packed-bundle generation, not a featurizer change (ADR-0022).
+    assert FEATURIZER_VERSION == "v5"
 
 
 def test_dropped_v2_sections_are_absent():
