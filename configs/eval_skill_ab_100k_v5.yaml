@@ -1,0 +1,29 @@
+# Skill-conditioning A/B (ADR-0005 revisit): does conditioning the BC policy on
+# the top skill decile (9 = strongest BSW players) out-play the neutral decile
+# (10 = cold-start) the service currently feeds?
+#
+# Both ml_* agents load the SAME exported policy (bc_full_100k_v5/policy.pt) and
+# differ ONLY in the skill_decile fed to the Skill Embedding. rule is the anchor.
+# The row that answers the question: ml_decile9 vs ml_neutral.
+
+starting_position_pool: C:\workbench\tichu\data\starting_position_pool_s0_n500.parquet
+n_deals: 500
+bootstrap_iters: 1000
+seed: 0
+
+agents:
+  - name: ml_neutral
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_100k_v5\policy.pt
+      skill_decile: 10
+  - name: ml_decile9
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_100k_v5\policy.pt
+      skill_decile: 9
+  - name: rule
+    factory: rule
+    kwargs: {}
+
+output: C:\workbench\tichu\data\runs\eval_skill_ab_100k_v5\matrix.parquet

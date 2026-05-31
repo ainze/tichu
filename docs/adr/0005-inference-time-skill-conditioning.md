@@ -1,8 +1,8 @@
 # ADR-0005: Inference-time skill conditioning uses the Neutral Decile
 
-- **Status:** Accepted
+- **Status:** Accepted — **partially superseded by [ADR-0024](0024-master-tier-conditions-on-top-skill-decile.md)** for the `master` tier (a measured +10.6 pts/round favoured Decile 9). Still in force for `easy`/`medium`/`hard`.
 - **Date:** 2026-05-25
-- **Related:** [ADR-0001](0001-trunk-architecture.md)
+- **Related:** [ADR-0001](0001-trunk-architecture.md), [ADR-0024](0024-master-tier-conditions-on-top-skill-decile.md)
 
 ## Context
 

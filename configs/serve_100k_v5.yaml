@@ -38,6 +38,11 @@ agents:
   master:
     factory: ml
     checkpoint: C:\workbench\tichu\data\export\awr_full_100k_v5_round\policy.pt
+    # Condition on the top skill decile (9 = strongest BSW players) rather than
+    # the neutral row. Measured +10.6 pts/round vs neutral (CI [+3.95, +17.95],
+    # n=1000) on the same checkpoint. Supersedes ADR-0005 for the master tier
+    # (ADR-0024). The other tiers keep neutral.
+    skill_decile: 9
     <<: *shared_nets
 
 port: 8000

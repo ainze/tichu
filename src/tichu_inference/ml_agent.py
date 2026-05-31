@@ -68,11 +68,21 @@ class MLAgent(Agent):
         self,
         checkpoint_path: str | Path,
         *,
+        skill_decile: int = _NEUTRAL_SKILL,
         schupfen_path: str | Path | None = None,
         tichu_call_path: str | Path | None = None,
         grand_call_path: str | Path | None = None,
         fallback_rng: random.Random | None = None,
     ) -> None:
+        # Skill Embedding input fed to every network at inference. 0..9 are the
+        # BSW skill deciles (9 = strongest players); 10 is the neutral/cold-start
+        # row. Default is neutral per ADR-0005; pass `skill_decile=9` to condition
+        # on top-tier play.
+        if not 0 <= int(skill_decile) <= _NEUTRAL_SKILL:
+            raise ValueError(
+                f"skill_decile must be in [0, {_NEUTRAL_SKILL}], got {skill_decile}"
+            )
+        self._skill_decile = int(skill_decile)
         self._module = load_exported(
             checkpoint_path,
             expected_featurizer_version=FEATURIZER_VERSION,
@@ -224,7 +234,7 @@ class MLAgent(Agent):
     # ------------------------------------------------------------
 
     def _act_schupfen(self, private_state: PrivateState) -> ConcreteAction:
-        features, skill = _inputs(private_state)
+        features, skill = self._inputs(private_state)
         h_next, h_partner, h_prev = self._schupfen(features, skill)
         rows = [
             h_next[0].detach().cpu().numpy(),
@@ -257,12 +267,17 @@ class MLAgent(Agent):
     # Shared forward helpers.
     # ------------------------------------------------------------
 
+    def _inputs(self, private_state: PrivateState) -> tuple[torch.Tensor, torch.Tensor]:
+        features = torch.from_numpy(featurize(private_state)).unsqueeze(0)
+        skill = torch.tensor([self._skill_decile], dtype=torch.long)
+        return features, skill
+
     def _policy_forward(self, private_state: PrivateState) -> dict:
-        features, skill = _inputs(private_state)
+        features, skill = self._inputs(private_state)
         return self._module(features, skill)
 
     def _run(self, module, private_state: PrivateState) -> np.ndarray:
-        features, skill = _inputs(private_state)
+        features, skill = self._inputs(private_state)
         out = module(features, skill)
         return out[0].detach().cpu().numpy()
 
@@ -271,12 +286,6 @@ class MLAgent(Agent):
         if not legal:
             raise RuntimeError("no legal actions for fallback")
         return self._rng.choice(legal)
-
-
-def _inputs(private_state: PrivateState) -> tuple[torch.Tensor, torch.Tensor]:
-    features = torch.from_numpy(featurize(private_state)).unsqueeze(0)
-    skill = torch.tensor([_NEUTRAL_SKILL], dtype=torch.long)
-    return features, skill
 
 
 def _best_slot(logits_row: np.ndarray, allowed_slots: list[int], used: set[int]) -> int | None:
