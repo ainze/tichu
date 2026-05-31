@@ -16,6 +16,7 @@ from pathlib import Path
 import torch
 import yaml
 
+from tichu_training.belief.belief_materialised import MemmapBeliefDataset
 from tichu_training.belief.dataset import SyntheticBeliefDataset
 from tichu_training.belief.model import BeliefModel, belief_accuracy, belief_loss
 from tichu_training.belief.training import (
@@ -23,6 +24,7 @@ from tichu_training.belief.training import (
     write_calibration_csv,
 )
 from tichu_training.checkpoint import Checkpoint
+from tichu_training.cli._dataset_build import build_memmap_dataset
 from tichu_training.featurizer import FEATURIZER_VERSION
 
 
@@ -92,6 +94,13 @@ def _build_dataset(config):
     kwargs = dict(config.get("dataset_kwargs", {}))
     if name == "synthetic":
         return list(SyntheticBeliefDataset(**kwargs))
+    if name == "memmap":
+        # Read the packed belief bundle (ADR-0021) — the first real-data path
+        # for belief. force_materialize: the training loop stacks the whole
+        # example list per epoch (no iter_batches fast path here).
+        return build_memmap_dataset(
+            MemmapBeliefDataset, kwargs, force_materialize=True,
+        )
     raise ValueError(f"unknown dataset: {name!r}")
 
 

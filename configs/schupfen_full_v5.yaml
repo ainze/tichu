@@ -1,18 +1,12 @@
 # Production Schupfen-Network config — 100k, featurizer v5 (ADR-0022).
 #
-# NOTE: like calls_full_v5, train_schupfen still consumes the parquet manifest
-# (ParquetSchupfenDataset re-parses the archive + builds the synthetic
-# pre-schupfen state). The packed schupfen bundle parse_bsw now writes
-# (materialised_100k_v5/schupfen) is NOT yet read by train_schupfen — memmap
-# consumption is a follow-up.
-dataset: parquet
+# Reads the packed schupfen bundle from the consolidated parse pass
+# (materialised_100k_v5/schupfen, ADR-0020) — no archive re-parse to rebuild
+# the synthetic pre-schupfen state. `workers` is gone (sequential read);
+# `materialize: true` loads the slice into a list once for multi-epoch training.
+dataset: memmap
 dataset_kwargs:
-  shards_dir: C:/workbench/tichu/data/parquet_100k_feat_v5
-  archive_path: C:/workbench/tichu/data/archive.zst
-  ratings_path: C:/workbench/tichu/data/ratings_100k.parquet
-  expected_featurizer_version: v5
-  expected_action_space_version: v1
-  workers: 10
+  data_dir: C:\workbench\tichu\data\materialised_100k_v5\schupfen
   materialize: true
 
 model:

@@ -131,9 +131,9 @@ py -3.14 -m tichu_training.cli.train_calls `
   --run-dir C:\workbench\tichu\data\runs\calls_full_v5 -v
 ```
 
-> ⚠️ `train_calls` still consumes the **parquet** manifest and re-replays
-> (it does not yet read `materialised_100k_v5\calls`). That's why the config
-> sets `workers: 10`. Wiring a memmap path into `train_calls` is a follow-up.
+> Reads the packed `materialised_100k_v5\calls` bundle directly
+> (`dataset: memmap` → `call_tichu` / `call_grand_tichu` slices) — no archive
+> re-replay, so the config no longer sets `workers`.
 
 ---
 
@@ -145,18 +145,22 @@ py -3.14 -m tichu_training.cli.train_schupfen `
   --run-dir C:\workbench\tichu\data\runs\schupfen_full_v5 -v
 ```
 
-> ⚠️ Same as calls: consumes the parquet manifest, not yet the
-> `materialised_100k_v5\schupfen` bundle.
+> Reads the packed `materialised_100k_v5\schupfen` bundle directly
+> (`dataset: memmap`) — no archive re-parse, `workers` dropped.
 
 ---
 
-## 6. Train Belief (smoke only — real-data path pending)
+## 6. Train Belief
 
-There is **no production belief training path yet**: `train_belief` consumes
-`SyntheticBeliefDataset` (smoke), and no real `dataset: memmap` belief reader is
-wired into the CLI. The replay-derived belief **bundle** can be materialised
-(step 1 with `--bundle-tasks …,belief`) and read via `MemmapBeliefDataset`, but
-the trainer wiring is future work (ADR-0021). Smoke run, for completeness:
+`train_belief` now reads the replay-derived belief bundle via `dataset: memmap`
+→ `MemmapBeliefDataset` (ADR-0021), in addition to the synthetic smoke path.
+The bundle is gated behind an explicit `--bundle-tasks …,belief` on the parse
+pass (step 1) and is play-scale (several GB). There is **no committed
+`belief_full_v5.yaml` yet** — point a memmap config at
+`materialised_100k_v5\belief` to train on real data; the loop stacks the whole
+example list per epoch (no `iter_batches` fast path wired for belief yet).
+
+Smoke run (synthetic), for completeness:
 
 ```powershell
 py -3.14 -m tichu_training.cli.train_belief `
@@ -216,10 +220,10 @@ py -3.14 -m tichu_training.cli.export_model `
   (`runs\bc_full_100k_v4_memmap`, `runs\awr_full_100k_v4_memmap_*`, any v4
   call/schupfen) fails to load against this code — retrain from v5. The old
   138 GB `materialised_100k_v4` can be deleted once v5 is validated.
-- **Only BC + AWR read the bundles today.** Calls/schupfen re-replay from the
-  parquet manifest; belief has no real trainer. The bundles are produced and
-  readable (`Memmap{Call,Schupfen,Belief}Dataset`) — consuming them in the
-  trainers is the next follow-up.
+- **All trainers now read the bundles.** BC + AWR (since v5), and now
+  calls / schupfen / belief consume `materialised_100k_v5\{calls,schupfen,belief}`
+  via `dataset: memmap` (`Memmap{Call,Schupfen,Belief}Dataset`) — no archive
+  re-replay. The parquet path remains as a fallback in each trainer.
 - **Run order:** ratings (0) → parse (1) → BC (2) → AWR (3, needs BC) →
   calls (4) + schupfen (5) can run any time after parse → eval (7) /
   export (8) need the trained checkpoints.
