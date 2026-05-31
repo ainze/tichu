@@ -1,0 +1,43 @@
+# Inference service config (featurizer v5). Maps each Difficulty tier to an
+# Agent per ADR-0003. All four tiers (easy/medium/hard/master) are REQUIRED —
+# create_app raises if any is missing.
+#
+# ML tiers load TorchScript exports. NOTE the key is `checkpoint` (the serving
+# path), NOT `checkpoint_path` (the eval kwarg). The optional `schupfen` /
+# `tichu_call` / `grand_call` keys point at the standalone-network exports; they
+# are policy-independent, so all ML tiers share the same files. Without them,
+# MLAgent falls back to rule heuristics for schupfen and declines all calls.
+#
+# Difficulty contract (ADR-0003):
+#   easy   = RuleAgent baseline (no torch, no checkpoint)
+#   medium = ML on a small BC checkpoint  -> no small-BC export yet, so this
+#            currently reuses the full BC policy (same as hard). FOLLOW-UP:
+#            export an early mid-epoch BC checkpoint for a genuine weaker tier.
+#   hard   = ML on the full BC checkpoint
+#   master = ML on the BC + AWR-refined checkpoint
+#
+# MLAgent now serves play / wish / dragon (policy heads) + schupfen + Tichu /
+# Grand-Tichu calls (via POST /call) from the trained networks.
+
+_shared_nets: &shared_nets
+  schupfen:   C:\workbench\tichu\data\export\bc_full_100k_v5\schupfen.pt
+  tichu_call: C:\workbench\tichu\data\export\bc_full_100k_v5\tichu_call.pt
+  grand_call: C:\workbench\tichu\data\export\bc_full_100k_v5\grand_tichu_call.pt
+
+agents:
+  easy:
+    factory: rule
+  medium:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\export\bc_full_100k_v5\policy.pt
+    <<: *shared_nets
+  hard:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\export\bc_full_100k_v5\policy.pt
+    <<: *shared_nets
+  master:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\export\awr_full_100k_v5_round\policy.pt
+    <<: *shared_nets
+
+port: 8000

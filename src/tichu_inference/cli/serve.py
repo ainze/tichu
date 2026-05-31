@@ -54,7 +54,9 @@ def main(argv: list[str] | None = None) -> int:
 
     port = args.port or int(config.get("port", 8000))
     import uvicorn  # imported lazily so tests don't pull it in.
-    uvicorn.run(app, host=args.host, port=port)
+    # access_log=False: the app's timing middleware emits the access line with
+    # request duration (ms); uvicorn's default line has no timing.
+    uvicorn.run(app, host=args.host, port=port, access_log=False)
     return 0
 
 

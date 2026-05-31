@@ -24,6 +24,7 @@ from tichu_export.torchscript import export_torchscript
 from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bc.call_model import GrandTichuCallNetwork, TichuCallNetwork
 from tichu_training.bc.heads import BCModel
+from tichu_training.bc.schupfen_model import SchupfenNetwork
 from tichu_training.bc.training import load_checkpoint
 from tichu_training.featurizer import FEATURIZER_VERSION
 
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="BC policy checkpoint to export.")
     p.add_argument("--tichu-checkpoint", metavar="FILE")
     p.add_argument("--grand-checkpoint", metavar="FILE")
+    p.add_argument("--schupfen-checkpoint", metavar="FILE")
     p.add_argument("--model-config", required=True, metavar="FILE",
                    help="YAML with `policy`/`tichu_call`/`grand_tichu_call` arch hyperparameters.")
     p.add_argument("--format", choices=("torchscript", "onnx"), default="torchscript")
@@ -89,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
             GrandTichuCallNetwork, args.grand_checkpoint,
             arch.get("grand_tichu_call", {}), out_dir / "grand_tichu_call.pt",
         )
+    if args.schupfen_checkpoint:
+        _export_schupfen(
+            args.schupfen_checkpoint, arch.get("schupfen", {}), out_dir / "schupfen.pt",
+        )
 
     if args.benchmark:
         stats = benchmark_p99(model, *inputs, n=int(args.benchmark_n))
@@ -106,6 +112,22 @@ def _export_call(cls, checkpoint_path: str, arch: dict, output: Path) -> None:
     load_checkpoint(checkpoint_path, net)
     feature_dim = int(arch["feature_dim"])
     inputs = (torch.randn(1, feature_dim), torch.tensor([0], dtype=torch.long))
+    export_torchscript(
+        net, example_inputs=inputs,
+        featurizer_version=FEATURIZER_VERSION,
+        action_space_version="",
+        output_path=output,
+    )
+    log.info("wrote %s (featurizer=%s)", output, FEATURIZER_VERSION)
+
+
+def _export_schupfen(checkpoint_path: str, arch: dict, output: Path) -> None:
+    net = SchupfenNetwork(**arch)
+    load_checkpoint(checkpoint_path, net)
+    feature_dim = int(arch["feature_dim"])
+    inputs = (torch.randn(1, feature_dim), torch.tensor([0], dtype=torch.long))
+    # strict=False inside export_torchscript permits the 3-tuple output the
+    # Schupfen Network returns (one 56-way head per direction).
     export_torchscript(
         net, example_inputs=inputs,
         featurizer_version=FEATURIZER_VERSION,

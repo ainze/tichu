@@ -25,6 +25,12 @@ from tichu_eval.tournament import MatrixResult, run_tournament
 from tichu_ml.registry import build_agent
 from tichu_training.bsw.parser import parse_tch
 
+# Side-effect import: registers the torch-backed `ml` agent (MLAgent) in the
+# agent registry so configs can reference `factory: ml`. Kept here rather than
+# in `tichu_ml.__init__` so the registry stays torch-free for engine-only
+# callers; the eval CLI is already an ML entry point.
+import tichu_inference.ml_agent  # noqa: F401,E402
+
 
 log = logging.getLogger("eval_matrix")
 

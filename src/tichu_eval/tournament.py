@@ -9,6 +9,7 @@ with a percentile bootstrap 95% CI computed from the per-deal deltas.
 """
 
 import itertools
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -16,6 +17,9 @@ import numpy as np
 from tichu_engine.state import GameState
 from tichu_eval.play import play_round
 from tichu_ml.agent import Agent
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,9 +52,15 @@ def run_tournament(
     names = sorted(agents.keys())
     result = MatrixResult(rows=[])
 
-    for a, b in itertools.combinations(names, 2):
-        deltas = _play_pair(agents[a], agents[b], deals)
+    pairs = list(itertools.combinations(names, 2))
+    for pair_i, (a, b) in enumerate(pairs, start=1):
+        log.info(
+            "pair %d/%d: %s vs %s -- %d deals x2 (seat-swap)",
+            pair_i, len(pairs), a, b, len(deals),
+        )
+        deltas = _play_pair(agents[a], agents[b], deals, label=f"{a} vs {b}")
         mean_ab, lo, hi = _bootstrap_ci(deltas, bootstrap_iters, rng)
+        log.info("  done: %s vs %s mean delta=%+.1f (n=%d)", a, b, mean_ab, len(deltas))
         n_obs = len(deltas)
         result._mean[(a, b)] = mean_ab
         result._mean[(b, a)] = -mean_ab
@@ -78,16 +88,26 @@ def run_tournament(
     return result
 
 
-def _play_pair(agent_a: Agent, agent_b: Agent, deals: list[GameState]) -> np.ndarray:
-    """Play every deal twice with seat-swap. Returns 2N score deltas A-minus-B."""
+def _play_pair(
+    agent_a: Agent, agent_b: Agent, deals: list[GameState], *, label: str = "",
+) -> np.ndarray:
+    """Play every deal twice with seat-swap. Returns 2N score deltas A-minus-B.
+
+    Emits ~10 evenly-spaced INFO progress ticks across the deal loop so a long
+    run is observable (tournament mode has no other per-deal output).
+    """
+    n = len(deals)
+    tick = max(1, n // 10)
     deltas: list[float] = []
-    for deal in deals:
+    for i, deal in enumerate(deals, start=1):
         # Arrangement 1: A on team 0 (seats 0, 2), B on team 1 (seats 1, 3).
         s0, s1 = play_round((agent_a, agent_b, agent_a, agent_b), deal)
         deltas.append(float(s0 - s1))
         # Arrangement 2: rotated — A on team 1, B on team 0.
         s0, s1 = play_round((agent_b, agent_a, agent_b, agent_a), deal)
         deltas.append(float(s1 - s0))
+        if i % tick == 0 or i == n:
+            log.info("  [%s] %d/%d deals", label, i, n)
     return np.array(deltas, dtype=np.float64)
 
 

@@ -60,6 +60,43 @@ def _dummy_policy_artifact(tmp_path: Path, name: str,
     return out
 
 
+def _dummy_aux_artifact(tmp_path: Path, name: str, out_dim_or_tuple) -> Path:
+    """Dummy Call (2 logits) or Schupfen (3 x 56) export, stamped like the real
+    standalone nets: featurizer version set, action_space version empty."""
+    from tichu_training.card_slots import CARD_SLOTS
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
+
+    class _Call(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc = torch.nn.Linear(FEATURIZER_OUTPUT_DIM, 2)
+
+        def forward(self, features, skill_decile):
+            return self.fc(features)
+
+    class _Schupfen(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.a = torch.nn.Linear(FEATURIZER_OUTPUT_DIM, CARD_SLOTS)
+            self.b = torch.nn.Linear(FEATURIZER_OUTPUT_DIM, CARD_SLOTS)
+            self.c = torch.nn.Linear(FEATURIZER_OUTPUT_DIM, CARD_SLOTS)
+
+        def forward(self, features, skill_decile):
+            return self.a(features), self.b(features), self.c(features)
+
+    torch.manual_seed(0)
+    model = _Schupfen() if out_dim_or_tuple == "schupfen" else _Call()
+    out = tmp_path / f"{name}.pt"
+    export_torchscript(
+        model,
+        example_inputs=(torch.randn(1, FEATURIZER_OUTPUT_DIM), torch.tensor([0], dtype=torch.long)),
+        featurizer_version=FEATURIZER_VERSION,
+        action_space_version="",
+        output_path=out,
+    )
+    return out
+
+
 def _make_config(tmp_path: Path) -> dict:
     return {
         "agents": {
@@ -69,6 +106,16 @@ def _make_config(tmp_path: Path) -> dict:
             "master": {"factory": "ml", "checkpoint": str(_dummy_policy_artifact(tmp_path, "master"))},
         }
     }
+
+
+def _make_config_with_calls(tmp_path: Path) -> dict:
+    cfg = _make_config(tmp_path)
+    cfg["agents"]["hard"].update({
+        "tichu_call": str(_dummy_aux_artifact(tmp_path, "tichu", "call")),
+        "grand_call": str(_dummy_aux_artifact(tmp_path, "grand", "call")),
+        "schupfen": str(_dummy_aux_artifact(tmp_path, "schup", "schupfen")),
+    })
+    return cfg
 
 
 def _post_act(client, difficulty: str, ps):
@@ -161,6 +208,64 @@ def test_metrics_endpoint_exposes_request_counts_and_latency(tmp_path):
     assert "tichu_requests_total" in text
     assert 'difficulty="easy"' in text
     assert "tichu_latency_p99_ms" in text
+
+
+def _post_call(client, difficulty: str, kind: str, ps):
+    return client.post("/call", json={
+        "difficulty": difficulty, "kind": kind,
+        "private_state": private_state_to_json(ps),
+    })
+
+
+def test_call_endpoint_returns_bool_for_ml_with_call_nets(tmp_path):
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    for kind in ("tichu", "grand"):
+        r = _post_call(client, "hard", kind, ps)
+        assert r.status_code == 200, (kind, r.text)
+        assert isinstance(r.json()["call"], bool)
+
+
+def test_call_declines_for_rule_baseline(tmp_path):
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    # easy = RuleAgent has no should_call -> always declines.
+    r = _post_call(client, "easy", "tichu", ps)
+    assert r.status_code == 200
+    assert r.json()["call"] is False
+
+
+def test_call_declines_when_ml_has_no_call_net(tmp_path):
+    # `medium` is ML but no call net wired -> should_call returns False.
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    r = _post_call(client, "medium", "grand", ps)
+    assert r.status_code == 200
+    assert r.json()["call"] is False
+
+
+def test_call_rejects_unknown_kind(tmp_path):
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    r = _post_call(client, "hard", "super-tichu", ps)
+    assert r.status_code == 400
+
+
+def test_call_rejects_unknown_difficulty(tmp_path):
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    r = _post_call(client, "godlike", "tichu", ps)
+    assert r.status_code == 400
 
 
 def test_returned_action_is_decodable_and_legal(tmp_path):
