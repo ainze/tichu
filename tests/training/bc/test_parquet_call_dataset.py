@@ -240,6 +240,84 @@ def test_ratings_join_populates_skill_decile(smoke_setup, tmp_path: Path):
             )
 
 
+def test_tichu_features_do_not_leak_self_call_bit(smoke_setup):
+    """Regression: at the seat's first non-Pass Play (the Tichu-call
+    featurise moment, ADR-0018), `pub.tichu_callers` already reflects
+    that seat's own Tichu decision — so without masking, slot
+    `tichu_callers[seat]` IS the label and the classifier trivially
+    overfits to 100% accuracy. The fix in `_call_examples_for_game`
+    zeroes that one slot; this test pins the invariant on real BSW
+    sample data. The other three seats' bits are legitimate public
+    context (opponents' calls) and must NOT be masked.
+
+    If this fails, retraining will silently revert to memorising the
+    label — that's how the v4 100k run hit acc=1.000 in epoch 1.
+    """
+    from tichu_training.bsw.archive import iter_archive
+    from tichu_training.bsw.parser import parse_tch
+    from tichu_training.featurizer import SECTION_OFFSETS
+
+    ds = ParquetCallDataset(
+        smoke_setup["shards_dir"],
+        archive_path=smoke_setup["archive"],
+        call_type="tichu",
+        expected_featurizer_version=FEATURIZER_VERSION,
+        expected_action_space_version=ACTION_SPACE_VERSION,
+    )
+    examples = list(ds)
+    assert examples, "no tichu examples — fixture regressed"
+    base = SECTION_OFFSETS["tichu_callers"]
+
+    # The fixture must contain at least one round with a tichu call —
+    # otherwise leak vs no-leak is indistinguishable (all bits would be
+    # zero either way).
+    has_calling_round = False
+    for stem, text in iter_archive(smoke_setup["archive"]):
+        if stem not in ds._manifest:
+            continue
+        game = parse_tch(text, game_id=stem)
+        for r in game.rounds:
+            if r.round_index in ds._manifest[stem] and r.tichu_callers:
+                has_calling_round = True
+                break
+        if has_calling_round:
+            break
+    assert has_calling_round, (
+        "sample data has no validated round with a Tichu call — "
+        "leak/no-leak is indistinguishable. Extend the fixture."
+    )
+
+    # Necessary invariant: with the mask, at most 3 of the 4
+    # `tichu_callers` bits can ever be set in a single example
+    # (the seat's own bit is always zero). Without the mask, the
+    # bit for the calling seat survives and the sum can reach 4.
+    n_positive = 0
+    for ex in examples:
+        block = ex.features[base:base + 4]
+        assert block.sum() <= 3, (
+            f"all 4 tichu_callers bits set → self-call bit leaked. "
+            f"block={block.tolist()} target={ex.target}"
+        )
+        if ex.target == 1:
+            n_positive += 1
+    assert n_positive > 0, "fixture should contain a positive tichu example"
+
+    # Tighter: at least one positive example was drawn from a round
+    # where only the example's own seat had called. With the leak, that
+    # seat's bit would be set and `block.sum() == 1`. With the mask, it
+    # is zeroed and `block.sum() == 0`. Find one.
+    found_all_zero_positive = any(
+        ex.target == 1 and ex.features[base:base + 4].sum() == 0
+        for ex in examples
+    )
+    assert found_all_zero_positive, (
+        "every positive tichu example has a nonzero `tichu_callers` "
+        "block — strong signal that the self-call bit is still leaking. "
+        "Expected at least one positive from a singleton-caller round "
+        "to produce an all-zero block after masking."
+    )
+
+
 def test_tichu_emits_at_most_one_example_per_seat_per_validated_round(smoke_setup):
     """Tichu featurise moment is the seat's first non-Pass Play (per Q2/Q5:
     C-wide symmetric). A seat that never makes a non-Pass Play in a round

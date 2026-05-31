@@ -36,3 +36,9 @@ batch_size: 1024
 epochs: 4
 checkpoint_every: 5000
 seed: 0
+
+# Game-level holdout (whole games on one side of the split). Per-epoch
+# val loss / accuracy / AUC are logged to `<tag>_val.csv`. AUC is the
+# call-quality signal — accuracy is dominated by the negative class
+# under BSW's natural class imbalance.
+val_frac: 0.1

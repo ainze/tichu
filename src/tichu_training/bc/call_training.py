@@ -15,6 +15,7 @@ fans that work over a ProcessPoolExecutor; the shared per-game routine
 """
 
 import csv
+import hashlib
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -62,6 +63,9 @@ class CallExample:
     target: int  # 0 = no-call, 1 = call
     skill_decile: int
     sample_weight: float = 1.0
+    # Stable hash key for game-level train/val splitting. Empty for the
+    # synthetic dataset (which never needs a split).
+    game_id: str = ""
 
 
 class SyntheticCallDataset(Iterable[CallExample]):
@@ -137,6 +141,7 @@ def _call_examples_for_game(
 
     if call_type == "tichu":
         from tichu_training.bsw.replay import replay_round
+        from tichu_training.featurizer import mask_self_tichu_call
 
     for parsed_round in game.rounds:
         if parsed_round.round_index not in valid_rounds:
@@ -165,6 +170,7 @@ def _call_examples_for_game(
                     target=int(seat in callers),
                     skill_decile=skill,
                     sample_weight=sample_weight,
+                    game_id=stem,
                 ))
             continue
 
@@ -196,6 +202,11 @@ def _call_examples_for_game(
                 continue  # seat never made a non-Pass Play this round (rare)
             private = pre_state.private_view(seat)  # type: ignore[attr-defined]
             features = featurize(private)
+            # `pub.tichu_callers` at the first-play snapshot already contains
+            # this seat's own call (the regular Tichu window closes when the
+            # seat plays their first card). Slot `tichu_callers[seat]` IS the
+            # label — leaving it in trivially solves the task. Mask it out.
+            mask_self_tichu_call(features, seat)
             handle = parsed_round.handles[seat]
             skill = skill_lookup.get(handle, neutral_decile)
             out.append(CallExample(
@@ -203,6 +214,7 @@ def _call_examples_for_game(
                 target=int(seat in callers),
                 skill_decile=skill,
                 sample_weight=sample_weight,
+                game_id=stem,
             ))
     return out
 
@@ -526,6 +538,112 @@ def calling_rate_by_decile(
     for d, c in zip(deciles, calls.tolist()):
         by_decile[int(d)].append(int(c))
     return {d: sum(v) / len(v) for d, v in by_decile.items()}
+
+
+def split_examples_by_game(
+    examples: Sequence[CallExample],
+    *,
+    val_frac: float,
+    seed: int = 0,
+) -> tuple[list[CallExample], list[CallExample]]:
+    """Deterministic train/val split that keeps whole games on one side.
+
+    Examples within a single game span all 4 seats and (for tichu) hands
+    drawn from the same deal. Splitting at the example level would leak
+    that within-game correlation into val. Hashing on `game_id` ensures
+    every example from one game lands on the same side.
+
+    `val_frac=0` returns `(all_examples, [])`. Examples with empty
+    `game_id` (the synthetic dataset) all hash to the same bucket and
+    so all land on one side.
+    """
+    if val_frac <= 0:
+        return list(examples), []
+    if val_frac >= 1:
+        return [], list(examples)
+    threshold = int(round(val_frac * 10_000))
+    salt = str(seed).encode()
+    train: list[CallExample] = []
+    val: list[CallExample] = []
+    for ex in examples:
+        h = hashlib.blake2b(
+            salt + b":" + ex.game_id.encode(), digest_size=4,
+        ).digest()
+        bucket = int.from_bytes(h, "big") % 10_000
+        (val if bucket < threshold else train).append(ex)
+    return train, val
+
+
+def _binary_auc(probs: np.ndarray, labels: np.ndarray) -> float:
+    """ROC-AUC via Mann-Whitney U with average-rank tie handling.
+
+    Returns NaN when one class is absent (AUC undefined). No sklearn
+    dependency — pure numpy.
+    """
+    n = probs.shape[0]
+    n_pos = int(labels.sum())
+    n_neg = n - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    order = np.argsort(probs, kind="stable")
+    sorted_probs = probs[order]
+    sorted_labels = labels[order]
+    ranks = np.empty(n, dtype=np.float64)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and sorted_probs[j + 1] == sorted_probs[i]:
+            j += 1
+        ranks[i:j + 1] = (i + j) / 2.0 + 1.0  # 1-indexed average rank
+        i = j + 1
+    sum_ranks_pos = float(ranks[sorted_labels == 1].sum())
+    return (sum_ranks_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def evaluate_call_examples(
+    network: CallNetwork,
+    examples: Sequence[CallExample],
+    *,
+    batch_size: int,
+) -> dict[str, float]:
+    """Unweighted val-set metrics: loss, accuracy, AUC, n, positive fraction.
+
+    Loss is unweighted cross-entropy (recency weights are a training-time
+    knob, not a held-out metric). AUC is the right call-quality signal
+    given the heavy class imbalance — accuracy is dominated by the
+    majority class.
+    """
+    if not examples:
+        return {"n": 0.0, "loss": float("nan"), "accuracy": float("nan"),
+                "auc": float("nan"), "pos_frac": float("nan")}
+    network.eval()
+    total_loss = 0.0
+    total_correct = 0
+    total_n = 0
+    all_probs: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+    with torch.no_grad():
+        for batch in _batched(iter(examples), batch_size):
+            tensors = _stack(batch)
+            logits = network(tensors["features"], tensors["skill_decile"])
+            loss = F.cross_entropy(logits, tensors["target"], reduction="sum")
+            pred = logits.argmax(dim=-1)
+            probs = torch.softmax(logits, dim=-1)[:, 1]
+            total_loss += float(loss.item())
+            total_correct += int((pred == tensors["target"]).sum().item())
+            total_n += int(tensors["target"].shape[0])
+            all_probs.append(probs.cpu().numpy())
+            all_labels.append(tensors["target"].cpu().numpy())
+    network.train()
+    probs_arr = np.concatenate(all_probs)
+    labels_arr = np.concatenate(all_labels).astype(np.int64)
+    return {
+        "n": float(total_n),
+        "loss": total_loss / total_n,
+        "accuracy": total_correct / total_n,
+        "auc": _binary_auc(probs_arr, labels_arr),
+        "pos_frac": float(labels_arr.mean()),
+    }
 
 
 def write_calling_rate_csv(
