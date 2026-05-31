@@ -1,6 +1,7 @@
 """`train_calls` CLI — trains the Tichu and Grand Tichu call networks."""
 
 import argparse
+import csv
 import logging
 import shutil
 import sys
@@ -13,6 +14,8 @@ from tichu_training.bc.call_model import GrandTichuCallNetwork, TichuCallNetwork
 from tichu_training.bc.call_training import (
     ParquetCallDataset,
     SyntheticCallDataset,
+    evaluate_call_examples,
+    split_examples_by_game,
     train_one_call_epoch,
     write_calling_rate_csv,
 )
@@ -59,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     seed = int(config.get("seed", 0))
     torch.manual_seed(seed)
 
+    # Default 0 keeps existing smoke configs (which lack a `val_frac` key)
+    # working unchanged. Production configs opt in explicitly.
+    val_frac = float(config.get("val_frac", 0.0))
     targets = ["grand", "tichu"] if args.only is None else [args.only]
     for tag in targets:
         examples = _build_dataset(config, _TAG_TO_CALL_TYPE[tag])
@@ -73,24 +79,47 @@ def main(argv: list[str] | None = None) -> int:
         )
         optimizer = torch.optim.Adam(net.parameters(), lr=float(config["learning_rate"]))
         log_path = run_dir / f"{tag}_step.csv"
+        val_log_path = run_dir / f"{tag}_val.csv"
         ckpt_dir = run_dir / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        # For streaming datasets, the calling-rate CSV needs a materialised
-        # snapshot of examples (it indexes into the data). Materialise once
-        # per tag — the parquet adapter is re-iterable, but the rate CSV
-        # asks for predictions on each example, not a fresh pass.
-        rate_examples = examples if isinstance(examples, list) else list(examples)
+        # Materialise once per tag. The split is by game_id, so all examples
+        # from one game land on the same side — within-game correlation
+        # cannot leak from train into val.
+        all_examples = examples if isinstance(examples, list) else list(examples)
+        train_examples, val_examples = split_examples_by_game(
+            all_examples, val_frac=val_frac, seed=seed,
+        )
+        log.info(
+            "[%s] split: train=%d val=%d (val_frac=%.3f)",
+            tag, len(train_examples), len(val_examples), val_frac,
+        )
+        if val_examples:
+            pos = sum(1 for e in val_examples if e.target == 1)
+            log.info("[%s] val positive fraction: %.4f (%d / %d)",
+                     tag, pos / len(val_examples), pos, len(val_examples))
         n_epochs = int(config["epochs"])
         for epoch in range(n_epochs):
             loss = train_one_call_epoch(
-                net, rate_examples, optimizer,
+                net, train_examples, optimizer,
                 batch_size=int(config["batch_size"]),
                 log_path=log_path,
                 desc=f"[{tag}] epoch {epoch + 1}/{n_epochs}",
             )
             log.info("[%s] epoch %d final batch loss=%.4f", tag, epoch, loss)
+            if val_examples:
+                metrics = evaluate_call_examples(
+                    net, val_examples,
+                    batch_size=int(config["batch_size"]),
+                )
+                log.info(
+                    "[%s] epoch %d val: loss=%.4f acc=%.4f auc=%.4f "
+                    "(n=%d, pos_frac=%.4f)",
+                    tag, epoch, metrics["loss"], metrics["accuracy"],
+                    metrics["auc"], int(metrics["n"]), metrics["pos_frac"],
+                )
+                _append_val_row(val_log_path, epoch, metrics)
             write_calling_rate_csv(
-                net, rate_examples,
+                net, train_examples,
                 path=run_dir / f"{tag}_calling_rate_by_decile_epoch{epoch}.csv",
             )
         save_checkpoint(net, optimizer, step=int(config["epochs"]),
@@ -98,6 +127,24 @@ def main(argv: list[str] | None = None) -> int:
         log.info("[%s] saved final checkpoint", tag)
 
     return 0
+
+
+def _append_val_row(path: Path, epoch: int, metrics: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not path.exists()
+    fields = ["epoch", "n", "loss", "accuracy", "auc", "pos_frac"]
+    with path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        if new_file:
+            writer.writeheader()
+        writer.writerow({
+            "epoch": epoch,
+            "n": int(metrics["n"]),
+            "loss": metrics["loss"],
+            "accuracy": metrics["accuracy"],
+            "auc": metrics["auc"],
+            "pos_frac": metrics["pos_frac"],
+        })
 
 
 def _build_dataset(config, call_type: str):

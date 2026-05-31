@@ -25,3 +25,7 @@ batch_size: 1024
 epochs: 4
 checkpoint_every: 5000
 seed: 0
+
+# Game-level holdout (whole games on one side; split by game_id). Per-epoch
+# val loss/accuracy/AUC logged to <tag>_val.csv. Matches calls_full.yaml.
+val_frac: 0.1

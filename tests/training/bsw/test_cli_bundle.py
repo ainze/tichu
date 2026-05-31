@@ -39,12 +39,13 @@ def test_bundle_out_dir_writes_all_task_bundles_in_one_pass(tmp_path):
     grand = MemmapCallDataset(bundle_root / "calls", call_type="call_grand_tichu")
     assert len(grand) > 0  # one per seat per validated round, always present
 
-    # Provenance is populated by the consolidated pass (0 only for synthetic).
+    # Provenance is populated by the consolidated pass (0/"" only for synthetic).
+    # Schupfen carries game_id as int; calls carry it as the string split key.
     sample_ids = {int(p.stem) for p in _SAMPLES.glob("*.tch")}
     any_example = next(iter(schupfen))
     assert any_example.game_id in sample_ids
     grand_example = next(iter(grand))
-    assert grand_example.game_id in sample_ids
+    assert int(grand_example.game_id) in sample_ids
 
     # Belief is gated OUT of `all` (ADR-0021) — no belief bundle by default.
     assert not (bundle_root / "belief").exists()

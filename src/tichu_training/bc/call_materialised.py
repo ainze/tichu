@@ -76,6 +76,15 @@ META_DTYPE: np.dtype = np.dtype([
 _DEFAULT_CHUNK_SIZE: int = 25_000
 
 
+def _gid_to_u4(game_id) -> int:
+    """CallExample.game_id is the string game key; the bundle stores it as a
+    u4 provenance column. BSW ids are numeric, so int-parse; 0 if not."""
+    try:
+        return int(game_id)
+    except (TypeError, ValueError):
+        return 0
+
+
 class CallBundleWriter:
     """Push-style writer for the calls bundle (both call types in one dir).
     `add_many(call_type, stream)` buffers per type and flushes on the chunk
@@ -116,7 +125,7 @@ class CallBundleWriter:
             meta[i]["target"] = int(e.target)
             meta[i]["sample_weight"] = e.sample_weight
             meta[i]["skill_decile"] = e.skill_decile
-            meta[i]["game_id"] = e.game_id
+            meta[i]["game_id"] = _gid_to_u4(e.game_id)
             meta[i]["round_id"] = e.round_id
         with bits_path.open("ab") as fh:
             feat_bits.tofile(fh)
@@ -291,7 +300,7 @@ class MemmapCallDataset(Iterable[CallExample]):
                 target=int(m["target"]),
                 skill_decile=int(m["skill_decile"]),
                 sample_weight=float(m["sample_weight"]),
-                game_id=int(m["game_id"]),
+                game_id=(str(int(m["game_id"])) if int(m["game_id"]) else ""),
                 round_id=int(m["round_id"]),
             )
 

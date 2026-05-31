@@ -252,23 +252,22 @@ def _process_game(
                 neutral_decile=neutral_decile,
             ))
         if want_calls:
-            call_tichu_examples.extend(_stamp_provenance(
-                tichu_examples_for_round(
-                    parsed_round, replay,
-                    skill_lookup=skill_lookup,
-                    neutral_decile=neutral_decile,
-                    sample_weight=sample_weight,
-                ),
-                game_id_int, rid, neutral_decile,
+            # call_emit sets game_id (str, the split key) + round_id + guards
+            # a None skill itself, so no _stamp_provenance pass is needed here.
+            _gid = game.game_id or ""
+            call_tichu_examples.extend(tichu_examples_for_round(
+                parsed_round, replay,
+                skill_lookup=skill_lookup,
+                neutral_decile=neutral_decile,
+                sample_weight=sample_weight,
+                game_id=_gid, round_id=rid,
             ))
-            call_grand_examples.extend(_stamp_provenance(
-                grand_tichu_examples_for_round(
-                    parsed_round,
-                    skill_lookup=skill_lookup,
-                    neutral_decile=neutral_decile,
-                    sample_weight=sample_weight,
-                ),
-                game_id_int, rid, neutral_decile,
+            call_grand_examples.extend(grand_tichu_examples_for_round(
+                parsed_round,
+                skill_lookup=skill_lookup,
+                neutral_decile=neutral_decile,
+                sample_weight=sample_weight,
+                game_id=_gid, round_id=rid,
             ))
         if want_schupfen:
             schupfen_examples.extend(_stamp_provenance(
