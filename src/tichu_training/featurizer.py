@@ -39,8 +39,14 @@ from tichu_training.action_space import (
 )
 
 
-FEATURIZER_VERSION: str = "v4"
+FEATURIZER_VERSION: str = "v5"
 
+# v5 == v4 feature *content* — the `featurize()` output is byte-identical to
+# v4. The bump is a deliberate version-stamp realignment (ADR-0022): it makes
+# the stamp match the packed-bundle directory generation and forces a clean
+# re-materialise + retrain, retiring the v4-stamped checkpoints. Do NOT look
+# for a featurizer change in v5; there isn't one. The layout below is ADR-0017's.
+#
 # v4: trick_top_combo is a 50-dim union-of-fields layout, NOT a one-hot
 # over the v1 Action Space. The action-space dependency is severed on
 # the input side; the play head still outputs ACTION_SPACE_SIZE logits.

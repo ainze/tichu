@@ -43,6 +43,11 @@ class SchupfenExample:
     target: np.ndarray              # shape (3,) int — (slot_to_next, slot_to_partner, slot_to_previous)
     skill_decile: int
     sample_weight: float = 1.0
+    # Provenance (ADR-0020): the source (game_id, round_id). Populated by the
+    # consolidated parse pass; 0 for synthetic / standalone examples that
+    # don't carry it. Materialised into the bundle meta for per-game filtering.
+    game_id: int = 0
+    round_id: int = 0
 
 
 class SyntheticSchupfenDataset(Iterable[SchupfenExample]):
@@ -61,6 +66,7 @@ class SyntheticSchupfenDataset(Iterable[SchupfenExample]):
         n_examples: int = 200,
         feature_dim: int | None = None,
         skill_buckets: int = 10,
+        binary_features: bool = False,
     ) -> None:
         if feature_dim is None:
             from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
@@ -69,11 +75,31 @@ class SyntheticSchupfenDataset(Iterable[SchupfenExample]):
         self.n_examples = n_examples
         self.feature_dim = feature_dim
         self.skill_buckets = skill_buckets
+        # When True, indicator columns are 0/1 and only the columns in
+        # `CONTINUOUS_FEATURE_COLUMNS` carry arbitrary floats — the value
+        # contract the materialised bundle's bit-packer requires (it guards
+        # against non-0/1 indicator columns). Default False keeps the
+        # historical all-Gaussian features. Mirrors `SyntheticBCDataset`.
+        self.binary_features = binary_features
 
     def __iter__(self) -> Iterator[SchupfenExample]:
         rng = np.random.default_rng(self.seed)
+        cont_idx = None
+        if self.binary_features:
+            from tichu_training.featurizer import CONTINUOUS_FEATURE_COLUMNS
+            cont_idx = np.asarray(
+                [c for c in CONTINUOUS_FEATURE_COLUMNS if c < self.feature_dim],
+                dtype=np.intp,
+            )
         for _ in range(self.n_examples):
-            features = rng.standard_normal(self.feature_dim).astype(np.float32)
+            if self.binary_features:
+                features = (rng.random(self.feature_dim) < 0.5).astype(np.float32)
+                if cont_idx.size:
+                    features[cont_idx] = rng.standard_normal(
+                        cont_idx.size
+                    ).astype(np.float32)
+            else:
+                features = rng.standard_normal(self.feature_dim).astype(np.float32)
             hand_slots = rng.choice(56, size=14, replace=False)
             hand_mask = np.zeros(56, dtype=np.float32)
             hand_mask[hand_slots] = 1.0

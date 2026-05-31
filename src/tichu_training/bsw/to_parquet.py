@@ -35,7 +35,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -140,6 +140,14 @@ class _GameResult:
     # these come from the *same* replay that produced `records`, so the
     # engine runs once per round instead of once per pipeline.
     bc_examples: list["BCExample"] = field(default_factory=list)
+    # Populated when the corresponding task is in `bundle_tasks` — the
+    # per-task examples for the same validated rounds, from the same replay
+    # (ADR-0020). Calls split by type (tichu reuses the full replay; grand is
+    # synthetic deal-time). Schupfen is synthetic pre-schupfen. Empty otherwise.
+    call_tichu_examples: list = field(default_factory=list)
+    call_grand_examples: list = field(default_factory=list)
+    schupfen_examples: list = field(default_factory=list)
+    belief_examples: list = field(default_factory=list)
     # True if the game's summed ergebnis reaches 1000 for at least one team
     # (Complete Game); False if it's an Incomplete Session. None when parse
     # failed and there's no ergebnis to read.
@@ -153,32 +161,73 @@ class _GameResult:
         return self.rounds_matched < self.rounds_total
 
 
+def _int_game_id(game_id: str) -> int:
+    """Parse a BSW game_id to int for the bundle's `game_id u4` provenance
+    column; 0 if not parseable (the bundle treats 0 as 'unknown')."""
+    try:
+        return int(game_id)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stamp_provenance(examples: list, game_id_int: int, round_id: int, neutral: int):
+    """Stamp (game_id, round_id) onto the per-task examples and coerce a None
+    skill_decile to the Neutral Skill Decile — the bundle meta stores skill as
+    a uint8, so it must be a concrete int (the parquet path's column is
+    nullable; these bundles are not)."""
+    for e in examples:
+        e.game_id = game_id_int
+        e.round_id = round_id
+        if e.skill_decile is None:
+            e.skill_decile = neutral
+    return examples
+
+
 def _process_game(
     game: ParsedGame,
     *,
     skill_lookup: dict[str, int | None],
     recency_cutoff_game_id: int,
     recency_weight: float,
-    emit_bundle: bool = False,
+    bundle_tasks: frozenset[str] = frozenset(),
     neutral_decile: int = _DEFAULT_SKILL_BUCKETS,
 ) -> _GameResult:
     """Replay every round of `game` and emit per-decision records for the
     rounds whose engine Ergebnis matches BSW's. Module-level (picklable) so it
     runs in ProcessPoolExecutor workers.
 
-    With `emit_bundle=True`, the same replay also yields featurised
-    `BCExample`s into the result — the consolidation that lets one engine
-    pass feed both the parquet manifest and the materialised bundle."""
+    For each task in `bundle_tasks`, the *same* replay also yields that task's
+    featurised examples into the result — the consolidation that lets one
+    engine pass feed the parquet manifest and every materialised bundle
+    (ADR-0020). Tichu reuses the full replay's first-non-Pass-Play states;
+    grand-tichu and schupfen build their synthetic states from the parsed
+    round; BC featurises at every BC decision boundary."""
+    from tichu_training.bc.call_emit import (
+        grand_tichu_examples_for_round,
+        tichu_examples_for_round,
+    )
+    from tichu_training.bc.schupfen_training import _schupfen_examples_for_round
+    from tichu_training.belief.emit import belief_examples_for_round
+
     sample_weight = _sample_weight_for(
         game.game_id or "", recency_cutoff_game_id, recency_weight,
     )
     team_totals = game_team_totals(game)
     records: list[_Record] = []
     bc_examples: list[BCExample] = []
+    call_tichu_examples: list = []
+    call_grand_examples: list = []
+    schupfen_examples: list = []
+    belief_examples: list = []
     failures: list[RoundFailure] = []
     rounds_total = 0
     rounds_matched = 0
     game_id = game.game_id or "<unknown>"
+    game_id_int = _int_game_id(game.game_id or "")
+    want_bc = "bc" in bundle_tasks
+    want_calls = "calls" in bundle_tasks
+    want_schupfen = "schupfen" in bundle_tasks
+    want_belief = "belief" in bundle_tasks
     for parsed_round in game.rounds:
         replay = replay_round(parsed_round)
         rounds_total += 1
@@ -193,13 +242,48 @@ def _process_game(
             sample_weight=sample_weight,
             team_totals=team_totals,
         ))
-        if emit_bundle:
+        rid = parsed_round.round_index
+        if want_bc:
             bc_examples.extend(_emit_bc_examples_for_round(
                 parsed_round, replay,
                 skill_lookup=skill_lookup,
                 sample_weight=sample_weight,
                 team_totals=team_totals,
                 neutral_decile=neutral_decile,
+            ))
+        if want_calls:
+            # call_emit sets game_id (str, the split key) + round_id + guards
+            # a None skill itself, so no _stamp_provenance pass is needed here.
+            _gid = game.game_id or ""
+            call_tichu_examples.extend(tichu_examples_for_round(
+                parsed_round, replay,
+                skill_lookup=skill_lookup,
+                neutral_decile=neutral_decile,
+                sample_weight=sample_weight,
+                game_id=_gid, round_id=rid,
+            ))
+            call_grand_examples.extend(grand_tichu_examples_for_round(
+                parsed_round,
+                skill_lookup=skill_lookup,
+                neutral_decile=neutral_decile,
+                sample_weight=sample_weight,
+                game_id=_gid, round_id=rid,
+            ))
+        if want_schupfen:
+            schupfen_examples.extend(_stamp_provenance(
+                _schupfen_examples_for_round(
+                    parsed_round,
+                    skill_lookup=skill_lookup,
+                    neutral_decile=neutral_decile,
+                    sample_weight=sample_weight,
+                ),
+                game_id_int, rid, neutral_decile,
+            ))
+        if want_belief:
+            # BeliefExample is frozen; provenance is set at construction
+            # (no post-hoc stamping). Labels are read from the same replay.
+            belief_examples.extend(belief_examples_for_round(
+                parsed_round, replay, game_id=game_id_int, round_id=rid,
             ))
     return _GameResult(
         game_id=game_id,
@@ -208,6 +292,10 @@ def _process_game(
         rounds_matched=rounds_matched,
         failures=failures,
         bc_examples=bc_examples,
+        call_tichu_examples=call_tichu_examples,
+        call_grand_examples=call_grand_examples,
+        schupfen_examples=schupfen_examples,
+        belief_examples=belief_examples,
         is_complete_game=team_totals is not None,
     )
 
@@ -218,7 +306,7 @@ def _parse_and_process(
     skill_lookup: dict[str, int | None],
     recency_cutoff_game_id: int,
     recency_weight: float,
-    emit_bundle: bool = False,
+    bundle_tasks: frozenset[str] = frozenset(),
 ) -> _GameResult:
     """Worker for `stream_raw_to_parquet`: parse `.tch` text + replay + emit
     in one process boundary crossing. Moves the parse cost off the dispatcher
@@ -240,7 +328,7 @@ def _parse_and_process(
         skill_lookup=skill_lookup,
         recency_cutoff_game_id=recency_cutoff_game_id,
         recency_weight=recency_weight,
-        emit_bundle=emit_bundle,
+        bundle_tasks=bundle_tasks,
     )
 
 
@@ -299,16 +387,16 @@ def stream_to_parquet(
     recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
     rows_per_flush: int = _DEFAULT_ROWS_PER_FLUSH,
     workers: int = 1,
-    bundle_out_dir: Path | None = None,
+    bundle_dirs: Mapping[str, Path] | None = None,
     on_game_done: Callable[["StreamStats"], None] | None = None,
 ) -> StreamStats:
     """Stream pre-parsed games to per-decision Parquet shards, filtering at
     the Round granularity (see ADR-0009).
 
-    With `bundle_out_dir` set, the same replay pass also writes a
-    `MemmapBCDataset`-readable bundle there — consolidating the two engine
-    replays (parse_bsw + materialise_bc) into one. See the 2026-05-29
-    pipeline-perf handoff.
+    With `bundle_dirs` set (a `{task: out_dir}` map), the same replay pass also
+    writes one materialised bundle per task — consolidating what used to be a
+    separate replay per trainer into one pass (ADR-0020). See the 2026-05-29
+    pipeline-perf handoff and ADR-0016.
 
     Prefer `stream_raw_to_parquet` for production runs over `.tch` archives:
     it parses inside workers, which removes parse_tch from the serial
@@ -321,13 +409,13 @@ def stream_to_parquet(
         skill_lookup=skill_lookup,
         recency_cutoff_game_id=recency_cutoff_game_id,
         recency_weight=recency_weight,
-        emit_bundle=bundle_out_dir is not None,
+        bundle_tasks=frozenset(bundle_dirs or ()),
     )
     return _run_stream(
         games, output_dir, worker,
         rows_per_flush=rows_per_flush,
         workers=workers,
-        bundle_out_dir=bundle_out_dir,
+        bundle_dirs=bundle_dirs,
         on_game_done=on_game_done,
     )
 
@@ -341,7 +429,7 @@ def stream_raw_to_parquet(
     recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
     rows_per_flush: int = _DEFAULT_ROWS_PER_FLUSH,
     workers: int = 1,
-    bundle_out_dir: Path | None = None,
+    bundle_dirs: Mapping[str, Path] | None = None,
     on_game_done: Callable[["StreamStats"], None] | None = None,
 ) -> StreamStats:
     """Stream raw `(game_id, tch_text)` pairs to per-decision Parquet shards,
@@ -349,21 +437,21 @@ def stream_raw_to_parquet(
     `StreamStats.parse_failures` and surface via `on_game_done` like any
     other completed game (so the progress bar advances).
 
-    With `bundle_out_dir` set, the same replay pass also writes a
-    `MemmapBCDataset`-readable bundle there (consolidation handoff)."""
+    With `bundle_dirs` set (a `{task: out_dir}` map), the same replay pass also
+    writes one materialised bundle per task (ADR-0020)."""
     skill_lookup = _load_skill_lookup(ratings_path) if ratings_path else {}
     worker = partial(
         _parse_and_process,
         skill_lookup=skill_lookup,
         recency_cutoff_game_id=recency_cutoff_game_id,
         recency_weight=recency_weight,
-        emit_bundle=bundle_out_dir is not None,
+        bundle_tasks=frozenset(bundle_dirs or ()),
     )
     return _run_stream(
         pairs, output_dir, worker,
         rows_per_flush=rows_per_flush,
         workers=workers,
-        bundle_out_dir=bundle_out_dir,
+        bundle_dirs=bundle_dirs,
         on_game_done=on_game_done,
     )
 
@@ -375,7 +463,7 @@ def _run_stream(
     *,
     rows_per_flush: int,
     workers: int,
-    bundle_out_dir: Path | None = None,
+    bundle_dirs: Mapping[str, Path] | None = None,
     on_game_done: Callable[["StreamStats"], None] | None,
 ) -> StreamStats:
     """Shared dispatch loop. `worker` consumes one source item and returns a
@@ -465,22 +553,43 @@ def _run_stream(
                         yield fut.result()
                     _top_up(len(done))
 
-    def _apply_results_emitting_examples():
-        """Drive every result through `_apply` (parquet rows + stats) and
-        yield its `bc_examples`, so a downstream `materialise()` pulls the
-        bundle stream incrementally instead of after a full-corpus buffer."""
-        for result in _iter_results():
-            _apply(result)
-            yield from result.bc_examples
+    # One push-style bundle writer per requested task (ADR-0020). Each
+    # consumes the per-task examples carried on every `_GameResult` as the
+    # results arrive — peak RAM stays bounded by each writer's chunk size,
+    # not the corpus size. Deferred imports: the writers pull in numpy + the
+    # bc layout, unwanted on a manifest-only run.
+    bundle_dirs = dict(bundle_dirs or {})
+    bundle_writers: dict[str, object] = {}
+    if bundle_dirs:
+        from tichu_training.bc.call_materialised import CallBundleWriter
+        from tichu_training.bc.materialised import BCBundleWriter
+        from tichu_training.bc.schupfen_materialised import SchupfenBundleWriter
+        from tichu_training.belief.belief_materialised import BeliefBundleWriter
+        if "bc" in bundle_dirs:
+            bundle_writers["bc"] = BCBundleWriter(bundle_dirs["bc"])
+        if "calls" in bundle_dirs:
+            bundle_writers["calls"] = CallBundleWriter(bundle_dirs["calls"])
+        if "schupfen" in bundle_dirs:
+            bundle_writers["schupfen"] = SchupfenBundleWriter(bundle_dirs["schupfen"])
+        if "belief" in bundle_dirs:
+            bundle_writers["belief"] = BeliefBundleWriter(bundle_dirs["belief"])
 
     try:
-        if bundle_out_dir is not None:
-            # Deferred import: the bundle writer pulls in numpy + the bc layout.
-            from tichu_training.bc.materialised import materialise
-            materialise(_apply_results_emitting_examples(), bundle_out_dir)
-        else:
-            for result in _iter_results():
-                _apply(result)
+        for result in _iter_results():
+            _apply(result)
+            bc_w = bundle_writers.get("bc")
+            if bc_w is not None:
+                bc_w.add_many(result.bc_examples)
+            calls_w = bundle_writers.get("calls")
+            if calls_w is not None:
+                calls_w.add_many("call_tichu", result.call_tichu_examples)
+                calls_w.add_many("call_grand_tichu", result.call_grand_examples)
+            schupfen_w = bundle_writers.get("schupfen")
+            if schupfen_w is not None:
+                schupfen_w.add_many(result.schupfen_examples)
+            belief_w = bundle_writers.get("belief")
+            if belief_w is not None:
+                belief_w.add_many(result.belief_examples)
         for decision_type in _KNOWN_DECISION_TYPES:
             _flush(decision_type)
             if decision_type not in writers:
@@ -489,6 +598,8 @@ def _run_stream(
     finally:
         for w in writers.values():
             w.close()
+        for bw in bundle_writers.values():
+            bw.close()
 
     return stats
 
