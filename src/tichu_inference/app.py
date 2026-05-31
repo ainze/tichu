@@ -18,6 +18,7 @@ import collections
 import logging
 import time
 from collections import defaultdict, deque
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from tichu_ml.rule_agent import RuleAgent
 
 
 log = logging.getLogger(__name__)
+_access_log = logging.getLogger("tichu_inference.access")
 
 
 _DIFFICULTIES = ("easy", "medium", "hard", "master")
@@ -48,6 +50,32 @@ def create_app(config: dict) -> FastAPI:
     state = _AppState(agents=agents)
     app.state.agent_registry = agents
     app.state.metrics = state
+
+    @app.middleware("http")
+    async def _log_response_time(request: Request, call_next):
+        # Emit a uvicorn-style access line WITH the request duration in ms, and
+        # surface it as a response header. uvicorn's own access log carries no
+        # timing, so serve.py runs it with access_log=False to avoid a duplicate.
+        t0 = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        client = request.client
+        addr = f"{client.host}:{client.port}" if client else "-"
+        http_version = request.scope.get("http_version", "1.1")
+        path = request.url.path
+        if request.url.query:
+            path = f"{path}?{request.url.query}"
+        try:
+            phrase = HTTPStatus(response.status_code).phrase
+        except ValueError:
+            phrase = ""
+        _access_log.info(
+            '%s - "%s %s HTTP/%s" %d %s %.1fms',
+            addr, request.method, path, http_version,
+            response.status_code, phrase, elapsed_ms,
+        )
+        response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
+        return response
 
     @app.get("/health")
     def health():
@@ -83,6 +111,29 @@ def create_app(config: dict) -> FastAPI:
             "fallback_used": fallback_used,
         }
 
+    @app.post("/call")
+    async def call(request: Request):
+        body: dict = await request.json()
+        difficulty = body.get("difficulty")
+        if difficulty not in _DIFFICULTIES:
+            raise HTTPException(status_code=400, detail=f"unknown difficulty: {difficulty!r}")
+        kind = body.get("kind")
+        if kind not in ("tichu", "grand"):
+            raise HTTPException(status_code=400, detail=f"unknown call kind: {kind!r} (expected 'tichu' or 'grand')")
+        ps_blob = body.get("private_state")
+        if ps_blob is None:
+            raise HTTPException(status_code=400, detail="private_state is required")
+        try:
+            ps = private_state_from_json(ps_blob)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(status_code=400, detail=f"malformed private_state: {exc}")
+
+        agent = state.agents[difficulty]
+        # Baselines (RuleAgent) have no call policy and always decline; only the
+        # ML agents expose `should_call`.
+        decision = bool(agent.should_call(ps, kind)) if hasattr(agent, "should_call") else False
+        return {"call": decision}
+
     @app.get("/metrics", response_class=PlainTextResponse)
     def metrics():
         return state.render_prometheus()
@@ -100,10 +151,20 @@ def _build_agents(spec: dict) -> dict[str, Agent]:
         if factory == "rule":
             agents[difficulty] = RuleAgent()
         elif factory == "ml":
-            agents[difficulty] = MLAgent(Path(sub["checkpoint"]))
+            agents[difficulty] = MLAgent(
+                Path(sub["checkpoint"]),
+                schupfen_path=_opt_path(sub, "schupfen"),
+                tichu_call_path=_opt_path(sub, "tichu_call"),
+                grand_call_path=_opt_path(sub, "grand_call"),
+            )
         else:
             raise ValueError(f"unknown agent factory {factory!r} for {difficulty}")
     return agents
+
+
+def _opt_path(sub: dict, key: str) -> Path | None:
+    val = sub.get(key)
+    return Path(val) if val else None
 
 
 class _AppState:

@@ -1,0 +1,33 @@
+# Export arch config for `export_model` (featurizer v5).
+#
+# `export_model` reads a `policy:` section and calls `BCModel(**policy)`, so it
+# needs `feature_dim` (the training config omits it — training derives it from
+# the dataset) plus the trunk kwargs. These MUST match the arch the BC run was
+# trained with (configs/bc_full_100k_v5_memmap.yaml `model:` block).
+#
+# feature_dim = FEATURIZER_OUTPUT_DIM = sum(SECTION_DIMS) = 224 (v5).
+policy:
+  feature_dim: 224
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+# Standalone networks (read only when the matching --*-checkpoint flag is passed).
+# All consume the same 224-dim featurizer + skill embedding; arch must match the
+# trained nets (calls_full_v5 / schupfen_full_v5 used the defaults below).
+tichu_call:
+  feature_dim: 224
+  skill_dim: 64
+  hidden: 256
+
+grand_tichu_call:
+  feature_dim: 224
+  skill_dim: 64
+  hidden: 256
+
+schupfen:
+  feature_dim: 224
+  skill_dim: 64
+  hidden: 256

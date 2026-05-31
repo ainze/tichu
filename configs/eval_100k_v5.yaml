@@ -1,0 +1,51 @@
+# Tournament eval (play strength), featurizer v5.
+#
+# All-vs-all paired-difference matrix on a synthetic post-schupfen
+# Starting-Position Pool. The `bc` / `awr_round` agents wrap TorchScript exports
+# (policy.pt from `export_model`) of the BC policy and the AWR-refined policy;
+# rule + random are baselines. The row that answers "does AWR beat BC?" is
+# `bc vs awr_round`.
+#
+# NOTE: MLAgent uses the policy ONLY for play decisions; schupfen / wish /
+# dragon-give fall through to the rule heuristics, and the Tichu/Grand-Tichu
+# call networks are NOT used. This measures policy play strength, not the full
+# stack.
+#
+# PREREQS — export BOTH policies to .pt first (arch config is shared):
+#   # BC (already done):
+#   py -3.14 -m tichu_training.cli.export_model `
+#     --checkpoint   C:\workbench\tichu\data\runs\bc_full_100k_v5_memmap\checkpoints\step_000001.bin `
+#     --model-config configs\export_100k_v5.yaml `
+#     --format torchscript --output C:\workbench\tichu\data\export\bc_full_100k_v5
+#   # AWR round (only epoch 0 was run — use the latest awr_epoch_*.bin written):
+#   py -3.14 -m tichu_training.cli.export_model `
+#     --checkpoint   C:\workbench\tichu\data\runs\awr_full_100k_v5_memmap_round\checkpoints\awr_epoch_000_step_000002.bin `
+#     --model-config configs\export_100k_v5.yaml `
+#     --format torchscript --output C:\workbench\tichu\data\export\awr_full_100k_v5_round
+#   # Pool:
+#   py -3.14 scripts\gen_starting_position_pool.py --seed 0 --n 500 `
+#     --output C:\workbench\tichu\data\starting_position_pool_s0_n500.parquet
+
+starting_position_pool: C:\workbench\tichu\data\starting_position_pool_s0_n500.parquet
+n_deals: 500
+bootstrap_iters: 1000
+seed: 0
+
+agents:
+  - name: bc
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_100k_v5\policy.pt
+  - name: awr_round
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\awr_full_100k_v5_round\policy.pt
+  - name: rule
+    factory: rule
+    kwargs: {}
+  - name: random
+    factory: random
+    kwargs:
+      seed: 0
+
+output: C:\workbench\tichu\data\runs\eval_100k_v5\matrix.parquet

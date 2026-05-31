@@ -172,19 +172,38 @@ py -3.14 -m tichu_training.cli.train_belief `
 
 ## 7. Evaluate
 
-Both eval modes need an eval **config** (agent roster / checkpoint paths) that
-you author — there's no checked-in 100k eval config. Point it at the BC (or AWR
-`master`) + call + schupfen checkpoints from above.
+The `ml` agent in the eval roster wraps the **TorchScript export** (`policy.pt`
+from step 8), not a raw `.bin` — so **run step 8 before this**. `configs\eval_100k_v5.yaml`
+is the checked-in tournament roster (`ml` + `rule` + `random`).
+
+> **What `ml` actually evaluates:** MLAgent runs the policy for **play
+> decisions only**. Schupfen / mahjong-wish / dragon-give fall through to the
+> rule heuristics, and the separately-trained Tichu/Grand-Tichu call networks
+> are **not** used (Tichu calls are scored through the policy's play head). This
+> is play strength of the policy, not the full stack — see ADR-0006.
+
+**Tournament** also needs a Starting-Position Pool parquet. There's no CLI for
+it on the trainer; generate it with the helper script (same `(seed, n)` ⇒
+byte-identical pool):
 
 ```powershell
+py -3.14 scripts\gen_starting_position_pool.py `
+  --seed 0 --n 500 `
+  --output C:\workbench\tichu\data\starting_position_pool_s0_n500.parquet
+
 # Tournament (self-play strength, synthetic Starting-Position Pool)
 py -3.14 -m tichu_training.cli.eval_matrix `
   --config configs\eval_100k_v5.yaml `
   --mode   tournament -v
+```
 
-# Move-Prediction Eval (imitation fidelity on held-out real BSW games)
+**Move-Prediction** (imitation fidelity on held-out real BSW games) needs a
+move-prediction config (`agents:` + `output:`, no pool) and a directory of
+`.tch` files — author the config separately:
+
+```powershell
 py -3.14 -m tichu_training.cli.eval_matrix `
-  --config   configs\eval_100k_v5.yaml `
+  --config   configs\eval_move_pred_100k_v5.yaml `
   --mode     move_prediction `
   --held-out C:\workbench\tichu\data\heldout_tch -v
 ```
@@ -193,19 +212,37 @@ py -3.14 -m tichu_training.cli.eval_matrix `
 
 ## 8. Export (TorchScript)
 
-Bundles the Policy/Refined checkpoint with the two Call Networks for inference.
-`--model-config` is the BC arch config.
+Bundles the Policy/Refined checkpoint with the Call + Schupfen Networks for
+inference. `--model-config` must be a **dedicated export arch config** with a
+`policy:` section (`configs\export_100k_v5.yaml`) — **not** the BC training
+config, which nests arch under `model:` and omits `feature_dim`, so
+`export_model` would crash with `KeyError: 'feature_dim'`. `feature_dim` =
+`FEATURIZER_OUTPUT_DIM` = 224 (v5). The same config also carries `tichu_call`,
+`grand_tichu_call`, and `schupfen` arch sections (read only when the matching
+`--*-checkpoint` flag is passed).
 
 ```powershell
 py -3.14 -m tichu_training.cli.export_model `
-  --checkpoint       C:\workbench\tichu\data\runs\bc_full_100k_v5_memmap\checkpoints\step_000001.bin `
-  --tichu-checkpoint C:\workbench\tichu\data\runs\calls_full_v5\checkpoints\tichu_final.bin `
-  --grand-checkpoint C:\workbench\tichu\data\runs\calls_full_v5\checkpoints\grand_final.bin `
-  --model-config     configs\bc_full_100k_v5_memmap.yaml `
-  --format           torchscript `
-  --output           C:\workbench\tichu\data\export\bc_full_100k_v5 `
+  --checkpoint          C:\workbench\tichu\data\runs\bc_full_100k_v5_memmap\checkpoints\step_000001.bin `
+  --tichu-checkpoint    C:\workbench\tichu\data\runs\calls_full_v5\checkpoints\tichu_final.bin `
+  --grand-checkpoint    C:\workbench\tichu\data\runs\calls_full_v5\checkpoints\grand_final.bin `
+  --schupfen-checkpoint C:\workbench\tichu\data\runs\schupfen_full_v5\checkpoints\schupfen_final.bin `
+  --model-config        configs\export_100k_v5.yaml `
+  --format              torchscript `
+  --output              C:\workbench\tichu\data\export\bc_full_100k_v5 `
   --benchmark -v
 ```
+
+Writes `policy.pt`, `tichu_call.pt`, `grand_tichu_call.pt`, `schupfen.pt`.
+The inference service (`serve_inference`, `configs\serve_100k_v5.yaml`) wires
+all four into `MLAgent`: play / wish / dragon from the policy heads, schupfen
+from `schupfen.pt`, and Tichu / Grand-Tichu calls via `POST /call` from the call
+nets (ADR-0023). The call/schupfen `.pt`s are policy-independent, so every ML
+tier shares the same files.
+
+> The tournament eval only needs `policy.pt`, so the `--tichu-checkpoint` /
+> `--grand-checkpoint` flags above are optional for eval (MLAgent ignores the
+> call networks). Include them when exporting the full inference bundle.
 
 > Swap `--checkpoint` for an AWR `master` checkpoint
 > (`…\runs\awr_full_100k_v5_memmap_game\checkpoints\…`) to export the refined
