@@ -38,6 +38,7 @@ _access_log = logging.getLogger("tichu_inference.access")
 
 _DIFFICULTIES = ("easy", "medium", "hard", "master")
 _LATENCY_WINDOW = 200
+_GRAND_TICHU_HAND_SIZE = 8  # grand is called on the freshly dealt 8 cards (ADR-0023)
 
 
 def create_app(config: dict) -> FastAPI:
@@ -69,10 +70,15 @@ def create_app(config: dict) -> FastAPI:
             phrase = HTTPStatus(response.status_code).phrase
         except ValueError:
             phrase = ""
+        # Endpoints may stash a short outcome (e.g. "call=true") on request.state
+        # to be appended to the access line; request.state is shared with the
+        # route handler via the ASGI scope.
+        outcome = getattr(request.state, "access_outcome", None)
+        suffix = f" {outcome}" if outcome else ""
         _access_log.info(
-            '%s - "%s %s HTTP/%s" %d %s %.1fms',
+            '%s - "%s %s HTTP/%s" %d %s %.1fms%s',
             addr, request.method, path, http_version,
-            response.status_code, phrase, elapsed_ms,
+            response.status_code, phrase, elapsed_ms, suffix,
         )
         response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
         return response
@@ -128,10 +134,21 @@ def create_app(config: dict) -> FastAPI:
         except (ValueError, KeyError) as exc:
             raise HTTPException(status_code=400, detail=f"malformed private_state: {exc}")
 
+        # Grand Tichu is decided on the freshly dealt 8-card hand (ADR-0023), and
+        # the grand-call network only ever saw 8-card states in training. Reject
+        # any other hand size loudly rather than answer on out-of-distribution
+        # input. Tichu has no single fixed hand size, so it is left unguarded.
+        if kind == "grand" and len(ps.hand) != _GRAND_TICHU_HAND_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"grand-tichu call requires an {_GRAND_TICHU_HAND_SIZE}-card hand, got {len(ps.hand)}",
+            )
+
         agent = state.agents[difficulty]
         # Baselines (RuleAgent) have no call policy and always decline; only the
         # ML agents expose `should_call`.
         decision = bool(agent.should_call(ps, kind)) if hasattr(agent, "should_call") else False
+        request.state.access_outcome = f"call:{kind}={'true' if decision else 'false'}"
         return {"call": decision}
 
     @app.get("/metrics", response_class=PlainTextResponse)

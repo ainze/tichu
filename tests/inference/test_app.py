@@ -217,13 +217,26 @@ def _post_call(client, difficulty: str, kind: str, ps):
     })
 
 
+def _shrink_hand_to(ps, n: int):
+    """Return a copy of `ps` whose hand (and matching public hand_size) is `n`
+    cards — for building the 8-card states grand-tichu calls expect."""
+    import dataclasses
+    sizes = list(ps.public.hand_sizes)
+    sizes[ps.player] = n
+    public = dataclasses.replace(ps.public, hand_sizes=tuple(sizes))
+    hand = frozenset(list(ps.hand)[:n])
+    return dataclasses.replace(ps, hand=hand, public=public)
+
+
 def test_call_endpoint_returns_bool_for_ml_with_call_nets(tmp_path):
     app = create_app(_make_config_with_calls(tmp_path))
     client = TestClient(app)
     state = deal_initial_state(seed=0)
     ps = state.private_view(state.public.current_player)
-    for kind in ("tichu", "grand"):
-        r = _post_call(client, "hard", kind, ps)
+    # grand is only valid on an 8-card hand; tichu has no fixed size.
+    cases = {"tichu": ps, "grand": _shrink_hand_to(ps, 8)}
+    for kind, call_state in cases.items():
+        r = _post_call(client, "hard", kind, call_state)
         assert r.status_code == 200, (kind, r.text)
         assert isinstance(r.json()["call"], bool)
 
@@ -244,10 +257,57 @@ def test_call_declines_when_ml_has_no_call_net(tmp_path):
     app = create_app(_make_config_with_calls(tmp_path))
     client = TestClient(app)
     state = deal_initial_state(seed=0)
-    ps = state.private_view(state.public.current_player)
+    ps = _shrink_hand_to(state.private_view(state.public.current_player), 8)
     r = _post_call(client, "medium", "grand", ps)
     assert r.status_code == 200
     assert r.json()["call"] is False
+
+
+def test_call_grand_rejects_non_eight_card_hand(tmp_path):
+    # A freshly dealt hand is 14 cards; grand must be decided on the 8-card hand.
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)  # 14 cards
+    r = _post_call(client, "hard", "grand", ps)
+    assert r.status_code == 400
+    assert "8-card" in r.json()["detail"]
+
+
+def test_call_tichu_allows_full_hand(tmp_path):
+    # Tichu has no fixed hand size and must stay unguarded by the grand check.
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)  # 14 cards
+    r = _post_call(client, "hard", "tichu", ps)
+    assert r.status_code == 200
+
+
+def test_call_outcome_appears_in_access_log(tmp_path, caplog):
+    app = create_app(_make_config_with_calls(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    with caplog.at_level(logging.INFO, logger="tichu_inference.access"):
+        r = _post_call(client, "hard", "tichu", ps)
+    assert r.status_code == 200
+    decision = r.json()["call"]
+    expected = f"call:tichu={'true' if decision else 'false'}"
+    line = next(m for m in caplog.messages if "POST /call" in m)
+    assert line.endswith(expected), line
+
+
+def test_act_access_log_has_no_call_outcome(tmp_path, caplog):
+    # /act must not leak a call= suffix onto its access line.
+    app = create_app(_make_config(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    with caplog.at_level(logging.INFO, logger="tichu_inference.access"):
+        _post_act(client, "easy", ps)
+    line = next(m for m in caplog.messages if "POST /act" in m)
+    assert "call:" not in line, line
 
 
 def test_call_rejects_unknown_kind(tmp_path):
