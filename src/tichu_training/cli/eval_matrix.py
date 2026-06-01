@@ -10,6 +10,7 @@ import csv
 import logging
 import shutil
 import sys
+from functools import partial
 from pathlib import Path
 
 import pyarrow as pa
@@ -34,6 +35,20 @@ import tichu_inference.ml_agent  # noqa: F401,E402
 
 
 log = logging.getLogger("eval_matrix")
+
+
+def _build_agent(factory: str, **kwargs):
+    """Agent builder threaded to parallel workers (see `run_full_tournament`).
+
+    Wrapping `build_agent` in a function that lives *in this module* is what makes
+    the `ml` factory resolvable inside a spawned worker: when the worker unpickles
+    a `partial(_build_agent, ...)` it imports this module, whose top-level
+    `import tichu_inference.ml_agent` registers `MLAgent`. (The baselines
+    self-register on the `tichu_ml` package import.) Routing through
+    `partial(build_agent, ...)` directly would only import `tichu_ml.registry` in
+    the worker, leaving `ml` unregistered — `build_agent` would then `KeyError`
+    inside the Pool initializer and deadlock the run."""
+    return build_agent(factory, **kwargs)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,36 +82,45 @@ def main(argv: list[str] | None = None) -> int:
     if config_copy.resolve() != config_path.resolve():
         shutil.copy(config_path, config_copy)
 
-    agents = {
-        spec["name"]: build_agent(spec["factory"], **spec.get("kwargs", {}))
+    # Builder callables (name -> zero-arg factory). `partial` captures each
+    # agent's factory + kwargs so a parallel worker can rebuild it from scratch
+    # (torch models do not pickle/fork cleanly). The serial path just invokes
+    # them once. `build_agent` is module-level, so the partials are picklable
+    # for spawn-based multiprocessing on Windows.
+    agent_builders = {
+        spec["name"]: partial(_build_agent, spec["factory"], **spec.get("kwargs", {}))
         for spec in config["agents"]
     }
 
     if args.mode == "tournament":
-        return _run_tournament_mode(agents, config, output_path)
+        return _run_tournament_mode(agent_builders, config, output_path)
     if args.mode == "move_prediction":
         if not args.held_out:
             p.error("--mode move_prediction requires --held-out DIR")
         return _run_move_prediction_mode(
-            agents, Path(args.held_out), config, output_path
+            agent_builders, Path(args.held_out), config, output_path
         )
     raise AssertionError(f"unknown mode: {args.mode}")
 
 
-def _run_tournament_mode(agents, config, output_path: Path) -> int:
+def _run_tournament_mode(agent_builders, config, output_path: Path) -> int:
     variant = config.get("variant", "full_strength")
     pool_path = Path(config["starting_position_pool"])
     n_cap = config.get("n_deals")
     bootstrap_iters = int(config.get("bootstrap_iters", 1000))
     seed = int(config.get("seed", 0))
+    workers = int(config.get("workers", 1))
 
     if variant == "full_strength":
         positions = load_full_position_pool(pool_path)
         positions = positions[: int(n_cap)] if n_cap is not None else positions
         result = run_full_tournament(
-            agents, positions, bootstrap_iters=bootstrap_iters, seed=seed
+            agent_builders, positions,
+            bootstrap_iters=bootstrap_iters, seed=seed, workers=workers,
         )
     elif variant == "play_strength":
+        # Play-strength is serial-only; build the agents once up front.
+        agents = {name: build() for name, build in agent_builders.items()}
         deals = load_starting_position_pool(pool_path)
         deals = deals[: int(n_cap)] if n_cap is not None else deals
         result = run_tournament(
@@ -109,11 +133,12 @@ def _run_tournament_mode(agents, config, output_path: Path) -> int:
         )
 
     _write_matrix(result, output_path)
-    _pretty_print(result, sorted(agents.keys()))
+    _pretty_print(result, sorted(agent_builders.keys()))
     return 0
 
 
-def _run_move_prediction_mode(agents, held_out_dir: Path, config, output_path: Path) -> int:
+def _run_move_prediction_mode(agent_builders, held_out_dir: Path, config, output_path: Path) -> int:
+    agents = {name: build() for name, build in agent_builders.items()}
     games = []
     for path in sorted(held_out_dir.glob("*.tch")):
         games.append(parse_tch(path.read_text(encoding="utf-8"), game_id=path.stem))
