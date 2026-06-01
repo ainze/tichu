@@ -1,8 +1,8 @@
 # ADR-0006: Tournament has a play-strength variant (no Schupfen) and a full-strength variant (with Schupfen)
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0025](0025-full-strength-tournament-is-the-only-variant-and-includes-calls.md) — the Play-strength variant is retired and Full-strength now exercises the complete stack including both Call Networks.
 - **Date:** 2026-05-25
-- **Related:** [ADR-0003](0003-easy-difficulty-is-a-baseline.md)
+- **Related:** [ADR-0003](0003-easy-difficulty-is-a-baseline.md), [ADR-0025](0025-full-strength-tournament-is-the-only-variant-and-includes-calls.md)
 
 ## Context
 

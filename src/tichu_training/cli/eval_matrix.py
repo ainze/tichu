@@ -17,11 +17,12 @@ import pyarrow.parquet as pq
 import yaml
 
 from tichu_eval.starting_position_pool import load_starting_position_pool
+from tichu_eval.full_position_pool import load_full_position_pool
 from tichu_eval.move_prediction import (
     decisions_from_game,
     evaluate_move_prediction,
 )
-from tichu_eval.tournament import MatrixResult, run_tournament
+from tichu_eval.tournament import MatrixResult, run_full_tournament, run_tournament
 from tichu_ml.registry import build_agent
 from tichu_training.bsw.parser import parse_tch
 
@@ -83,15 +84,30 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_tournament_mode(agents, config, output_path: Path) -> int:
-    deals = load_starting_position_pool(Path(config["starting_position_pool"]))
-    n_deals = int(config.get("n_deals", len(deals)))
-    deals = deals[:n_deals]
-    result = run_tournament(
-        agents,
-        deals,
-        bootstrap_iters=int(config.get("bootstrap_iters", 1000)),
-        seed=int(config.get("seed", 0)),
-    )
+    variant = config.get("variant", "full_strength")
+    pool_path = Path(config["starting_position_pool"])
+    n_cap = config.get("n_deals")
+    bootstrap_iters = int(config.get("bootstrap_iters", 1000))
+    seed = int(config.get("seed", 0))
+
+    if variant == "full_strength":
+        positions = load_full_position_pool(pool_path)
+        positions = positions[: int(n_cap)] if n_cap is not None else positions
+        result = run_full_tournament(
+            agents, positions, bootstrap_iters=bootstrap_iters, seed=seed
+        )
+    elif variant == "play_strength":
+        deals = load_starting_position_pool(pool_path)
+        deals = deals[: int(n_cap)] if n_cap is not None else deals
+        result = run_tournament(
+            agents, deals, bootstrap_iters=bootstrap_iters, seed=seed
+        )
+    else:
+        raise ValueError(
+            f"unknown tournament variant {variant!r} "
+            "(expected 'full_strength' or 'play_strength')"
+        )
+
     _write_matrix(result, output_path)
     _pretty_print(result, sorted(agents.keys()))
     return 0
@@ -145,6 +161,9 @@ def _write_matrix(result: MatrixResult, path: Path) -> None:
         "ci_lower": pa.array([r["ci_lower"] for r in rows], type=pa.float64()),
         "ci_upper": pa.array([r["ci_upper"] for r in rows], type=pa.float64()),
         "n": pa.array([r["n"] for r in rows], type=pa.int32()),
+        "call_bonus_mean": pa.array(
+            [r.get("call_bonus_mean", 0.0) for r in rows], type=pa.float64()
+        ),
     })
     pq.write_table(table, path)
 

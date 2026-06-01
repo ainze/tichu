@@ -16,6 +16,7 @@ import numpy as np
 
 from tichu_engine.state import GameState
 from tichu_eval.play import play_round
+from tichu_eval.play_full import play_full_round
 from tichu_ml.agent import Agent
 
 
@@ -28,6 +29,7 @@ class MatrixResult:
     _mean: dict[tuple[str, str], float] = field(default_factory=dict)
     _ci: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
     _n: dict[tuple[str, str], int] = field(default_factory=dict)
+    _call_bonus_mean: dict[tuple[str, str], float] = field(default_factory=dict)
 
     def mean(self, a: str, b: str) -> float:
         return self._mean[(a, b)]
@@ -38,6 +40,11 @@ class MatrixResult:
     def n(self, a: str, b: str) -> int:
         return self._n[(a, b)]
 
+    def call_bonus_mean(self, a: str, b: str) -> float:
+        """Mean A-minus-B Call-bonus delta per Round (Full-strength only; 0.0
+        for the play-strength matrix, where calls are never made)."""
+        return self._call_bonus_mean.get((a, b), 0.0)
+
 
 def run_tournament(
     agents: dict[str, Agent],
@@ -46,44 +53,79 @@ def run_tournament(
     bootstrap_iters: int = 1000,
     seed: int = 0,
 ) -> MatrixResult:
-    if len(agents) < 2:
-        raise ValueError(f"need at least 2 agents, got {len(agents)}")
+    """Play-strength all-vs-all matrix (no Schupfen, calls declined)."""
+    def pair_fn(a: str, b: str):
+        deltas = _play_pair(agents[a], agents[b], deals, label=f"{a} vs {b}")
+        return deltas, None
+
+    return _run_matrix(sorted(agents.keys()), pair_fn, bootstrap_iters, seed, len(deals))
+
+
+def run_full_tournament(
+    agents: dict[str, Agent],
+    positions: list,
+    *,
+    bootstrap_iters: int = 1000,
+    seed: int = 0,
+) -> MatrixResult:
+    """Full-strength all-vs-all matrix: the complete stack (Grand-Tichu ->
+    Schupfen -> Tichu -> Play), reporting the total delta plus the Call-bonus
+    breakdown per pair. See ADR-0025."""
+    def pair_fn(a: str, b: str):
+        return _play_pair_full(agents[a], agents[b], positions, label=f"{a} vs {b}")
+
+    return _run_matrix(sorted(agents.keys()), pair_fn, bootstrap_iters, seed, len(positions))
+
+
+def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -> MatrixResult:
+    if len(names) < 2:
+        raise ValueError(f"need at least 2 agents, got {len(names)}")
     rng = np.random.default_rng(seed)
-    names = sorted(agents.keys())
     result = MatrixResult(rows=[])
 
     pairs = list(itertools.combinations(names, 2))
     for pair_i, (a, b) in enumerate(pairs, start=1):
         log.info(
-            "pair %d/%d: %s vs %s -- %d deals x2 (seat-swap)",
-            pair_i, len(pairs), a, b, len(deals),
+            "pair %d/%d: %s vs %s -- %d positions x2 (seat-swap)",
+            pair_i, len(pairs), a, b, n_units,
         )
-        deltas = _play_pair(agents[a], agents[b], deals, label=f"{a} vs {b}")
+        deltas, cb_deltas = pair_fn(a, b)
         mean_ab, lo, hi = _bootstrap_ci(deltas, bootstrap_iters, rng)
-        log.info("  done: %s vs %s mean delta=%+.1f (n=%d)", a, b, mean_ab, len(deltas))
         n_obs = len(deltas)
+        cb_mean = float(cb_deltas.mean()) if cb_deltas is not None and len(cb_deltas) else 0.0
+        log.info(
+            "  done: %s vs %s mean delta=%+.1f (call-bonus %+.1f, n=%d)",
+            a, b, mean_ab, cb_mean, n_obs,
+        )
         result._mean[(a, b)] = mean_ab
         result._mean[(b, a)] = -mean_ab
         result._ci[(a, b)] = (lo, hi)
         result._ci[(b, a)] = (-hi, -lo)
         result._n[(a, b)] = n_obs
         result._n[(b, a)] = n_obs
+        if cb_deltas is not None:
+            result._call_bonus_mean[(a, b)] = cb_mean
+            result._call_bonus_mean[(b, a)] = -cb_mean
         result.rows.append({
             "agent_a": a, "agent_b": b,
             "mean": mean_ab, "ci_lower": lo, "ci_upper": hi, "n": n_obs,
+            "call_bonus_mean": cb_mean,
         })
         result.rows.append({
             "agent_a": b, "agent_b": a,
             "mean": -mean_ab, "ci_lower": -hi, "ci_upper": -lo, "n": n_obs,
+            "call_bonus_mean": -cb_mean,
         })
 
     for name in names:
         result._mean[(name, name)] = 0.0
         result._ci[(name, name)] = (0.0, 0.0)
         result._n[(name, name)] = 0
+        result._call_bonus_mean[(name, name)] = 0.0
         result.rows.append({
             "agent_a": name, "agent_b": name,
             "mean": 0.0, "ci_lower": 0.0, "ci_upper": 0.0, "n": 0,
+            "call_bonus_mean": 0.0,
         })
     return result
 
@@ -109,6 +151,29 @@ def _play_pair(
         if i % tick == 0 or i == n:
             log.info("  [%s] %d/%d deals", label, i, n)
     return np.array(deltas, dtype=np.float64)
+
+
+def _play_pair_full(
+    agent_a: Agent, agent_b: Agent, positions: list, *, label: str = "",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Full-strength seat-swap over the Pool. Returns (total deltas, call-bonus
+    deltas), both A-minus-B, with 2N entries each."""
+    n = len(positions)
+    tick = max(1, n // 10)
+    totals: list[float] = []
+    bonuses: list[float] = []
+    for i, pos in enumerate(positions, start=1):
+        # Arrangement 1: A on team 0 (seats 0, 2), B on team 1 (seats 1, 3).
+        r1 = play_full_round((agent_a, agent_b, agent_a, agent_b), pos.state, pos.grand_prefixes)
+        totals.append(float(r1.total[0] - r1.total[1]))
+        bonuses.append(float(r1.call_bonus[0] - r1.call_bonus[1]))
+        # Arrangement 2: rotated — A on team 1, B on team 0.
+        r2 = play_full_round((agent_b, agent_a, agent_b, agent_a), pos.state, pos.grand_prefixes)
+        totals.append(float(r2.total[1] - r2.total[0]))
+        bonuses.append(float(r2.call_bonus[1] - r2.call_bonus[0]))
+        if i % tick == 0 or i == n:
+            log.info("  [%s] %d/%d positions", label, i, n)
+    return np.array(totals, dtype=np.float64), np.array(bonuses, dtype=np.float64)
 
 
 def _bootstrap_ci(
