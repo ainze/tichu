@@ -6,6 +6,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from tichu_eval.starting_position_pool import generate_starting_position_pool, save_starting_position_pool
+from tichu_eval.full_position_pool import generate_full_position_pool, save_full_position_pool
 from tichu_training.cli.eval_matrix import main
 
 
@@ -17,6 +18,7 @@ def _write_pool(tmp_path: Path, *, n: int = 10) -> Path:
 
 def _write_config(tmp_path: Path, *, pool_path: Path, n_deals: int, output: Path) -> Path:
     config = textwrap.dedent(f"""\
+        variant: play_strength
         starting_position_pool: {pool_path.as_posix()}
         n_deals: {n_deals}
         agents:
@@ -58,6 +60,39 @@ def test_smoke_runs_and_rule_beats_random(tmp_path, capsys):
 
     captured = capsys.readouterr().out
     assert "rule" in captured and "random" in captured
+
+
+def test_full_strength_is_the_default_and_writes_call_bonus_column(tmp_path, capsys):
+    pool_path = tmp_path / "full_pool.parquet"
+    save_full_position_pool(generate_full_position_pool(seed=0, n=20), pool_path)
+    output = tmp_path / "matrix.parquet"
+    config = textwrap.dedent(f"""\
+        starting_position_pool: {pool_path.as_posix()}
+        n_deals: 20
+        agents:
+          - name: random
+            factory: random
+            kwargs:
+              seed: 0
+          - name: rule
+            factory: rule
+            kwargs: {{}}
+        bootstrap_iters: 50
+        seed: 0
+        output: {output.as_posix()}
+    """)
+    cfg = tmp_path / "eval_full.yaml"
+    cfg.write_text(config, encoding="utf-8")
+
+    assert main(["--config", str(cfg)]) == 0
+    table = pq.read_table(output)
+    cols = set(table.column_names)
+    assert "call_bonus_mean" in cols
+    rule_vs_random = [
+        row for row in table.to_pylist()
+        if row["agent_a"] == "rule" and row["agent_b"] == "random"
+    ]
+    assert rule_vs_random and rule_vs_random[0]["mean"] > 0
 
 
 def test_determinism_two_runs_produce_identical_rows(tmp_path):

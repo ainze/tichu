@@ -292,16 +292,20 @@ At serve time the ML Agent feeds the **Neutral Skill Decile** (not Decile 9). Se
 ### Eval terms
 
 **Starting Position**:
-A single post-Schupfen `GameState` used as a Tournament starting point. Synthetic — produced by `deal_initial_state(seed + i)`. Schupfen is intentionally skipped so the Tournament measures play strength, not Schupfen heuristics.
-_Avoid_: deal (noun), starting deal, hand (noun).
+A single **pre-Schupfen, deal-time** `GameState` used as a Tournament starting point — all 56 cards dealt 14-per-player in **deal order**, `current_player = 0`, a `SchupfenPending` pending decision, no points or trick state. Produced by `deal_for_schupfen(seed + i)`. The deal order is preserved so the **Grand-Tichu Prefix** (each seat's first 8 cards) is a deterministic, genuine prefix of the same 14 cards that go on to Schupfen and Play in that round. Earlier the Tournament started post-Schupfen (`deal_initial_state`, Schupfen skipped) to isolate play strength; that variant is retired now that every Tournament is Full-strength.
+_Avoid_: deal (noun), starting deal, hand (noun), post-schupfen position.
+
+**Grand-Tichu Prefix**:
+The first 8 cards (in deal order) of a seat's 14-card Starting-Position hand — the synthetic `(8,8,8,8)` deal-time state on which the Grand-Tichu Call is decided, matching the only hand size the Grand-Tichu Call Network ever saw in training. Not a detached hand: it is a real prefix of the 14 cards that seat then Schupfens and Plays in the same round. The 8/6 split point is fixed by deck-deal order (a shuffle has no other canonical split).
+_Avoid_: pre-deal hand (that is the BSW-corpus term `pre_deal_hands`), first-eight.
 
 **Starting-Position Pool** (or "Pool"):
-The fixed-seeded list of Starting Positions used by all Tournaments. Identity is exactly `(seed, n)` — reproducible across runs and machines.
+The fixed-seeded list of Starting Positions used by all Tournaments. Identity is exactly `(seed, n)` — reproducible across runs and machines. Stores each seat's 14-card hand in deal order so the Grand-Tichu Prefix is reconstructible.
 _Avoid_: deal pool, deal set.
 
 **Tournament**:
-All-vs-all match orchestration over a Pool: every unordered pair of Agents plays every Starting Position twice (Seat-Swap), yielding per-pair score deltas with bootstrap 95% CI. Two variants: **Play-strength** (Schupfen skipped) and **Full-strength** (Schupfen played). See [ADR-0006](docs/adr/0006-tournament-play-strength-vs-full-strength.md).
-_Avoid_: matrix run, eval matrix.
+All-vs-all match orchestration over a Pool: every unordered pair of Agents plays every Starting Position twice (Seat-Swap), yielding per-pair score deltas with bootstrap 95% CI. One variant only — **Full-strength**: the complete product stack (Grand-Tichu Call → Schupfen → Tichu Call → Play → Wish → Dragon), each Decision served by the Agent's own networks. (Historically there were two variants, Play-strength and Full-strength, per ADR-0006; the Play-strength variant — Schupfen skipped, calls declined — was retired in favour of measuring true end-to-end product strength. Calls, ±200 for Grand-Tichu, are the highest-variance Decisions and silently declining them is a systematic bias, not a neutral isolation.) See [ADR-0025](docs/adr/0025-full-strength-tournament-is-the-only-variant-and-includes-calls.md) (supersedes [ADR-0006](docs/adr/0006-tournament-play-strength-vs-full-strength.md)).
+_Avoid_: matrix run, eval matrix, "play-strength tournament" (retired), "full-stack tournament" (the variant is **Full-strength**).
 
 **Seat-Swap** (or "Seat-Swap Variance Reduction"):
 The technique of playing each Starting Position twice between two Agents A and B — once with A in team-0 seats, once with B in team-0 seats — to cancel the team-assignment advantage of the Mahjong holder sitting at a fixed seat.
@@ -416,4 +420,5 @@ _Avoid_: test set, eval set, held-out pool.
 - "parquet schema version is the same as featurizer version" — resolved: they are independent. `featurizer_version` versions the **Featurizer** (`featurize` function output) and nothing else. Parquet schema additions (e.g., `game_won` in v3) bump the **directory suffix** (`parquet_<scale>_v<N>`); featurizer_version is left untouched. Readers detect schema features by column-presence, not by string comparison. See [ADR-0013](docs/adr/0013-parquet-schema-versioned-by-directory.md).
 - "game" used loosely for either a `ParsedGame` or a Tichu Game-to-1000 — resolved: a **Game** is a sequence of Rounds played to 1000; a `ParsedGame` is a Game iff at least one team's cumulative `ergebnis` reaches ≥ 1000 (a **Complete Game**). The remainder are **Incomplete Sessions** — included in BC labels (round-level data is intact) but excluded from the `"game"` Value Target.
 - "schupfen is a BC head with `HEAD_LOGIT_DIMS['schupfen']=3`" — resolved: schupfen is a **standalone Schupfen Network**, same pattern as Call Networks. The 3-output stub in `bc/heads.py` is removed; the BC model now has three heads (play, wish, dragon_assignment). The `schupfen_00000.parquet` shard feeds `train_schupfen`, not `train_bc`. See [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md).
+- "version" used loosely for both Featurizer Version and a model's training-run identity — resolved: a Tournament agent may mix networks from **different training runs / scales / epochs / checkpoints** freely, but **only at a single Featurizer Version**. Every export an MLAgent loads is asserted against the harness's global `FEATURIZER_VERSION` (`load_exported`), so featurizer-v3 and featurizer-v5 exports cannot coexist in one process — cross-Featurizer-Version comparison is two separate runs, not one matrix. See [ADR-0025](docs/adr/0025-full-strength-tournament-is-the-only-variant-and-includes-calls.md).
 - "Tichu Call sees no Trick or public-play history" (ADR-0007 §rationale 1) — resolved: that's the upper bound at deal-time, not the actual featurise state. **Tichu Call featurises at the seat's first non-Pass Play state** (per-seat, symmetric across positives and negatives). May include up to ~3 prior Plays of public history. Grand-Tichu still featurises at the synthetic deal-time 8-card state. See [ADR-0018](docs/adr/0018-tichu-call-featurises-at-first-non-pass-play.md).
