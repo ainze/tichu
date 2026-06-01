@@ -24,6 +24,11 @@ from tichu_ml.agent import Agent
 
 log = logging.getLogger(__name__)
 
+# Target Position count per parallel task when a progress bar is attached. Small
+# enough that the bar advances many times per pair, large enough that per-chunk
+# pickling/IPC stays negligible (each chunk returns only a short list of floats).
+_PROGRESS_CHUNK = 64
+
 
 @dataclass
 class MatrixResult:
@@ -70,6 +75,7 @@ def run_full_tournament(
     bootstrap_iters: int = 1000,
     seed: int = 0,
     workers: int = 1,
+    progress: Callable[[int], None] | None = None,
 ) -> MatrixResult:
     """Full-strength all-vs-all matrix: the complete stack (Grand-Tichu ->
     Schupfen -> Tichu -> Play), reporting the total delta plus the Call-bonus
@@ -102,17 +108,19 @@ def run_full_tournament(
         agents = {name: agent_builders[name]() for name in names}
 
         def pair_fn(a: str, b: str):
-            return _play_pair_full(agents[a], agents[b], positions, label=f"{a} vs {b}")
+            return _play_pair_full(
+                agents[a], agents[b], positions, label=f"{a} vs {b}", progress=progress
+            )
 
         return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions))
 
     return _run_full_tournament_parallel(
-        names, agent_builders, positions, bootstrap_iters, seed, workers
+        names, agent_builders, positions, bootstrap_iters, seed, workers, progress
     )
 
 
 def _run_full_tournament_parallel(
-    names, agent_builders, positions, bootstrap_iters, seed, workers,
+    names, agent_builders, positions, bootstrap_iters, seed, workers, progress=None,
 ) -> MatrixResult:
     """Parallel full-strength matrix. Each worker rebuilds every agent once (from
     the builders) and caches the Pool of Positions; per-pair work is dispatched as
@@ -129,7 +137,14 @@ def _run_full_tournament_parallel(
     for name in names:
         agent_builders[name]()
 
-    bounds = _chunk_bounds(len(positions), workers)
+    # With a progress bar attached, cap chunk size so the bar advances steadily
+    # through each pair instead of jumping when the few worker-sized chunks all
+    # finish together at the end. Without a bar there is nothing to smooth, so the
+    # coarse worker-sized chunking (less IPC) stands.
+    bounds = _chunk_bounds(
+        len(positions), workers,
+        max_chunk=_PROGRESS_CHUNK if progress is not None else None,
+    )
     ctx = mp.get_context("spawn")  # spawn on every platform; workers must rebuild.
     with ctx.Pool(
         processes=workers,
@@ -137,9 +152,19 @@ def _run_full_tournament_parallel(
         initargs=(agent_builders, positions),
     ) as pool:
         def pair_fn(a: str, b: str):
-            log.info("  [%s vs %s] dispatching %d chunks x2 (seat-swap)", a, b, len(bounds))
+            log.debug("  [%s vs %s] dispatching %d chunks x2 (seat-swap)", a, b, len(bounds))
+            # `callback` fires on the Pool's result-handler thread as each chunk
+            # lands (completion order), advancing the bar by that chunk's Position
+            # count. Result assembly below still reads `.get()` in submission order,
+            # so the determinism guarantee is untouched — the bar is a side channel.
             pending = [
-                pool.apply_async(_worker_play_chunk, (a, b, start, end))
+                pool.apply_async(
+                    _worker_play_chunk, (a, b, start, end),
+                    callback=(
+                        None if progress is None
+                        else (lambda _res, n=end - start: progress(n))
+                    ),
+                )
                 for start, end in bounds
             ]
             totals: list[float] = []
@@ -156,12 +181,22 @@ def _run_full_tournament_parallel(
         return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions))
 
 
-def _chunk_bounds(n: int, workers: int) -> list[tuple[int, int]]:
-    """Split [0, n) into min(workers, n) contiguous, near-equal, non-empty
-    half-open ranges. Concatenating their results in order reproduces 0..n-1."""
+def _chunk_bounds(
+    n: int, workers: int, *, max_chunk: int | None = None
+) -> list[tuple[int, int]]:
+    """Split [0, n) into contiguous, near-equal, non-empty half-open ranges.
+    Concatenating their results in order reproduces 0..n-1.
+
+    Without `max_chunk` there are exactly min(workers, n) chunks (one per worker).
+    With `max_chunk` set, the count is raised to whatever it takes to keep every
+    chunk no larger than `max_chunk` — at least `workers` chunks (so all cores
+    stay busy), at most `n` (no empty chunks). More, smaller chunks make the
+    progress bar advance steadily through a pair rather than jumping at its end."""
     if n == 0:
         return []
     k = min(workers, n)
+    if max_chunk is not None:
+        k = min(n, max(k, -(-n // max_chunk)))  # ceil(n / max_chunk), >= workers
     base, extra = divmod(n, k)
     bounds: list[tuple[int, int]] = []
     start = 0
@@ -289,9 +324,12 @@ def _play_pair(
 
 def _play_pair_full(
     agent_a: Agent, agent_b: Agent, positions: list, *, label: str = "",
+    progress: Callable[[int], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Full-strength seat-swap over the Pool. Returns (total deltas, call-bonus
-    deltas), both A-minus-B, with 2N entries each."""
+    deltas), both A-minus-B, with 2N entries each. `progress`, if given, is called
+    with 1 per completed Position so a caller can drive a bar (see
+    `run_full_tournament`)."""
     n = len(positions)
     tick = max(1, n // 10)
     totals: list[float] = []
@@ -300,8 +338,10 @@ def _play_pair_full(
         t0, b0, t1, b1 = _play_one_position(agent_a, agent_b, pos)
         totals.extend((t0, t1))
         bonuses.extend((b0, b1))
+        if progress is not None:
+            progress(1)
         if i % tick == 0 or i == n:
-            log.info("  [%s] %d/%d positions", label, i, n)
+            log.debug("  [%s] %d/%d positions", label, i, n)
     return np.array(totals, dtype=np.float64), np.array(bonuses, dtype=np.float64)
 
 

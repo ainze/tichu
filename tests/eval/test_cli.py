@@ -279,6 +279,65 @@ def test_full_strength_parallel_cli_rebuilds_ml_agents_in_workers(tmp_path):
     assert abs(parallel["mean"] - serial["mean"]) <= ci_width  # statistically identical
 
 
+def _full_cfg(tmp_path: Path, *, output: Path, n: int = 6) -> Path:
+    pool_path = tmp_path / "full_pool.parquet"
+    save_full_position_pool(generate_full_position_pool(seed=0, n=n), pool_path)
+    config = textwrap.dedent(f"""\
+        starting_position_pool: {pool_path.as_posix()}
+        n_deals: {n}
+        agents:
+          - name: rule
+            factory: rule
+            kwargs: {{}}
+          - name: rule2
+            factory: rule
+            kwargs: {{}}
+        bootstrap_iters: 20
+        seed: 0
+        output: {output.as_posix()}
+    """)
+    cfg = tmp_path / "eval_full.yaml"
+    cfg.write_text(config, encoding="utf-8")
+    return cfg
+
+
+def test_progress_bar_callback_threaded_by_default(tmp_path, monkeypatch):
+    """By default the CLI drives a progress bar: it passes a callable `progress`
+    hook into run_full_tournament (the bar's own .update). The visual bar is
+    verified separately; here we only assert the seam is wired."""
+    import tichu_training.cli.eval_matrix as cli
+
+    cfg = _full_cfg(tmp_path, output=tmp_path / "matrix.parquet")
+    captured = {}
+    real = cli.run_full_tournament
+
+    def spy(builders, positions, **kwargs):
+        captured["progress"] = kwargs.get("progress")
+        return real(builders, positions, **kwargs)
+
+    monkeypatch.setattr(cli, "run_full_tournament", spy)
+    assert main(["--config", str(cfg)]) == 0
+    assert callable(captured["progress"])
+
+
+def test_no_progress_flag_disables_the_bar(tmp_path, monkeypatch):
+    """`--no-progress` keeps piped/cron logs clean: no bar is created and the
+    library is called with progress=None."""
+    import tichu_training.cli.eval_matrix as cli
+
+    cfg = _full_cfg(tmp_path, output=tmp_path / "matrix.parquet")
+    captured = {}
+    real = cli.run_full_tournament
+
+    def spy(builders, positions, **kwargs):
+        captured["progress"] = kwargs.get("progress")
+        return real(builders, positions, **kwargs)
+
+    monkeypatch.setattr(cli, "run_full_tournament", spy)
+    assert main(["--config", str(cfg), "--no-progress"]) == 0
+    assert captured["progress"] is None
+
+
 def test_config_copied_into_output_run_dir(tmp_path):
     pool_path = _write_pool(tmp_path, n=4)
     output = tmp_path / "out" / "matrix.parquet"

@@ -7,6 +7,7 @@ Two modes:
 
 import argparse
 import csv
+import itertools
 import logging
 import shutil
 import sys
@@ -16,6 +17,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from tichu_eval.starting_position_pool import load_starting_position_pool
 from tichu_eval.full_position_pool import load_full_position_pool
@@ -65,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory of .tch files (required for --mode move_prediction)",
     )
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument(
+        "--progress", action=argparse.BooleanOptionalAction, default=True,
+        help="Show a tqdm progress bar over the tournament "
+             "(auto-disabled when stderr is not a TTY). Use --no-progress for "
+             "clean piped/cron logs.",
+    )
     args = p.parse_args(argv)
 
     logging.basicConfig(
@@ -93,7 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     if args.mode == "tournament":
-        return _run_tournament_mode(agent_builders, config, output_path)
+        return _run_tournament_mode(
+            agent_builders, config, output_path, show_progress=args.progress
+        )
     if args.mode == "move_prediction":
         if not args.held_out:
             p.error("--mode move_prediction requires --held-out DIR")
@@ -103,7 +114,9 @@ def main(argv: list[str] | None = None) -> int:
     raise AssertionError(f"unknown mode: {args.mode}")
 
 
-def _run_tournament_mode(agent_builders, config, output_path: Path) -> int:
+def _run_tournament_mode(
+    agent_builders, config, output_path: Path, *, show_progress: bool = True
+) -> int:
     variant = config.get("variant", "full_strength")
     pool_path = Path(config["starting_position_pool"])
     n_cap = config.get("n_deals")
@@ -114,10 +127,24 @@ def _run_tournament_mode(agent_builders, config, output_path: Path) -> int:
     if variant == "full_strength":
         positions = load_full_position_pool(pool_path)
         positions = positions[: int(n_cap)] if n_cap is not None else positions
-        result = run_full_tournament(
-            agent_builders, positions,
-            bootstrap_iters=bootstrap_iters, seed=seed, workers=workers,
-        )
+        # One matrix-wide bar over every unit of work: each unordered agent pair
+        # plays every Position once. The tournament reports progress through the
+        # `progress` hook (one tick per Position); `logging_redirect_tqdm` keeps
+        # the surviving INFO lines from garbling the bar's \r line. `--no-progress`
+        # (or a non-TTY stderr) skips the bar entirely and passes progress=None.
+        n_pairs = len(list(itertools.combinations(sorted(agent_builders), 2)))
+        total_units = n_pairs * len(positions)
+        # disable=None lets tqdm auto-suppress the bar on a non-TTY stderr
+        # (piped/cron logs stay clean); --no-progress forces it off everywhere.
+        with logging_redirect_tqdm(), tqdm(
+            total=total_units, unit="pos", desc="tournament",
+            dynamic_ncols=True, disable=(True if not show_progress else None),
+        ) as bar:
+            result = run_full_tournament(
+                agent_builders, positions,
+                bootstrap_iters=bootstrap_iters, seed=seed, workers=workers,
+                progress=(None if not show_progress else bar.update),
+            )
     elif variant == "play_strength":
         # Play-strength is serial-only; build the agents once up front.
         agents = {name: build() for name, build in agent_builders.items()}
