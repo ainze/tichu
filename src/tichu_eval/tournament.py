@@ -10,7 +10,9 @@ with a percentile bootstrap 95% CI computed from the per-deal deltas.
 
 import itertools
 import logging
+import multiprocessing as mp
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 
@@ -62,19 +64,151 @@ def run_tournament(
 
 
 def run_full_tournament(
-    agents: dict[str, Agent],
+    agent_builders: dict[str, Callable[[], Agent]],
     positions: list,
     *,
     bootstrap_iters: int = 1000,
     seed: int = 0,
+    workers: int = 1,
 ) -> MatrixResult:
     """Full-strength all-vs-all matrix: the complete stack (Grand-Tichu ->
     Schupfen -> Tichu -> Play), reporting the total delta plus the Call-bonus
-    breakdown per pair. See ADR-0025."""
-    def pair_fn(a: str, b: str):
-        return _play_pair_full(agents[a], agents[b], positions, label=f"{a} vs {b}")
+    breakdown per pair. See ADR-0025.
 
-    return _run_matrix(sorted(agents.keys()), pair_fn, bootstrap_iters, seed, len(positions))
+    Agents are supplied as zero-argument **builder callables** (name -> builder)
+    rather than live instances, so the same recipe can be rebuilt independently
+    inside parallel workers (torch models do not pickle/fork cleanly). For the
+    serial path the builders are simply invoked once up front.
+
+    `workers` (default 1) sets the size of a process Pool that the Pool of
+    Positions is chunked across. The play loop is embarrassingly parallel — every
+    Position is independent — chunk results are stitched back in Position order,
+    and the bootstrap is still drawn on the main process in pair order. So the
+    *orchestration* is deterministic, and for **torch-free deterministic agents**
+    (RuleAgent) a parallel run is bit-identical to the serial run for the same
+    `seed`. Two caveats, both pre-existing and below the bootstrap CI:
+      * **ML agents** are not bit-reproducible across the process boundary —
+        identical inputs yield bit-different torch CPU logits in another process,
+        occasionally flipping a near-tie greedy argmax. Parallel and serial then
+        differ by torch float noise (~0.1% of the mean), not by anything the
+        parallelization introduces.
+      * **Stateful agents** (e.g. RandomAgent, which threads one RNG through the
+        whole run) are reproducible per run-config but NOT stream-equal to serial
+        under `workers > 1`, because each worker rebuilds its agents afresh.
+    """
+    names = sorted(agent_builders)
+
+    if workers <= 1:
+        agents = {name: agent_builders[name]() for name in names}
+
+        def pair_fn(a: str, b: str):
+            return _play_pair_full(agents[a], agents[b], positions, label=f"{a} vs {b}")
+
+        return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions))
+
+    return _run_full_tournament_parallel(
+        names, agent_builders, positions, bootstrap_iters, seed, workers
+    )
+
+
+def _run_full_tournament_parallel(
+    names, agent_builders, positions, bootstrap_iters, seed, workers,
+) -> MatrixResult:
+    """Parallel full-strength matrix. Each worker rebuilds every agent once (from
+    the builders) and caches the Pool of Positions; per-pair work is dispatched as
+    a handful of contiguous Position-index chunks (NOT one task per Round — that
+    would drown in pickling/IPC). Chunk results are stitched back in Position
+    order so the delta arrays — and therefore the bootstrap — match the serial
+    run exactly."""
+    # Fail fast: build every agent once here so a broken builder (unknown
+    # factory, missing checkpoint) raises a clear error on the main process
+    # rather than from inside the Pool initializer — where an exception silently
+    # deadlocks the run as multiprocessing endlessly respawns the dead worker.
+    # The instances are discarded; workers rebuild their own (torch models do not
+    # pickle/fork cleanly).
+    for name in names:
+        agent_builders[name]()
+
+    bounds = _chunk_bounds(len(positions), workers)
+    ctx = mp.get_context("spawn")  # spawn on every platform; workers must rebuild.
+    with ctx.Pool(
+        processes=workers,
+        initializer=_worker_init,
+        initargs=(agent_builders, positions),
+    ) as pool:
+        def pair_fn(a: str, b: str):
+            log.info("  [%s vs %s] dispatching %d chunks x2 (seat-swap)", a, b, len(bounds))
+            pending = [
+                pool.apply_async(_worker_play_chunk, (a, b, start, end))
+                for start, end in bounds
+            ]
+            totals: list[float] = []
+            bonuses: list[float] = []
+            for ar in pending:  # chunk order == Position order == serial order.
+                chunk_totals, chunk_bonuses = ar.get()
+                totals.extend(chunk_totals)
+                bonuses.extend(chunk_bonuses)
+            return (
+                np.array(totals, dtype=np.float64),
+                np.array(bonuses, dtype=np.float64),
+            )
+
+        return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions))
+
+
+def _chunk_bounds(n: int, workers: int) -> list[tuple[int, int]]:
+    """Split [0, n) into min(workers, n) contiguous, near-equal, non-empty
+    half-open ranges. Concatenating their results in order reproduces 0..n-1."""
+    if n == 0:
+        return []
+    k = min(workers, n)
+    base, extra = divmod(n, k)
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for i in range(k):
+        size = base + (1 if i < extra else 0)
+        bounds.append((start, start + size))
+        start += size
+    return bounds
+
+
+# --- Worker-process state (one set per spawned process) ----------------------
+# Populated once by `_worker_init`; read by `_worker_play_chunk`. Module-level so
+# both are importable under spawn, where the child re-imports this module.
+_WORKER_AGENTS: dict[str, Agent] = {}
+_WORKER_POSITIONS: list = []
+
+
+def _worker_init(agent_builders: dict[str, Callable[[], Agent]], positions: list) -> None:
+    global _WORKER_AGENTS, _WORKER_POSITIONS
+    # Pin torch (if present) to one thread per worker so W processes don't each
+    # spin up W intra-op threads and oversubscribe the cores. Guarded: the
+    # baseline agents have no torch dependency.
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except Exception:  # pragma: no cover - torch always present in the real eval
+        pass
+    _WORKER_AGENTS = {name: build() for name, build in agent_builders.items()}
+    _WORKER_POSITIONS = positions
+
+
+def _worker_play_chunk(
+    a_name: str, b_name: str, start: int, end: int
+) -> tuple[list[float], list[float]]:
+    """Play one pair over the Position slice [start, end) using this worker's
+    rebuilt agents and cached Pool. Returns (total deltas, call-bonus deltas) in
+    Position order, two entries per Position (seat-swap)."""
+    agent_a = _WORKER_AGENTS[a_name]
+    agent_b = _WORKER_AGENTS[b_name]
+    totals: list[float] = []
+    bonuses: list[float] = []
+    for pos in _WORKER_POSITIONS[start:end]:
+        t0, b0, t1, b1 = _play_one_position(agent_a, agent_b, pos)
+        totals.extend((t0, t1))
+        bonuses.extend((b0, b1))
+    return totals, bonuses
 
 
 def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -> MatrixResult:
@@ -163,17 +297,33 @@ def _play_pair_full(
     totals: list[float] = []
     bonuses: list[float] = []
     for i, pos in enumerate(positions, start=1):
-        # Arrangement 1: A on team 0 (seats 0, 2), B on team 1 (seats 1, 3).
-        r1 = play_full_round((agent_a, agent_b, agent_a, agent_b), pos.state, pos.grand_prefixes)
-        totals.append(float(r1.total[0] - r1.total[1]))
-        bonuses.append(float(r1.call_bonus[0] - r1.call_bonus[1]))
-        # Arrangement 2: rotated — A on team 1, B on team 0.
-        r2 = play_full_round((agent_b, agent_a, agent_b, agent_a), pos.state, pos.grand_prefixes)
-        totals.append(float(r2.total[1] - r2.total[0]))
-        bonuses.append(float(r2.call_bonus[1] - r2.call_bonus[0]))
+        t0, b0, t1, b1 = _play_one_position(agent_a, agent_b, pos)
+        totals.extend((t0, t1))
+        bonuses.extend((b0, b1))
         if i % tick == 0 or i == n:
             log.info("  [%s] %d/%d positions", label, i, n)
     return np.array(totals, dtype=np.float64), np.array(bonuses, dtype=np.float64)
+
+
+def _play_one_position(agent_a: Agent, agent_b: Agent, pos) -> tuple[float, float, float, float]:
+    """One Full-strength Starting Position played twice with seat-swap.
+
+    Returns ``(total_1, bonus_1, total_2, bonus_2)`` — the A-minus-B total and
+    Call-bonus deltas for arrangement 1 (A on team 0) and arrangement 2 (A on
+    team 1). Pure given deterministic agents: the result depends only on `pos`
+    and the agents, never on any previously played position. That purity is what
+    lets the Pool replay arbitrary position chunks and still reproduce the serial
+    matrix bit-for-bit (see `run_full_tournament(..., workers=...)`)."""
+    # Arrangement 1: A on team 0 (seats 0, 2), B on team 1 (seats 1, 3).
+    r1 = play_full_round((agent_a, agent_b, agent_a, agent_b), pos.state, pos.grand_prefixes)
+    # Arrangement 2: rotated — A on team 1, B on team 0.
+    r2 = play_full_round((agent_b, agent_a, agent_b, agent_a), pos.state, pos.grand_prefixes)
+    return (
+        float(r1.total[0] - r1.total[1]),
+        float(r1.call_bonus[0] - r1.call_bonus[1]),
+        float(r2.total[1] - r2.total[0]),
+        float(r2.call_bonus[1] - r2.call_bonus[0]),
+    )
 
 
 def _bootstrap_ci(

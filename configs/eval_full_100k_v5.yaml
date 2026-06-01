@@ -28,6 +28,15 @@ n_deals: 2000
 bootstrap_iters: 1000
 seed: 0
 
+# Parallel workers (process Pool). 1 = serial (default). The Pool of Positions is
+# chunked across workers; each worker rebuilds every agent from the paths below
+# and pins torch to one thread. The orchestration is deterministic, so `rule`
+# rows are bit-identical to a serial run at the same seed. `ml` rows shift by
+# torch's cross-process float noise and `random` rows by its per-worker RNG reset
+# — both far below the bootstrap CI, so compare them statistically, not bit-wise.
+# Tune to ~os.cpu_count() - 2.
+workers: 10
+
 agents:
   - name: bc_full
     factory: ml
