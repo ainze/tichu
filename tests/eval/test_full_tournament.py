@@ -82,6 +82,37 @@ def test_parallel_fails_fast_on_broken_builder():
         run_full_tournament(builders, pool, bootstrap_iters=10, seed=0, workers=2)
 
 
+def test_progress_callback_fires_once_per_position_serial():
+    """A `progress` hook lets a caller drive a bar without the library knowing
+    about tqdm. Over a serial run the increments must sum to exactly the total
+    units of work: n_pairs * n_positions (one tick per Position, both seat-swap
+    arrangements counted as that one Position)."""
+    pool = generate_full_position_pool(seed=0, n=12)
+    builders = {"caller": GrandCaller, "rule": RuleAgent}  # 1 pair
+    seen: list[int] = []
+
+    run_full_tournament(
+        builders, pool, bootstrap_iters=10, seed=0, progress=seen.append
+    )
+
+    assert sum(seen) == len(pool)  # 1 pair * 12 positions
+
+
+def test_progress_callback_total_matches_serial_under_parallel():
+    """Under workers>1 the bar must still account for every Position exactly once:
+    the increments sum to n_pairs * n_positions, the same total as serial, even
+    though they now arrive in chunk-completion order across processes."""
+    pool = generate_full_position_pool(seed=2, n=30)
+    builders = {"caller": GrandCaller, "rule": RuleAgent}  # 1 pair
+    seen: list[int] = []
+
+    run_full_tournament(
+        builders, pool, bootstrap_iters=10, seed=0, workers=4, progress=seen.append
+    )
+
+    assert sum(seen) == len(pool)
+
+
 def test_chunk_bounds_partitions_positions_contiguously():
     """Position chunks must tile [0, n) with no gaps/overlaps and never produce
     more (or empty) chunks than there are Positions — that contiguous order is
@@ -94,3 +125,21 @@ def test_chunk_bounds_partitions_positions_contiguously():
         assert bounds[0][0] == 0 and bounds[-1][1] == n
         assert all(lo < hi for lo, hi in bounds)  # no empty chunk
         assert all(bounds[i][1] == bounds[i + 1][0] for i in range(len(bounds) - 1))
+
+
+def test_chunk_bounds_max_chunk_yields_more_smaller_chunks():
+    """A `max_chunk` cap trades coarse worker-sized chunks for many smaller ones
+    so the progress bar advances throughout a pair instead of jumping at its end.
+    Still contiguous and capped in size; never fewer than `workers` chunks (so all
+    cores stay busy) and never more than `n` (no empty chunks)."""
+    # 1000 positions, 10 workers, cap 64: ~16 chunks instead of 10.
+    bounds = _chunk_bounds(1000, 10, max_chunk=64)
+    assert len(bounds) >= 10  # at least one chunk per worker
+    assert all(hi - lo <= 64 for lo, hi in bounds)  # none exceeds the cap
+    assert bounds[0][0] == 0 and bounds[-1][1] == 1000  # tiles [0, n)
+    assert all(bounds[i][1] == bounds[i + 1][0] for i in range(len(bounds) - 1))
+
+    # When n is already small the cap can't force more than `workers` chunks.
+    assert _chunk_bounds(30, 4, max_chunk=64) == _chunk_bounds(30, 4)
+    # max_chunk=None preserves the original worker-sized behaviour exactly.
+    assert _chunk_bounds(100, 7, max_chunk=None) == _chunk_bounds(100, 7)
