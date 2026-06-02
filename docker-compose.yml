@@ -1,0 +1,23 @@
+# Self-hosted run of the Tichu inference service (ADR-0027).
+#
+# Build the image FIRST with docker/build.ps1 — the weights come from an
+# out-of-tree build-context, which compose's plain `build:` cannot express.
+# Then:  docker compose up -d
+#
+# Scale by running more containers behind a load balancer (each keeps its own
+# clean /metrics) rather than adding uvicorn workers — the service holds
+# in-process metrics + model state, so one worker per container is by design.
+
+services:
+  tichu-inference:
+    image: tichu-inference:bc-100k-v5
+    container_name: tichu-inference
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3

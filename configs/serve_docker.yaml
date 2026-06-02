@@ -1,0 +1,38 @@
+# Docker serving spec (ADR-0027). ONE BC checkpoint serves all ML tiers;
+# Difficulty is expressed by the Skill Decile fed to the Skill Embedding, not by
+# a separate checkpoint. `easy` stays the RuleAgent baseline (ADR-0003).
+#
+# Paths are CONTAINER paths. The build (docker/build.ps1) bakes the selected
+# export dir into /app/models/, so these paths are stable regardless of which
+# model was bundled. All three ML tiers point at the SAME files, so the serve
+# builder loads each artifact once and shares it (one Model in memory).
+#
+# Tier -> Skill Decile: medium=3, hard=6, master=9 (ascending strength).
+# NOTE master here is BC@9, intentionally weaker than the AWR-Refined master of
+# the native serve_100k_v5.yaml — the accepted single-model trade (ADR-0027).
+
+_shared_nets: &shared_nets
+  schupfen:   /app/models/schupfen.pt
+  tichu_call: /app/models/tichu_call.pt
+  grand_call: /app/models/grand_tichu_call.pt
+
+agents:
+  easy:
+    factory: rule
+  medium:
+    factory: ml
+    checkpoint: /app/models/policy.pt
+    skill_decile: 3
+    <<: *shared_nets
+  hard:
+    factory: ml
+    checkpoint: /app/models/policy.pt
+    skill_decile: 6
+    <<: *shared_nets
+  master:
+    factory: ml
+    checkpoint: /app/models/policy.pt
+    skill_decile: 9
+    <<: *shared_nets
+
+port: 8000

@@ -287,7 +287,7 @@ Per-handle ratio of "Tichu called and won / Tichu called" across the corpus. Use
 _Avoid_: tichu rate, success ratio.
 
 **Inference-time skill default**:
-At serve time the ML Agent feeds the **Neutral Skill Decile** (not Decile 9). See [ADR-0005](docs/adr/0005-inference-time-skill-conditioning.md).
+The **Neutral Skill Decile** is the *default* Skill Conditioning a tier receives when its **Difficulty Spec** sets no `skill_decile` ([ADR-0005](docs/adr/0005-inference-time-skill-conditioning.md)) — it is **not** forced on every tier. Serve-time Skill Decile is a per-tier lever, threaded through `MLAgent(skill_decile=...)` by the Difficulty Spec builder: `master` pins Decile 9 ([ADR-0024](docs/adr/0024-master-tier-conditions-on-top-skill-decile.md)), and the Docker serving spec maps `medium / hard / master` onto ascending Deciles of a single **Checkpoint** ([ADR-0027](docs/adr/0027-docker-serving-decile-mapped-single-bc-checkpoint.md)).
 
 ### Eval terms
 
@@ -377,13 +377,13 @@ _Avoid_: test set, eval set, held-out pool.
 
 - **Difficulty** is a wire-level enum mapped via the **Difficulty Spec** to concrete Agents.
 - `easy` → **RuleAgent** Baseline (not a weak ML Agent — see [ADR-0003](docs/adr/0003-easy-difficulty-is-a-baseline.md)).
-- `medium / hard / master` → **ML Agents** differing only by Checkpoint.
-- Skill Conditioning is **always Neutral Skill Decile** at inference, independent of Difficulty (see [ADR-0005](docs/adr/0005-inference-time-skill-conditioning.md)).
+- `medium / hard / master` → **ML Agents** that may differ by **Checkpoint and/or Skill Decile conditioning**. Two valid shapes exist: differ-by-Checkpoint (e.g. `hard`=BC, `master`=Refined) and differ-by-Decile (one **Checkpoint**, tiers pinned to ascending Skill Deciles — the Docker serving image, [ADR-0027](docs/adr/0027-docker-serving-decile-mapped-single-bc-checkpoint.md)).
+- Serve-time **Skill Decile** is a per-tier lever set in the **Difficulty Spec**; the **Neutral Skill Decile** is only the default when a tier leaves it unset (see [ADR-0005](docs/adr/0005-inference-time-skill-conditioning.md), [ADR-0024](docs/adr/0024-master-tier-conditions-on-top-skill-decile.md)).
 
 ## Example dialogue
 
 > **Game designer:** "When the user picks `hard`, they get a stronger AI than `medium`, right?"
-> **Engineer:** "Yes — but it's a different **Checkpoint**, not a different **Skill Decile** input. The **ML Agent** always feeds the **Neutral Skill Decile** at inference. `hard` and `master` differ in which Checkpoint they load — `master` is a **Refined Checkpoint**, `hard` is a **BC Checkpoint** of the same shape. They are byte-compatible because the **Policy Network**'s Trunk and Heads have the same dimensions."
+> **Engineer:** "Yes — the gap comes from one of two levers the **Difficulty Spec** controls. Either a different **Checkpoint** (`hard`=**BC Checkpoint**, `master`=**Refined Checkpoint** — byte-compatible, same Trunk/Heads), or the *same* Checkpoint conditioned on a higher **Skill Decile** (e.g. `medium / hard / master` → Decile 3 / 6 / 9). It is *not* pinned to the **Neutral Skill Decile** — that's only the default when a tier sets no Decile."
 > **Game designer:** "And `easy` is the worst-trained model?"
 > **Engineer:** "No — `easy` is the **RuleAgent Baseline**. No Checkpoint at all. A weak ML model is *unpredictably* bad; a Baseline is *legibly* weak, which is more useful for new players."
 >
