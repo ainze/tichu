@@ -295,6 +295,8 @@ def test_call_outcome_appears_in_access_log(tmp_path, caplog):
     decision = r.json()["call"]
     expected = f"call:tichu={'true' if decision else 'false'}"
     line = next(m for m in caplog.messages if "POST /call" in m)
+    # Difficulty leads the suffix; the call outcome still trails the line.
+    assert "difficulty=hard" in line, line
     assert line.endswith(expected), line
 
 
@@ -308,6 +310,17 @@ def test_act_access_log_has_no_call_outcome(tmp_path, caplog):
         _post_act(client, "easy", ps)
     line = next(m for m in caplog.messages if "POST /act" in m)
     assert "call:" not in line, line
+
+
+def test_act_access_log_carries_difficulty(tmp_path, caplog):
+    app = create_app(_make_config(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    with caplog.at_level(logging.INFO, logger="tichu_inference.access"):
+        _post_act(client, "easy", ps)
+    line = next(m for m in caplog.messages if "POST /act" in m)
+    assert "difficulty=easy" in line, line
 
 
 def test_call_rejects_unknown_kind(tmp_path):
