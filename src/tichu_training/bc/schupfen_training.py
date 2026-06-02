@@ -345,6 +345,7 @@ def train_one_schupfen_epoch(
     except TypeError:
         total_batches = None
 
+    device = next(network.parameters()).device
     pbar = tqdm(
         _batched(examples, batch_size),
         total=total_batches, desc=desc or "train", unit="batch",
@@ -353,9 +354,9 @@ def train_one_schupfen_epoch(
     recent_acc: deque[float] = deque(maxlen=100)
     n_batches = 0
     for batch in pbar:
-        tensors = _stack(batch)
+        tensors = {k: v.to(device) for k, v in _stack(batch).items()}
         head_logits = network(tensors["features"], tensors["skill_decile"])
-        per_sample = torch.zeros(len(batch), dtype=head_logits[0].dtype)
+        per_sample = torch.zeros(len(batch), dtype=head_logits[0].dtype, device=device)
         per_dir_correct = 0
         for d, logits_d in enumerate(head_logits):
             masked = _masked_logits(logits_d, tensors["hand_mask"])
@@ -370,6 +371,76 @@ def train_one_schupfen_epoch(
         loss.backward()
         optimizer.step()
         acc = per_dir_correct / (3 * len(batch))   # mean per-direction top-1
+        batch_loss = float(loss.detach())
+        rows.append({"step": step, "loss": batch_loss, "accuracy": acc})
+        last_loss = batch_loss
+        step += 1
+        n_batches += 1
+        recent_loss.append(batch_loss)
+        recent_acc.append(acc)
+        if n_batches % 10 == 0:
+            pbar.set_postfix(
+                loss=f"{sum(recent_loss) / len(recent_loss):.4f}",
+                acc=f"{sum(recent_acc) / len(recent_acc):.3f}",
+            )
+    pbar.close()
+
+    with log_path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["step", "loss", "accuracy"])
+        if new_file:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return last_loss
+
+
+def train_one_schupfen_epoch_batched(
+    network: SchupfenNetwork,
+    batches: Iterable[dict],
+    optimizer: torch.optim.Optimizer,
+    *,
+    log_path: Path,
+    desc: str | None = None,
+    total_batches: int | None = None,
+) -> float:
+    """Streaming epoch over pre-stacked numpy batch dicts (the memmap fast
+    path). Same loss/log contract as `train_one_schupfen_epoch` — three
+    hand-masked cross-entropies × sample_weight, batch-mean, one step.csv row
+    per batch — but never materialises the slice."""
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not log_path.exists()
+    step = _next_step(log_path)
+    last_loss = float("inf")
+    rows: list[dict[str, float]] = []
+
+    device = next(network.parameters()).device
+    pbar = tqdm(batches, total=total_batches, desc=desc or "train", unit="batch")
+    recent_loss: deque[float] = deque(maxlen=100)
+    recent_acc: deque[float] = deque(maxlen=100)
+    n_batches = 0
+    for batch in pbar:
+        feats = torch.from_numpy(np.ascontiguousarray(batch["features"])).to(device)
+        hand_mask = torch.from_numpy(np.ascontiguousarray(batch["hand_mask"])).to(device)
+        target = torch.from_numpy(np.ascontiguousarray(batch["target"])).long().to(device)
+        skill = torch.from_numpy(np.ascontiguousarray(batch["skill_decile"])).long().to(device)
+        sw = torch.from_numpy(np.ascontiguousarray(batch["sample_weight"])).float().to(device)
+        head_logits = network(feats, skill)
+        bsz = target.shape[0]
+        per_sample = torch.zeros(bsz, dtype=head_logits[0].dtype, device=device)
+        per_dir_correct = 0
+        for d, logits_d in enumerate(head_logits):
+            masked = _masked_logits(logits_d, hand_mask)
+            per_sample = per_sample + F.cross_entropy(
+                masked, target[:, d], reduction="none",
+            )
+            with torch.no_grad():
+                per_dir_correct += (masked.argmax(dim=-1) == target[:, d]).float().sum().item()
+        loss = (per_sample * sw).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        acc = per_dir_correct / (3 * bsz)
         batch_loss = float(loss.detach())
         rows.append({"step": step, "loss": batch_loss, "accuracy": acc})
         last_loss = batch_loss

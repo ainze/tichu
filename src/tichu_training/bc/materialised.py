@@ -579,6 +579,10 @@ class MemmapBCDataset(Iterable[BCExample]):
         *,
         drop_last: bool = False,
         preserve_order: bool = True,
+        shuffle: bool = False,
+        shuffle_buffer: int = 1_048_576,
+        block_size: int = 65_536,
+        seed: int = 0,
     ) -> Iterator[tuple[str, dict[str, np.ndarray]]]:
         """Yield pre-stacked per-head batches.
 
@@ -607,9 +611,37 @@ class MemmapBCDataset(Iterable[BCExample]):
         The output keys match `tichu_training.bc.training._to_tensors`
         so a caller can replace the per-example route + `_to_tensors`
         call with `torch.from_numpy(batch[k])` directly.
+
+        `shuffle=True` overrides both ordered modes and feeds batches in a
+        randomised order (seeded by `seed`). The corpus is emitted in
+        game_id order and `sample_weight` is a recency weight that flips at
+        a fixed game_id (see `parse_bsw --recency-cutoff-game-id`), so the
+        unshuffled stream is sorted by weight: training would cross a hard
+        0.5->1.0 boundary partway through, doubling the (weighted) loss and
+        the effective LR, and biasing a single-epoch model toward the
+        last-seen games. Shuffling interleaves old/recent so every batch is
+        a weight-mixed, ~i.i.d. draw. To keep disk reads near-sequential on
+        the multi-hundred-GB packed files (a global per-row permutation
+        would turn every read into random I/O), the shuffle is two-level:
+        `order.dat` is read in contiguous `block_size`-row blocks whose
+        *order* is permuted, and rows accumulate in a per-head reservoir
+        that is shuffled and drained once it exceeds `shuffle_buffer` rows.
+        Larger `block_size` => more sequential I/O but coarser mixing;
+        larger `shuffle_buffer` => finer within-batch mixing at more RAM.
+        Every row is still emitted exactly once.
         """
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+        if shuffle:
+            yield from self._iter_batches_shuffled(
+                batch_size,
+                drop_last=drop_last,
+                shuffle_buffer=shuffle_buffer,
+                block_size=block_size,
+                seed=seed,
+            )
+            return
 
         if preserve_order:
             buffers: dict[str, list[int]] = defaultdict(list)
@@ -675,6 +707,90 @@ class MemmapBCDataset(Iterable[BCExample]):
             "round_outcome": meta["round_outcome"].astype(np.float32),
             "game_won": meta["game_won"].astype(np.int8),
         }
+
+    def _iter_batches_shuffled(
+        self,
+        batch_size: int,
+        *,
+        drop_last: bool,
+        shuffle_buffer: int,
+        block_size: int,
+        seed: int,
+    ) -> Iterator[tuple[str, dict[str, np.ndarray]]]:
+        """Block-shuffle + per-head reservoir shuffle. See `iter_batches`.
+
+        Reads `order.dat` one contiguous block at a time, in a permuted
+        block order, routing each row into its head's reservoir. Whenever
+        the reservoir crosses `shuffle_buffer` rows it is shuffled and
+        drained to full batches (a sub-batch remainder is carried forward);
+        a final flush emits everything left, including a partial trailing
+        batch per head unless `drop_last`.
+        """
+        rng = np.random.default_rng(seed)
+        order = self._order
+        n = len(order)
+        type_order = self.type_order
+        # Each reservoir is a list of int64 row-index chunks (one per block
+        # contribution); concatenated lazily at drain time.
+        reservoir: dict[str, list[np.ndarray]] = {t: [] for t in type_order}
+        if n == 0:
+            return
+
+        n_blocks = (n + block_size - 1) // block_size
+        block_starts = rng.permutation(n_blocks).astype(np.int64) * block_size
+
+        buffered = 0
+        for start in block_starts:
+            start = int(start)
+            blk = np.asarray(order[start : min(start + block_size, n)])
+            tcol = blk[:, 0]
+            rcol = blk[:, 1].astype(np.int64)
+            for ti, type_name in enumerate(type_order):
+                sel = rcol[tcol == ti]
+                if sel.size:
+                    reservoir[type_name].append(sel)
+                    buffered += int(sel.size)
+            if buffered >= shuffle_buffer:
+                yield from self._drain_reservoir(
+                    reservoir, type_order, batch_size, rng,
+                    final=False, drop_last=drop_last,
+                )
+                buffered = sum(
+                    int(c.shape[0]) for t in type_order for c in reservoir[t]
+                )
+
+        yield from self._drain_reservoir(
+            reservoir, type_order, batch_size, rng,
+            final=True, drop_last=drop_last,
+        )
+
+    def _drain_reservoir(
+        self, reservoir, type_order, batch_size, rng, *, final, drop_last,
+    ) -> Iterator[tuple[str, dict[str, np.ndarray]]]:
+        """Shuffle each head's reservoir and yield full batches.
+
+        Non-final: emit only whole batches, carry the `< batch_size`
+        remainder forward (re-shuffled next drain). Final: emit the
+        remainder too, as a trailing partial batch unless `drop_last`.
+        """
+        for type_name in type_order:
+            chunks = reservoir[type_name]
+            if not chunks:
+                continue
+            arr = chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
+            rng.shuffle(arr)
+            n = arr.shape[0]
+            limit = n if final else (n // batch_size) * batch_size
+            i = 0
+            while i + batch_size <= limit:
+                yield type_name, self._gather_batch(type_name, arr[i : i + batch_size])
+                i += batch_size
+            if final:
+                if i < n and not drop_last:
+                    yield type_name, self._gather_batch(type_name, arr[i:])
+                reservoir[type_name] = []
+            else:
+                reservoir[type_name] = [arr[i:]] if i < n else []
 
 
 # `_check_pin` now lives in `bc.packing` (shared across bundles). Re-exported

@@ -297,18 +297,28 @@ class MemmapSchupfenDataset(Iterable[SchupfenExample]):
 
     def iter_batches(
         self, batch_size: int, *, drop_last: bool = False,
+        shuffle: bool = False, seed: int = 0,
     ) -> Iterator[dict[str, np.ndarray]]:
         """Yield pre-stacked batches keyed for the schupfen training loop:
         `features` (B,D) f32, `hand_mask` (B,56) f32, `target` (B,3) i64,
-        `skill_decile` (B,) i64, `sample_weight` (B,) f32."""
+        `skill_decile` (B,) i64, `sample_weight` (B,) f32.
+
+        `shuffle=True` walks a full random permutation of the rows (seeded by
+        `seed`). The schupfen slice is single-digit GB, so a global permutation
+        is cheap and random memmap access stays in page cache — no block-shuffle
+        machinery needed (unlike the 280 GB BC bundle)."""
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
+        order = (
+            np.random.default_rng(seed).permutation(self.count)
+            if shuffle else None
+        )
         start = 0
         while start < self.count:
             stop = min(start + batch_size, self.count)
             if stop - start < batch_size and drop_last:
                 break
-            idx = np.arange(start, stop)
+            idx = order[start:stop] if order is not None else np.arange(start, stop)
             yield self._gather_batch(idx)
             start = stop
 

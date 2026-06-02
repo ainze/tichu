@@ -306,17 +306,29 @@ class MemmapCallDataset(Iterable[CallExample]):
 
     def iter_batches(
         self, batch_size: int, *, drop_last: bool = False,
+        shuffle: bool = False, seed: int = 0,
     ) -> Iterator[dict[str, np.ndarray]]:
         """Yield pre-stacked batches: `features` (B,D) f32, `target` (B,) i64,
-        `skill_decile` (B,) i64, `sample_weight` (B,) f32."""
+        `skill_decile` (B,) i64, `sample_weight` (B,) f32, `game_id` (B,) u4.
+
+        `shuffle=True` walks a full random permutation of the rows (seeded by
+        `seed`). The calls slice is single-digit GB, so a global permutation is
+        cheap (the index array is ~8 B/row) and random memmap access stays in
+        the OS page cache — no block-shuffle machinery needed (unlike the
+        280 GB BC bundle). `game_id` is included so the trainer can carve a
+        game-level val holdout from the stream without materialising."""
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
+        order = (
+            np.random.default_rng(seed).permutation(self.count)
+            if shuffle else None
+        )
         start = 0
         while start < self.count:
             stop = min(start + batch_size, self.count)
             if stop - start < batch_size and drop_last:
                 break
-            idx = np.arange(start, stop)
+            idx = order[start:stop] if order is not None else np.arange(start, stop)
             feat = self._codec.unpack(
                 np.asarray(self._feat_bits[idx]), np.asarray(self._feat_cont[idx]),
             )
@@ -326,5 +338,6 @@ class MemmapCallDataset(Iterable[CallExample]):
                 "target": meta["target"].astype(np.int64),
                 "skill_decile": meta["skill_decile"].astype(np.int64),
                 "sample_weight": meta["sample_weight"].astype(np.float32),
+                "game_id": meta["game_id"].astype(np.uint32),
             }
             start = stop

@@ -17,7 +17,11 @@ from tichu_training.bc.materialised import (
     materialise,
 )
 from tichu_training.checkpoint import VersionMismatchError
-from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
+from tichu_training.featurizer import (
+    CONTINUOUS_FEATURE_COLUMNS,
+    FEATURIZER_OUTPUT_DIM,
+    FEATURIZER_VERSION,
+)
 
 
 @pytest.fixture
@@ -315,6 +319,103 @@ def test_idempotent_rerun_overwrites_prior_bundle(tmp_path: Path):
     # And the bundle still reads correctly.
     got = list(MemmapBCDataset(out_dir))
     assert len(got) == len(src)
+
+
+def _mk_play_example(weight: float, target: int = 0) -> BCExample:
+    """A minimal valid play BCExample carrying a given sample_weight.
+
+    Indicator columns are left 0 (the writer rejects non-0/1 there); the
+    continuous columns get an arbitrary float. Only the weight matters for
+    the shuffle tests.
+    """
+    feat = np.zeros(FEATURIZER_OUTPUT_DIM, dtype=np.float32)
+    for c in CONTINUOUS_FEATURE_COLUMNS:
+        feat[c] = 0.25
+    mask = np.zeros(HEAD_LOGIT_DIMS["play"], dtype=bool)
+    mask[target] = True
+    return BCExample(
+        decision_type="play",
+        features=feat,
+        target=target,
+        legal_mask=mask,
+        sample_weight=weight,
+        skill_decile=5,
+        round_outcome=0.0,
+        game_won=None,
+    )
+
+
+@pytest.fixture
+def weight_sorted_bundle(tmp_path: Path) -> Path:
+    """A bundle whose sample_weight is sorted 0.5-then-1.0, mirroring the
+    real corpus's recency-weight-by-game_id emission order."""
+    examples = (
+        [_mk_play_example(0.5) for _ in range(1024)]
+        + [_mk_play_example(1.0) for _ in range(1024)]
+    )
+    out_dir = tmp_path / "weight_sorted"
+    materialise(iter(examples), out_dir)
+    return out_dir
+
+
+def _batched_weights(ds, **kw) -> list[float]:
+    seq: list[float] = []
+    for _head, batch in ds.iter_batches(batch_size=128, **kw):
+        seq.extend(batch["sample_weight"].tolist())
+    return seq
+
+
+def test_unshuffled_stream_is_weight_sorted(weight_sorted_bundle):
+    """Documents the bug condition: with the default ordered path, the
+    weight-0.5 rows all precede the weight-1.0 rows, so training crosses a
+    hard boundary. This is what `shuffle=True` must break."""
+    ds = MemmapBCDataset(weight_sorted_bundle)
+    seq = _batched_weights(ds, preserve_order=True)
+    assert seq == sorted(seq)  # monotonic 0.5...0.5 then 1.0...1.0
+    assert seq[0] == pytest.approx(0.5) and seq[-1] == pytest.approx(1.0)
+
+
+def test_shuffle_interleaves_weights_without_losing_rows(weight_sorted_bundle):
+    """`shuffle=True` must (a) preserve the exact multiset of rows and
+    (b) interleave the two weight groups so the leading slice of the run
+    already contains weight-1.0 rows (≈0 under the unshuffled path)."""
+    ds = MemmapBCDataset(weight_sorted_bundle)
+    shuffled = _batched_weights(
+        ds, shuffle=True, shuffle_buffer=512, block_size=64, seed=0,
+    )
+    ordered = _batched_weights(ds, preserve_order=True)
+
+    # (a) no rows dropped or duplicated.
+    assert sorted(shuffled) == sorted(ordered)
+    assert len(shuffled) == 2048
+
+    # (b) the first quarter is well-mixed, not all 0.5. Unshuffled it would
+    # be exactly 0.0; i.i.d. expectation is ~0.5. Wide band to stay robust.
+    head = np.asarray(shuffled[:512])
+    frac_recent = float((head == 1.0).mean())
+    assert 0.30 <= frac_recent <= 0.70, frac_recent
+
+    # within-batch mixing: at least one batch carries both weights.
+    saw_mixed = False
+    for _h, batch in ds.iter_batches(
+        batch_size=128, shuffle=True, shuffle_buffer=512, block_size=64, seed=0,
+    ):
+        w = batch["sample_weight"]
+        if (w == 0.5).any() and (w == 1.0).any():
+            saw_mixed = True
+            break
+    assert saw_mixed
+
+
+def test_shuffle_is_deterministic_per_seed(weight_sorted_bundle):
+    """Same seed => identical order (resumability / reproducibility);
+    different seed => different order."""
+    ds = MemmapBCDataset(weight_sorted_bundle)
+    a = _batched_weights(ds, shuffle=True, shuffle_buffer=512, block_size=64, seed=7)
+    b = _batched_weights(ds, shuffle=True, shuffle_buffer=512, block_size=64, seed=7)
+    c = _batched_weights(ds, shuffle=True, shuffle_buffer=512, block_size=64, seed=8)
+    assert a == b
+    assert a != c
 
 
 def test_game_won_none_roundtrips(materialised_smoke):

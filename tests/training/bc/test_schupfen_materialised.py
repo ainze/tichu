@@ -44,6 +44,30 @@ def materialised_smoke(tmp_path: Path) -> tuple[list[SchupfenExample], Path]:
     return examples, out_dir
 
 
+def test_iter_batches_shuffle_permutes_without_loss(materialised_smoke):
+    """`shuffle=True` reorders rows (seeded, deterministic) while preserving
+    the multiset. Regression for the recency-ordering fix on the schupfen
+    streaming path. Uses the to-next slot target as a per-row signature."""
+    _, out_dir = materialised_smoke
+    ds = MemmapSchupfenDataset(out_dir)
+
+    def _to_next(**kw):
+        out = []
+        for b in ds.iter_batches(8, **kw):
+            out.extend(b["target"][:, 0].tolist())
+        return out
+
+    ordered = _to_next()
+    shuf_a = _to_next(shuffle=True, seed=0)
+    shuf_b = _to_next(shuffle=True, seed=0)
+    shuf_c = _to_next(shuffle=True, seed=1)
+
+    assert sorted(shuf_a) == sorted(ordered)
+    assert len(shuf_a) == len(ordered)
+    assert shuf_a == shuf_b
+    assert shuf_a != ordered or shuf_c != shuf_a
+
+
 def test_roundtrip_reads_back_examples_exactly(materialised_smoke):
     """The tracer bullet: every example round-trips through the packed
     bundle byte-for-byte — features, hand_mask, the 3-vector target, skill,

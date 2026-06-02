@@ -455,6 +455,7 @@ def train_one_call_epoch(
     except TypeError:
         total_batches = None
 
+    device = next(network.parameters()).device
     pbar = tqdm(
         _batched(examples, batch_size),
         total=total_batches, desc=desc or "train", unit="batch",
@@ -464,7 +465,7 @@ def train_one_call_epoch(
     recent_acc: deque[float] = deque(maxlen=100)
     n_batches = 0
     for batch in pbar:
-        tensors = _stack(batch)
+        tensors = {k: v.to(device) for k, v in _stack(batch).items()}
         logits = network(tensors["features"], tensors["skill_decile"])
         per_sample = F.cross_entropy(logits, tensors["target"], reduction="none")
         loss = (per_sample * tensors["sample_weight"]).mean()
@@ -510,7 +511,8 @@ def calling_rate_by_decile(
     """Predicted P(call) > 0.5 → 1, grouped by skill_decile."""
     if not examples:
         return {}
-    tensors = _stack(examples)
+    device = next(network.parameters()).device
+    tensors = {k: v.to(device) for k, v in _stack(examples).items()}
     with torch.no_grad():
         probs = torch.softmax(network(tensors["features"], tensors["skill_decile"]), dim=-1)
         call_prob = probs[:, 1]
@@ -598,6 +600,7 @@ def evaluate_call_examples(
     if not examples:
         return {"n": 0.0, "loss": float("nan"), "accuracy": float("nan"),
                 "auc": float("nan"), "pos_frac": float("nan")}
+    device = next(network.parameters()).device
     network.eval()
     total_loss = 0.0
     total_correct = 0
@@ -606,7 +609,7 @@ def evaluate_call_examples(
     all_labels: list[np.ndarray] = []
     with torch.no_grad():
         for batch in _batched(iter(examples), batch_size):
-            tensors = _stack(batch)
+            tensors = {k: v.to(device) for k, v in _stack(batch).items()}
             logits = network(tensors["features"], tensors["skill_decile"])
             loss = F.cross_entropy(logits, tensors["target"], reduction="sum")
             pred = logits.argmax(dim=-1)
@@ -644,5 +647,186 @@ def write_calling_rate_csv(
             writer.writerow({
                 "decile": decile,
                 "n": by_decile_n[decile],
+                "calling_rate": rates[decile],
+            })
+
+
+# ----------------------------------------------------------------------
+# Streaming (memmap fast-path) variants — never materialise the slice.
+# ----------------------------------------------------------------------
+
+_VAL_BUCKETS = 10_000
+
+
+def _val_bucket(game_id: np.ndarray, seed: int) -> np.ndarray:
+    """Vectorised game-level hash → bucket in [0, _VAL_BUCKETS).
+
+    The streaming analogue of `split_examples_by_game`: same game_id maps to
+    the same bucket, so a game's rows never straddle the train/val boundary.
+    Uses a splitmix64 finaliser on the u4 game_id rather than blake2b on the
+    string repr, so the split differs from the materialised path's — fine for
+    a fresh run, and far cheaper than 88M per-row hash calls. game_id 0 (the
+    synthetic / empty sentinel) all lands in one bucket, matching the
+    materialised path's "empty game_id all on one side" behaviour.
+    """
+    with np.errstate(over="ignore"):
+        z = game_id.astype(np.uint64) + np.uint64(seed) * np.uint64(0x9E3779B97F4A7C15)
+        z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        z = z ^ (z >> np.uint64(31))
+        return (z % np.uint64(_VAL_BUCKETS)).astype(np.int64)
+
+
+def train_one_call_epoch_batched(
+    network: CallNetwork,
+    batches: Iterable[dict],
+    optimizer: torch.optim.Optimizer,
+    *,
+    log_path: Path,
+    desc: str | None = None,
+    total_batches: int | None = None,
+    val_frac: float = 0.0,
+    val_seed: int = 0,
+) -> tuple[float, dict[str, float], dict[int, float], dict[int, int]]:
+    """Streaming epoch over pre-stacked numpy batch dicts (the memmap fast
+    path). Returns `(last_loss, val_metrics, calling_rate_by_decile,
+    decile_counts)`.
+
+    A game-level val holdout is carved per batch by a game_id hash fixed by
+    `val_seed` (so the holdout is identical every epoch). Train rows get the
+    usual weighted-CE step (one step.csv row per fired batch); the held-out
+    rows are forwarded **in the same sweep** (no grad) to accumulate val
+    metrics + calling-rate — so there is no second full pass over the slice.
+
+    The val metrics are therefore an *online* estimate: each held-out row is
+    scored by the net as it stood at that step, not by a single post-epoch
+    snapshot. Early-epoch rows see a less-trained net, so the figure is a
+    monitoring signal, not a precise held-out number. Calling-rate / decile
+    counts are accumulated over ALL rows (train + val) seen in the sweep.
+    """
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not log_path.exists()
+    step = _next_step(log_path)
+    last_loss = float("inf")
+    rows: list[dict[str, float]] = []
+    threshold = int(round(val_frac * _VAL_BUCKETS)) if val_frac > 0 else 0
+    device = next(network.parameters()).device
+
+    # Online val + calling-rate accumulators (folded into the train sweep).
+    v_loss = 0.0
+    v_correct = 0
+    v_n = 0
+    v_probs: list[np.ndarray] = []
+    v_labels: list[np.ndarray] = []
+    called_by_decile: dict[int, int] = defaultdict(int)
+    n_by_decile: dict[int, int] = defaultdict(int)
+
+    def _accumulate_rate(deciles: np.ndarray, called: np.ndarray) -> None:
+        for d in np.unique(deciles):
+            m = deciles == d
+            n_by_decile[int(d)] += int(m.sum())
+            called_by_decile[int(d)] += int(called[m].sum())
+
+    pbar = tqdm(batches, total=total_batches, desc=desc or "train", unit="batch")
+    recent_loss: deque[float] = deque(maxlen=100)
+    recent_acc: deque[float] = deque(maxlen=100)
+    n_batches = 0
+    for batch in pbar:
+        if threshold > 0:
+            buckets = _val_bucket(batch["game_id"], val_seed)
+            train_np = buckets >= threshold
+            val_np = ~train_np
+        else:
+            train_np = np.ones(batch["target"].shape[0], dtype=bool)
+            val_np = np.zeros_like(train_np)
+
+        # ---- train step on the train-side rows ----
+        if train_np.any():
+            feats = torch.from_numpy(np.ascontiguousarray(batch["features"][train_np])).to(device)
+            target = torch.from_numpy(np.ascontiguousarray(batch["target"][train_np])).long().to(device)
+            skill = torch.from_numpy(np.ascontiguousarray(batch["skill_decile"][train_np])).long().to(device)
+            sw = torch.from_numpy(np.ascontiguousarray(batch["sample_weight"][train_np])).float().to(device)
+            logits = network(feats, skill)
+            per_sample = F.cross_entropy(logits, target, reduction="none")
+            loss = (per_sample * sw).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                acc = (logits.argmax(dim=-1) == target).float().mean().item()
+                tcalled = (torch.softmax(logits, dim=-1)[:, 1] > 0.5).cpu().numpy()
+            _accumulate_rate(batch["skill_decile"][train_np], tcalled)
+            batch_loss = float(loss.detach())
+            rows.append({"step": step, "loss": batch_loss, "accuracy": acc})
+            last_loss = batch_loss
+            step += 1
+            n_batches += 1
+            recent_loss.append(batch_loss)
+            recent_acc.append(acc)
+            if n_batches % 10 == 0:
+                pbar.set_postfix(
+                    loss=f"{sum(recent_loss) / len(recent_loss):.4f}",
+                    acc=f"{sum(recent_acc) / len(recent_acc):.3f}",
+                )
+
+        # ---- online val on the held-out rows (no grad, same sweep) ----
+        if val_np.any():
+            with torch.no_grad():
+                vfeats = torch.from_numpy(np.ascontiguousarray(batch["features"][val_np])).to(device)
+                vskill = torch.from_numpy(np.ascontiguousarray(batch["skill_decile"][val_np])).long().to(device)
+                vt = torch.from_numpy(np.ascontiguousarray(batch["target"][val_np])).long().to(device)
+                vlogits = network(vfeats, vskill)
+                vprobs = torch.softmax(vlogits, dim=-1)[:, 1]
+                v_loss += float(F.cross_entropy(vlogits, vt, reduction="sum").item())
+                v_correct += int((vlogits.argmax(dim=-1) == vt).sum().item())
+                v_n += int(vt.shape[0])
+                vprobs_np = vprobs.cpu().numpy()
+                v_probs.append(vprobs_np)
+                v_labels.append(vt.cpu().numpy())
+            _accumulate_rate(batch["skill_decile"][val_np], vprobs_np > 0.5)
+    pbar.close()
+
+    with log_path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["step", "loss", "accuracy"])
+        if new_file:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    rates = {
+        d: (called_by_decile[d] / n_by_decile[d] if n_by_decile[d] else 0.0)
+        for d in n_by_decile
+    }
+    if v_n == 0:
+        metrics = {"n": 0.0, "loss": float("nan"), "accuracy": float("nan"),
+                   "auc": float("nan"), "pos_frac": float("nan")}
+    else:
+        probs_arr = np.concatenate(v_probs)
+        labels_arr = np.concatenate(v_labels).astype(np.int64)
+        metrics = {
+            "n": float(v_n),
+            "loss": v_loss / v_n,
+            "accuracy": v_correct / v_n,
+            "auc": _binary_auc(probs_arr, labels_arr),
+            "pos_frac": float(labels_arr.mean()),
+        }
+    return last_loss, metrics, rates, dict(n_by_decile)
+
+
+def write_calling_rate_rows(
+    path: Path, rates: dict[int, float], decile_counts: dict[int, int],
+) -> None:
+    """Write a calling-rate-by-decile CSV from pre-aggregated counts (the
+    streaming path's analogue of `write_calling_rate_csv`)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["decile", "n", "calling_rate"])
+        writer.writeheader()
+        for decile in sorted(rates.keys()):
+            writer.writerow({
+                "decile": decile,
+                "n": decile_counts.get(decile, 0),
                 "calling_rate": rates[decile],
             })

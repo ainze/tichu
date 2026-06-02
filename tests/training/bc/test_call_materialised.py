@@ -55,6 +55,33 @@ def test_roundtrip_reads_back_each_call_type_exactly(materialised_smoke):
             assert got.sample_weight == pytest.approx(want.sample_weight)
 
 
+def test_iter_batches_shuffle_permutes_without_loss(materialised_smoke):
+    """`shuffle=True` must reorder rows (seeded, deterministic) while
+    preserving the exact multiset, and expose `game_id` for the streaming
+    val split. Regression for the recency-ordering fix on the calls path."""
+    _, out_dir = materialised_smoke
+    ds = MemmapCallDataset(out_dir, call_type="call_tichu")
+
+    def _targets(**kw):
+        out = []
+        for b in ds.iter_batches(8, **kw):
+            assert "game_id" in b  # needed for the streaming val split
+            out.extend(b["target"].tolist())
+        return out
+
+    ordered = _targets()
+    shuf_a = _targets(shuffle=True, seed=0)
+    shuf_b = _targets(shuffle=True, seed=0)
+    shuf_c = _targets(shuffle=True, seed=1)
+
+    assert sorted(shuf_a) == sorted(ordered)   # no rows lost/duplicated
+    assert len(shuf_a) == len(ordered)
+    assert shuf_a == shuf_b                     # deterministic per seed
+    # At least one of (permuted vs ordered) / (seed0 vs seed1) must differ;
+    # with 20 rows a coincident permutation is vanishingly unlikely.
+    assert shuf_a != ordered or shuf_c != shuf_a
+
+
 def test_features_bit_packed_and_no_legal_mask_file(materialised_smoke):
     """Indicator cols pack to ceil(214/8)=27 B, continuous stay 40 B — and a
     calls bundle has NO legal-mask file (the decision is binary)."""
