@@ -62,6 +62,22 @@ log = logging.getLogger(__name__)
 _NEUTRAL_SKILL = 10  # the embedding's neutral / cold-start row
 
 
+def load_policy_module(path: str | Path):
+    """Load an exported **policy** module, asserting featurizer + action-space versions."""
+    return load_exported(
+        path,
+        expected_featurizer_version=FEATURIZER_VERSION,
+        expected_action_space_version=ACTION_SPACE_VERSION,
+    )
+
+
+def load_standalone_net(path: str | Path):
+    """Load an exported **standalone** net (schupfen / call). These carry an empty
+    action_space stamp (they don't consume the play action space), so only the
+    featurizer version is asserted on load."""
+    return load_exported(path, expected_featurizer_version=FEATURIZER_VERSION)
+
+
 @register_agent("ml")
 class MLAgent(Agent):
     def __init__(
@@ -74,6 +90,56 @@ class MLAgent(Agent):
         grand_call_path: str | Path | None = None,
         fallback_rng: random.Random | None = None,
     ) -> None:
+        # Load each artifact from its path, then hand off to the shared
+        # initialiser. `from_loaded` is the path-free entry point the serve
+        # builder uses to share one already-loaded module across tier-views.
+        self._init_with_modules(
+            load_policy_module(checkpoint_path),
+            skill_decile=skill_decile,
+            schupfen=self._maybe_load(schupfen_path),
+            tichu_call=self._maybe_load(tichu_call_path),
+            grand_call=self._maybe_load(grand_call_path),
+            fallback_rng=fallback_rng,
+        )
+
+    @classmethod
+    def from_loaded(
+        cls,
+        policy_module,
+        *,
+        skill_decile: int = _NEUTRAL_SKILL,
+        schupfen=None,
+        tichu_call=None,
+        grand_call=None,
+        fallback_rng: random.Random | None = None,
+    ) -> "MLAgent":
+        """Build an agent over already-loaded modules, skipping disk I/O.
+
+        Lets the serve builder load one policy module (and the shared standalone
+        nets) a single time and construct several tier-views over it that differ
+        only by `skill_decile` — one Model in memory, not one per tier (ADR-0027).
+        """
+        self = cls.__new__(cls)
+        self._init_with_modules(
+            policy_module,
+            skill_decile=skill_decile,
+            schupfen=schupfen,
+            tichu_call=tichu_call,
+            grand_call=grand_call,
+            fallback_rng=fallback_rng,
+        )
+        return self
+
+    def _init_with_modules(
+        self,
+        policy_module,
+        *,
+        skill_decile: int,
+        schupfen,
+        tichu_call,
+        grand_call,
+        fallback_rng: random.Random | None,
+    ) -> None:
         # Skill Embedding input fed to every network at inference. 0..9 are the
         # BSW skill deciles (9 = strongest players); 10 is the neutral/cold-start
         # row. Default is neutral per ADR-0005; pass `skill_decile=9` to condition
@@ -83,17 +149,10 @@ class MLAgent(Agent):
                 f"skill_decile must be in [0, {_NEUTRAL_SKILL}], got {skill_decile}"
             )
         self._skill_decile = int(skill_decile)
-        self._module = load_exported(
-            checkpoint_path,
-            expected_featurizer_version=FEATURIZER_VERSION,
-            expected_action_space_version=ACTION_SPACE_VERSION,
-        )
-        # The standalone networks are exported with an empty action_space stamp
-        # (they don't consume the play action space), so only the featurizer
-        # version is asserted on load.
-        self._schupfen = self._maybe_load(schupfen_path)
-        self._tichu_call = self._maybe_load(tichu_call_path)
-        self._grand_call = self._maybe_load(grand_call_path)
+        self._module = policy_module
+        self._schupfen = schupfen
+        self._tichu_call = tichu_call
+        self._grand_call = grand_call
         self._rule_fallback = RuleAgent()
         self._rng = fallback_rng or random.Random(0)
         self.last_fallback_used: bool = False
@@ -102,7 +161,7 @@ class MLAgent(Agent):
     def _maybe_load(path: str | Path | None):
         if path is None:
             return None
-        return load_exported(path, expected_featurizer_version=FEATURIZER_VERSION)
+        return load_standalone_net(path)
 
     def act(self, private_state: PrivateState) -> ConcreteAction:
         self.last_fallback_used = False

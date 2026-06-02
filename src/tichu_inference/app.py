@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from tichu_inference.codec import action_to_json, private_state_from_json
-from tichu_inference.ml_agent import MLAgent
+from tichu_inference.ml_agent import MLAgent, load_policy_module, load_standalone_net
 from tichu_ml.agent import Agent
 from tichu_ml.rule_agent import RuleAgent
 
@@ -159,7 +159,29 @@ def create_app(config: dict) -> FastAPI:
 
 
 def _build_agents(spec: dict) -> dict[str, Agent]:
+    # Load each unique artifact at most once and share it across every tier that
+    # references it. The decile-mapped serving spec (ADR-0027) points all ML
+    # tiers at the same policy + standalone nets, differing only by skill_decile,
+    # so this keeps one Model in memory instead of one copy per tier.
     agents: dict[str, Agent] = {}
+    policy_cache: dict[Path, object] = {}
+    net_cache: dict[Path, object] = {}
+
+    def _policy(path: str | Path):
+        p = Path(path)
+        if p not in policy_cache:
+            policy_cache[p] = load_policy_module(p)
+        return policy_cache[p]
+
+    def _net(sub: dict, key: str):
+        val = sub.get(key)
+        if not val:
+            return None
+        p = Path(val)
+        if p not in net_cache:
+            net_cache[p] = load_standalone_net(p)
+        return net_cache[p]
+
     for difficulty in _DIFFICULTIES:
         sub = spec.get(difficulty)
         if sub is None:
@@ -168,20 +190,19 @@ def _build_agents(spec: dict) -> dict[str, Agent]:
         if factory == "rule":
             agents[difficulty] = RuleAgent()
         elif factory == "ml":
-            agents[difficulty] = MLAgent(
-                Path(sub["checkpoint"]),
-                schupfen_path=_opt_path(sub, "schupfen"),
-                tichu_call_path=_opt_path(sub, "tichu_call"),
-                grand_call_path=_opt_path(sub, "grand_call"),
+            kwargs: dict[str, Any] = {}
+            if "skill_decile" in sub:
+                kwargs["skill_decile"] = int(sub["skill_decile"])
+            agents[difficulty] = MLAgent.from_loaded(
+                _policy(sub["checkpoint"]),
+                schupfen=_net(sub, "schupfen"),
+                tichu_call=_net(sub, "tichu_call"),
+                grand_call=_net(sub, "grand_call"),
+                **kwargs,
             )
         else:
             raise ValueError(f"unknown agent factory {factory!r} for {difficulty}")
     return agents
-
-
-def _opt_path(sub: dict, key: str) -> Path | None:
-    val = sub.get(key)
-    return Path(val) if val else None
 
 
 class _AppState:

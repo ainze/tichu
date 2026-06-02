@@ -1,0 +1,27 @@
+# Build context is the repo root; the image only needs pyproject.toml, src/,
+# and configs/serve_docker.yaml. Keep everything else out of the daemon context.
+.git
+.gitignore
+.claude
+.idea
+data
+tests
+docs
+documentation
+sample
+scripts
+tools
+docker
+*.md
+**/__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.hypothesis
+.venv
+venv
+build
+dist
+requirements.in
+requirements.txt
