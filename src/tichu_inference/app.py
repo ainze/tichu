@@ -70,11 +70,15 @@ def create_app(config: dict) -> FastAPI:
             phrase = HTTPStatus(response.status_code).phrase
         except ValueError:
             phrase = ""
-        # Endpoints may stash a short outcome (e.g. "call=true") on request.state
-        # to be appended to the access line; request.state is shared with the
-        # route handler via the ASGI scope.
+        # Endpoints may stash a difficulty and/or a short outcome (e.g.
+        # "call:tichu=true") on request.state to be appended to the access line;
+        # request.state is shared with the route handler via the ASGI scope.
+        # Difficulty leads the suffix so a `difficulty=hard` grep works uniformly
+        # across /act and /call.
+        difficulty = getattr(request.state, "access_difficulty", None)
         outcome = getattr(request.state, "access_outcome", None)
-        suffix = f" {outcome}" if outcome else ""
+        fields = [f for f in (f"difficulty={difficulty}" if difficulty else None, outcome) if f]
+        suffix = f" {' '.join(fields)}" if fields else ""
         _access_log.info(
             '%s - "%s %s HTTP/%s" %d %s %.1fms%s',
             addr, request.method, path, http_version,
@@ -93,6 +97,9 @@ def create_app(config: dict) -> FastAPI:
         difficulty = body.get("difficulty")
         if difficulty not in _DIFFICULTIES:
             raise HTTPException(status_code=400, detail=f"unknown difficulty: {difficulty!r}")
+        # Stash for the access line once difficulty is known-valid, before any
+        # further validation can raise — so malformed-state 400s still show the tier.
+        request.state.access_difficulty = difficulty
         ps_blob = body.get("private_state")
         if ps_blob is None:
             raise HTTPException(status_code=400, detail="private_state is required")
@@ -123,6 +130,7 @@ def create_app(config: dict) -> FastAPI:
         difficulty = body.get("difficulty")
         if difficulty not in _DIFFICULTIES:
             raise HTTPException(status_code=400, detail=f"unknown difficulty: {difficulty!r}")
+        request.state.access_difficulty = difficulty
         kind = body.get("kind")
         if kind not in ("tichu", "grand"):
             raise HTTPException(status_code=400, detail=f"unknown call kind: {kind!r} (expected 'tichu' or 'grand')")
