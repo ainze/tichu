@@ -1,0 +1,40 @@
+# Export arch config for `export_model` — FULL corpus, featurizer v5.
+#
+# `export_model` reads these sections and calls the model constructors, so this
+# file carries ONLY architecture (no data scale, no checkpoint paths). The
+# sections MUST match the arch each full-corpus network was trained with:
+#   policy            -> configs/bc_full_corpus_v5_memmap.yaml  `model:`
+#   tichu/grand_call  -> configs/calls_full_corpus_v5.yaml      `model:`
+#   schupfen          -> configs/schupfen_full_corpus_v5.yaml   `model:`
+#
+# Today these are IDENTICAL to configs/export_100k_v5.yaml — the full-corpus
+# runs reused the 100k architecture, only the data scale changed. This file
+# exists so (a) the export command self-documents (matches the *_full_corpus_v5
+# naming) and (b) it is the single place to bump arch when you enlarge the
+# trunk: change `policy` here to match the retrained BC config, and the
+# call/schupfen sections if those grow too, or export_model will fail to load
+# the state dict.
+#
+# feature_dim = FEATURIZER_OUTPUT_DIM = 224 (v5) for every network.
+policy:
+  feature_dim: 224
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+tichu_call:
+  feature_dim: 224
+  skill_dim: 64
+  hidden: 256
+
+grand_tichu_call:
+  feature_dim: 224
+  skill_dim: 64
+  hidden: 256
+
+schupfen:
+  feature_dim: 224
+  skill_dim: 64
+  hidden: 256

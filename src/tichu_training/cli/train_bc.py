@@ -192,7 +192,32 @@ def main(argv: list[str] | None = None) -> int:
             # to a batch-count cap so the per-epoch wall-clock cap is
             # respected without slicing inside a batch.
             batch_size = int(config["batch_size"])
-            batches_iter = dataset.iter_batches(batch_size)
+            # Shuffle the read order when the config asks for it. The
+            # materialised corpus is emitted in game_id order and
+            # `sample_weight` is a recency weight that flips 0.5->1.0 at a
+            # fixed game_id, so the unshuffled stream is sorted by weight —
+            # training would cross a hard boundary partway through (doubling
+            # the weighted loss + effective LR and biasing a 1-epoch model
+            # toward the last-seen games). `shuffle: true` interleaves
+            # old/recent into ~i.i.d. weight-mixed batches. Per-epoch seed
+            # offset so multi-epoch runs see a fresh permutation each pass.
+            if bool(config.get("shuffle", False)):
+                shuffle_kwargs = dict(
+                    shuffle=True,
+                    shuffle_buffer=int(config.get("shuffle_buffer", 1_048_576)),
+                    block_size=int(config.get("shuffle_block", 65_536)),
+                    seed=seed + epoch,
+                )
+                if epoch == 0:
+                    log.info(
+                        "shuffle enabled: buffer=%d block=%d seed=%d",
+                        shuffle_kwargs["shuffle_buffer"],
+                        shuffle_kwargs["block_size"],
+                        seed,
+                    )
+            else:
+                shuffle_kwargs = {}
+            batches_iter = dataset.iter_batches(batch_size, **shuffle_kwargs)
             if args.max_examples is not None:
                 batches_iter = _capped_batches(
                     batches_iter, args.max_examples,

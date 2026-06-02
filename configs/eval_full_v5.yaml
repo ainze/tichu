@@ -1,0 +1,58 @@
+# Full-strength tournament (combined model stack), featurizer v5. See ADR-0025.
+#
+# All-vs-all paired-difference matrix on a pre-Schupfen Full-strength
+# Starting-Position Pool. Each Round drives the COMPLETE product stack:
+# Grand-Tichu Call -> Schupfen -> Tichu Call -> Play -> Wish -> Dragon, each
+# Decision served by that agent's own networks. The matrix reports the total
+# per-Round score delta plus a `call_bonus_mean` breakdown column.
+#
+# Per-agent network bundles: each agent independently names its play checkpoint
+# + schupfen + tichu_call + grand_call + skill_decile. Mix different training
+# runs freely, but every export must be at the harness's featurizer version
+# (v5) — cross-featurizer comparison is a separate run.
+#
+# Roster:
+#   bc_full     = BC play + shared v5 schupfen/call nets
+#   awr_full    = AWR-refined play + shared v5 schupfen/call nets, decile 9 (ADR-0024)
+#   bc_playonly = BC play, NO schupfen/call nets -> rule schupfen, declined calls
+#                 (ablation: isolates what the standalone nets buy over fallback)
+#   rule/random = baselines
+#
+# PREREQS — export policies + standalone nets, then generate the pool:
+#   py -3.14 scripts/gen_full_position_pool.py --seed 0 --n 2000 `
+#     --output C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 2000
+bootstrap_iters: 1000
+seed: 0
+
+# Parallel workers (process Pool). 1 = serial (default). The Pool of Positions is
+# chunked across workers; each worker rebuilds every agent from the paths below
+# and pins torch to one thread. The orchestration is deterministic, so `rule`
+# rows are bit-identical to a serial run at the same seed. `ml` rows shift by
+# torch's cross-process float noise and `random` rows by its per-worker RNG reset
+# — both far below the bootstrap CI, so compare them statistically, not bit-wise.
+# Tune to ~os.cpu_count() - 2.
+workers: 10
+
+agents:
+  - name: bc_full_full_corpus
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+  - name: bc_full_100k
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_100k_v5\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_100k_v5\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_100k_v5\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_100k_v5\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\eval_full_full_corpus\matrix.parquet

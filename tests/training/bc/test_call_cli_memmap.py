@@ -72,3 +72,44 @@ def test_cli_trains_both_networks_from_memmap_bundle(calls_bundle, tmp_path):
     for tag in ("grand", "tichu"):
         assert (run_dir / "checkpoints" / f"{tag}_final.bin").exists()
         assert (run_dir / f"{tag}_step.csv").exists()
+
+
+def test_cli_memmap_streams_with_shuffle_and_val(calls_bundle, tmp_path, monkeypatch):
+    """The memmap path must STREAM (never materialise the slice into a list)
+    yet still produce per-epoch val + calling-rate outputs under `shuffle`.
+
+    Guards the full-corpus fix: `train_calls` would OOM if it called
+    `list(dataset)` on the ~88M-row slice. The streaming path consumes
+    `iter_batches`, never `__iter__`, so we make `__iter__` blow up — if the
+    CLI ever materialises the dataset, the test fails loudly.
+    """
+    def _boom(self):
+        raise AssertionError(
+            "memmap dataset iterated as objects — should stream via iter_batches"
+        )
+
+    monkeypatch.setattr(MemmapCallDataset, "__iter__", _boom)
+
+    config = {
+        "dataset": "memmap",
+        "dataset_kwargs": {"data_dir": str(calls_bundle)},
+        "model": {"hidden": 16, "skill_dim": 4},
+        "learning_rate": 5.0e-3,
+        "batch_size": 8,
+        "epochs": 2,
+        "seed": 0,
+        "shuffle": True,
+        "val_frac": 0.2,
+    }
+    config_path = tmp_path / "calls_stream.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    run_dir = tmp_path / "run"
+
+    rc = main(["--config", str(config_path), "--run-dir", str(run_dir), "--only", "tichu"])
+    assert rc == 0
+    assert (run_dir / "checkpoints" / "tichu_final.bin").exists()
+    assert (run_dir / "tichu_step.csv").exists()
+    # Streaming val + calling-rate outputs were produced.
+    assert (run_dir / "tichu_val.csv").exists()
+    assert (run_dir / "tichu_calling_rate_by_decile_epoch0.csv").exists()
+    assert (run_dir / "tichu_calling_rate_by_decile_epoch1.csv").exists()
