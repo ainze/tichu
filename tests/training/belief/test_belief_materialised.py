@@ -19,14 +19,14 @@ from tichu_training.belief.belief_materialised import (
     materialise_belief,
 )
 from tichu_training.belief.dataset import BeliefExample, SyntheticBeliefDataset
+from tichu_training.belief.history import BELIEF_FEATURE_DIM
 from tichu_training.checkpoint import VersionMismatchError
-from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
 
 
 @pytest.fixture
 def materialised_smoke(tmp_path: Path) -> tuple[list[BeliefExample], Path]:
     src = list(SyntheticBeliefDataset(
-        seed=0, n_examples=20, feature_dim=FEATURIZER_OUTPUT_DIM,
+        seed=0, n_examples=20, feature_dim=BELIEF_FEATURE_DIM,
         binary_features=True,
     ))
     out_dir = tmp_path / "belief_bundle"
@@ -45,6 +45,23 @@ def test_roundtrip_reads_back_examples_exactly(materialised_smoke):
         np.testing.assert_array_equal(got.mask, want.mask)
 
 
+def test_iter_arrays_matches_per_example_iter(materialised_smoke):
+    """The batched array stream reconstructs the same features/labels/mask the
+    per-example __iter__ yields (the low-RAM scale path)."""
+    src, out_dir = materialised_smoke
+    ds = MemmapBeliefDataset(out_dir)
+    per_example = list(ds)
+    streamed: list = []
+    for feats, labels, card_mask in ds.iter_arrays(batch_size=7):
+        for i in range(feats.shape[0]):
+            streamed.append((feats[i], labels[i], card_mask[i]))
+    assert len(streamed) == len(per_example)
+    for (f, lab, cm), ex in zip(streamed, per_example):
+        np.testing.assert_array_equal(f, ex.features)
+        np.testing.assert_array_equal(lab, ex.labels)
+        np.testing.assert_array_equal(cm, np.asarray(ex.mask)[0])
+
+
 def test_labels_and_mask_bit_packed_on_disk(materialised_smoke):
     """Labels (3*56=168 bits) pack to 21 B/row; the (56,) card mask to 7 B/row."""
     src, out_dir = materialised_smoke
@@ -59,6 +76,7 @@ def test_labels_and_mask_bit_packed_on_disk(materialised_smoke):
         ("expected_featurizer_version", "vBOGUS"),
         ("expected_action_space_version", "vBOGUS"),
         ("expected_schema_version", 999),
+        ("expected_belief_input_version", "vBOGUS"),
     ],
 )
 def test_version_pin_mismatch_raises(materialised_smoke, pin, bad):

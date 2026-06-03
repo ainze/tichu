@@ -1,0 +1,108 @@
+"""Decision-tape recorder: per Play Decision, ranked alternatives + choice."""
+
+from __future__ import annotations
+
+import dataclasses
+
+from tichu_engine.legality import DragonGive, MahjongWish, SchupfenPass, legal_actions_for
+from tichu_engine.state import deal_initial_state
+from tichu_eval.decision_tape import (
+    TapeSink, record_round, render_dragon, render_schupfen, render_text, render_wish,
+)
+from tichu_eval.full_position_pool import generate_full_position_pool
+from tichu_ml.rule_agent import RuleAgent
+
+
+class _ScoringRule(RuleAgent):
+    """RuleAgent (real, legal play) that also exposes uniform play_action_scores,
+    so the tape has ranked alternatives to record."""
+
+    def play_action_scores(self, private_state):
+        legal = list(legal_actions_for(private_state))
+        if not legal:
+            return []
+        p = 1.0 / len(legal)
+        return [(a, p) for a in legal]
+
+
+def test_tape_records_decisions_with_alternatives():
+    pos = generate_full_position_pool(seed=0, n=1)[0]
+    agents = tuple(_ScoringRule() for _ in range(4))
+    sink = TapeSink()
+    record_round(agents, pos, round_idx=0, sink=sink, top_k=5)
+
+    assert sink.records, "expected at least one reviewable decision"
+    for rec in sink.records:
+        assert len(rec.topk) >= 2            # only multi-option decisions recorded
+        assert len(rec.topk) <= 5            # top_k cap
+        assert rec.hand                      # acting seat's hand captured
+        assert rec.chosen                    # a chosen action string
+        assert 0 <= rec.seat < 4
+
+
+def test_render_text_is_reviewable():
+    pos = generate_full_position_pool(seed=1, n=1)[0]
+    agents = tuple(_ScoringRule() for _ in range(4))
+    sink = TapeSink()
+    record_round(agents, pos, round_idx=0, sink=sink)
+    text = render_text(sink)
+    assert "Round 0" in text
+    assert "chose:" in text and "hand:" in text
+
+
+class _AuxStub:
+    """Stub exposing the diagnostic score methods for the non-Play Decisions."""
+    def __init__(self, wish=None, dragon=None, schupfen=None):
+        self._wish, self._dragon, self._schupfen = wish, dragon, schupfen
+
+    def wish_action_scores(self, ps):
+        return self._wish or []
+
+    def dragon_action_scores(self, ps):
+        return self._dragon or []
+
+    def schupfen_action_scores(self, ps):
+        return self._schupfen or {}
+
+
+def _ps():
+    st = deal_initial_state(seed=0)
+    return st.private_view(st.public.current_player)
+
+
+def test_render_wish_shows_choice_alternatives_and_call_context():
+    ps = _ps()
+    ps = dataclasses.replace(ps, public=dataclasses.replace(
+        ps.public, grand_tichu_callers=frozenset({1})))
+    agent = _AuxStub(wish=[(MahjongWish(14), 0.6), (MahjongWish(5), 0.4)])
+    out = render_wish(agent, ps, MahjongWish(5), header="H")
+    assert "WISH" in out and "chose=5" in out
+    assert "14:0.60" in out                 # ranked alternative shown
+    assert "grand_callers=[1]" in out       # the signal a Wish should react to
+
+
+def test_render_dragon_shows_target():
+    agent = _AuxStub(dragon=[(DragonGive(1), 0.7), (DragonGive(3), 0.3)])
+    out = render_dragon(agent, _ps(), DragonGive(1))
+    assert "DRAGON" in out and "chose=seat1" in out and "seat3:0.30" in out
+
+
+def test_render_schupfen_shows_each_direction():
+    ps = _ps()
+    cards = list(ps.hand)[:3]
+    scores = {d: [(cards[0], 0.8), (cards[1], 0.2)] for d in ("next", "partner", "previous")}
+    agent = _AuxStub(schupfen=scores)
+    action = SchupfenPass(to_next=cards[0], to_partner=cards[1], to_previous=cards[2])
+    out = render_schupfen(agent, ps, action)
+    assert "SCHUPFEN" in out
+    for d in ("next", "partner", "previous"):
+        assert d in out
+    assert "cand:" in out
+
+
+def test_agent_without_scores_records_nothing():
+    pos = generate_full_position_pool(seed=0, n=1)[0]
+    agents = tuple(RuleAgent() for _ in range(4))   # no play_action_scores
+    sink = TapeSink()
+    record_round(agents, pos, round_idx=0, sink=sink)
+    assert sink.records == []

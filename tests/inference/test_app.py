@@ -341,6 +341,43 @@ def test_call_rejects_unknown_difficulty(tmp_path):
     assert r.status_code == 400
 
 
+def test_tape_log_writes_decision_blocks_for_ml(tmp_path):
+    cfg = _make_config(tmp_path)
+    tape = tmp_path / "tape.txt"
+    cfg["tape_log"] = str(tape)
+    app = create_app(cfg)
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    r = _post_act(client, "master", ps)
+    assert r.status_code == 200
+    assert tape.exists()
+    text = tape.read_text(encoding="utf-8")
+    assert "chose:" in text and "hand:" in text
+    assert "difficulty=master" in text and f"top{0}" not in text  # has a topN block
+
+
+def test_tape_log_skips_baseline_agents(tmp_path):
+    cfg = _make_config(tmp_path)
+    tape = tmp_path / "tape.txt"
+    cfg["tape_log"] = str(tape)
+    app = create_app(cfg)
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    _post_act(client, "easy", ps)   # RuleAgent: no play_action_scores
+    text = tape.read_text(encoding="utf-8") if tape.exists() else ""
+    assert "chose:" not in text     # header may exist, but no decision block
+
+
+def test_no_tape_log_by_default_is_harmless(tmp_path):
+    app = create_app(_make_config(tmp_path))   # no tape_log key
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    assert _post_act(client, "master", ps).status_code == 200
+
+
 def test_returned_action_is_decodable_and_legal(tmp_path):
     app = create_app(_make_config(tmp_path))
     client = TestClient(app)

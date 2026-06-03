@@ -1,0 +1,39 @@
+# Call-threshold A/B — does calling more aggressively WIN more?
+#
+# Same master checkpoint (decile 9), varying only the Call-Network decision
+# threshold: call iff P(call) >= threshold. 0.5 == argmax (the historical
+# baseline, master's ~11.7% tichu / 10.6% grand). Lower => call more, toward the
+# decile-9 human rates (~14.5% / 13.2%). The Tournament Matrix is the arbiter:
+# calls are +/-100 / +/-200 (highest-variance Decisions), so more calls only
+# helps if the marginal calls are +EV.
+#
+#   # behavioral (call rates by threshold):
+#   py -3.14 -m tichu_training.cli.eval_matrix --config configs\eval_call_threshold_v5.yaml --mode behavioral -v
+#   # tournament (does it win?):
+#   py -3.14 -m tichu_training.cli.eval_matrix --config configs\eval_call_threshold_v5.yaml --mode tournament -v
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 1000
+bootstrap_iters: 1000
+seed: 0
+workers: 10
+
+_paths: &paths
+  checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+  schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+  tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+  grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+agents:
+  - name: t50_argmax
+    factory: ml
+    kwargs: {<<: *paths, skill_decile: 9, tichu_threshold: 0.5,  grand_threshold: 0.5}
+  - name: t35
+    factory: ml
+    kwargs: {<<: *paths, skill_decile: 9, tichu_threshold: 0.35, grand_threshold: 0.35}
+  - name: t25
+    factory: ml
+    kwargs: {<<: *paths, skill_decile: 9, tichu_threshold: 0.25, grand_threshold: 0.25}
+
+output: C:\workbench\tichu\data\runs\eval_call_threshold_v5\matrix.parquet

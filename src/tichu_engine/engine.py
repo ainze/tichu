@@ -180,6 +180,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     new_scores = state.public.scores
     new_round_points = state.public.round_points_by_player
     new_pending: object | None = None
+    info: dict = {}
     trick_resolved = next_trick.leader is not None and resolved_trick.leader is None
     round_ends_mid_trick = (
         next_trick.leader is not None
@@ -189,6 +190,10 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     if trick_resolved or round_ends_mid_trick:
         winner = next_trick.leader
         points = _trick_points(next_trick)
+        # Surface the trick winner (always the trick leader, even when the
+        # Dragon defers the *points* to a DragonGive) for eval telemetry and
+        # future reward shaping. `info` was a reserved-but-empty Gym-style slot.
+        info = {"trick_winner": winner, "trick_points": points}
         top = next_trick.top_combination
         if isinstance(top, Single) and top.card is DRAGON:
             new_pending = DragonGivePending(winner=winner, points=points)
@@ -231,7 +236,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     new_state = GameState(hands=next_hands, public=next_public)
     if new_pending is None and _round_done_state(new_state):
         new_state = _finalise_round(new_state)
-    return new_state, 0.0, _round_done_state(new_state), {}  # type: ignore[arg-type]
+    return new_state, 0.0, _round_done_state(new_state), info  # type: ignore[arg-type]
 
 
 def _play_fulfils_wish(combo: Combination, wish_rank: int) -> bool:
@@ -431,6 +436,7 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
     new_scores = state.public.scores
     new_round_points = state.public.round_points_by_player
     new_pending: object | None = None
+    info: dict = {}
     trick_resolved = bombed_trick.leader is not None and resolved_trick.leader is None
     round_ends_mid_trick = (
         bombed_trick.leader is not None
@@ -440,6 +446,7 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
     if trick_resolved or round_ends_mid_trick:
         winner = bombed_trick.leader
         points = _trick_points(bombed_trick)
+        info = {"trick_winner": winner, "trick_points": points}
         new_scores = _add_to_team(new_scores, _team_of(winner), points)
         new_round_points = _add_to_player(new_round_points, winner, points)
         if round_ends_mid_trick:
@@ -465,7 +472,7 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
     new_state = GameState(hands=next_hands, public=next_public)
     if new_pending is None and _round_done_state(new_state):
         new_state = _finalise_round(new_state)
-    return new_state, 0.0, _round_done_state(new_state), {}  # type: ignore[arg-type]
+    return new_state, 0.0, _round_done_state(new_state), info  # type: ignore[arg-type]
 
 
 def _partner_target(partner: int, hand_sizes: tuple[int, int, int, int]) -> int:
