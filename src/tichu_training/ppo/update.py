@@ -28,6 +28,51 @@ class PPOBatch(NamedTuple):
     returns: torch.Tensor     # (N,)
 
 
+def build_batch(
+    trajectories,
+    *,
+    skill_decile: int,
+    gamma: float,
+    lam: float,
+) -> PPOBatch:
+    """Flatten learner trajectories into one `PPOBatch`, running GAE per
+    trajectory over its terminal `round_outcome` reward.
+
+    Each trajectory's reward lands on its final transition (one-Round episode,
+    `last_value=0`); GAE is computed independently per trajectory so one Round's
+    outcome never leaks into another's advantages. `skill_decile` fills the
+    (constant) skill column — self-play conditions on decile-9 (ADR-0029).
+    """
+    feats, masks, actions, old_logp = [], [], [], []
+    advantages, returns = [], []
+    for traj in trajectories:
+        horizon = len(traj.steps)
+        if horizon == 0:
+            continue
+        values = torch.tensor([s.value for s in traj.steps], dtype=torch.float32)
+        rewards = torch.zeros(horizon, dtype=torch.float32)
+        rewards[-1] = float(traj.reward)
+        adv, ret = compute_gae(rewards, values, gamma=gamma, lam=lam, last_value=0.0)
+        advantages.append(adv)
+        returns.append(ret)
+        for s in traj.steps:
+            feats.append(torch.as_tensor(s.features, dtype=torch.float32))
+            masks.append(torch.as_tensor(s.legal_mask, dtype=torch.bool))
+            actions.append(s.intent_index)
+            old_logp.append(s.logprob)
+
+    features = torch.stack(feats)
+    return PPOBatch(
+        features=features,
+        skill=torch.full((features.shape[0],), int(skill_decile), dtype=torch.long),
+        legal_masks=torch.stack(masks),
+        actions=torch.tensor(actions, dtype=torch.long),
+        old_logp=torch.tensor(old_logp, dtype=torch.float32),
+        advantages=torch.cat(advantages),
+        returns=torch.cat(returns),
+    )
+
+
 def compute_gae(
     rewards: torch.Tensor,
     values: torch.Tensor,

@@ -4,6 +4,9 @@ The sampler runs the policy forward once over a batch, masks illegal Intents,
 samples, and reports the action log-probs (and critic values) PPO needs.
 """
 
+import copy
+import math
+
 import torch
 
 from tichu_eval.full_position_pool import generate_full_position_pool
@@ -12,6 +15,7 @@ from tichu_training.bc.heads import HEAD_LOGIT_DIMS, BCModel
 from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
 from tichu_training.ppo.policy import BatchedPolicy, sample_masked
 from tichu_training.ppo.rollout import collect_rollout
+from tichu_training.ppo.update import build_batch, ppo_update
 
 
 def _tiny_policy() -> BatchedPolicy:
@@ -42,6 +46,54 @@ def test_batched_policy_drives_a_full_round_with_only_legal_actions():
         for s in t.steps:
             assert isinstance(s.intent_index, int)
             assert s.logprob is not None and s.value is not None
+
+
+def test_real_policy_records_features_and_mask_for_the_update():
+    torch.manual_seed(0)
+    pos = generate_full_position_pool(seed=0, n=1)[0]
+
+    trajs = collect_rollout([pos], _tiny_policy(), learner_team=0)
+
+    # PPO's update re-runs the forward at each visited state, so every learner
+    # step must carry the featurized state and its legal-Intent mask.
+    for t in trajs:
+        for s in t.steps:
+            assert s.features is not None
+            assert tuple(s.features.shape) == (FEATURIZER_OUTPUT_DIM,)
+            assert s.legal_mask is not None
+            assert tuple(s.legal_mask.shape) == (HEAD_LOGIT_DIMS["play"],)
+            # the recorded action is legal under the recorded mask
+            assert bool(s.legal_mask[s.intent_index])
+
+
+def test_full_training_step_rollout_build_batch_then_ppo_update():
+    torch.manual_seed(0)
+    positions = generate_full_position_pool(seed=0, n=4)
+
+    model = BCModel(
+        FEATURIZER_OUTPUT_DIM, skill_dim=8, trunk_hidden=32, trunk_depth=1,
+        trunk_out_dim=16, head_hidden=16,
+    )
+    critic = ValueBaseline(FEATURIZER_OUTPUT_DIM, hidden=16)
+    bc_model = copy.deepcopy(model)  # frozen anchor reference
+    policy = BatchedPolicy(model, critic, skill_decile=9)
+
+    trajs = collect_rollout(positions, policy, learner_team=0)
+    batch = build_batch(trajs, skill_decile=9, gamma=1.0, lam=0.95)
+
+    optimizer = torch.optim.Adam(
+        list(model.parameters()) + list(critic.parameters()), lr=1e-4
+    )
+    stats = ppo_update(
+        model, critic, bc_model, optimizer, batch,
+        clip_eps=0.1, vf_coef=0.5, ent_coef=0.01, kl_coef=0.5, epochs=2,
+    )
+
+    # The whole pipeline runs and produces finite, sane training stats.
+    assert set(stats) == {"loss", "policy_loss", "value_loss", "entropy", "kl_to_bc"}
+    assert all(math.isfinite(v) for v in stats.values())
+    assert stats["kl_to_bc"] >= -1e-6  # KL divergence is non-negative
+    assert stats["entropy"] >= 0.0
 
 
 def test_sample_masked_respects_legal_mask_and_reports_logprobs():

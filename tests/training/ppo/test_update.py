@@ -8,8 +8,10 @@ import torch
 
 from tichu_training.awr.value_baseline import ValueBaseline
 from tichu_training.bc.heads import HEAD_LOGIT_DIMS, BCModel
+from tichu_training.ppo.rollout import Trajectory, TrajectoryStep
 from tichu_training.ppo.update import (
     PPOBatch,
+    build_batch,
     clipped_policy_loss,
     compute_gae,
     masked_entropy,
@@ -17,6 +19,16 @@ from tichu_training.ppo.update import (
     ppo_update,
     value_loss,
 )
+
+
+def _step(intent, logp, value, feature_dim=4, action_dim=6):
+    return TrajectoryStep(
+        intent_index=intent,
+        logprob=logp,
+        value=value,
+        features=torch.full((feature_dim,), float(value)),
+        legal_mask=torch.ones(action_dim, dtype=torch.bool),
+    )
 
 
 def _legal_prob(model, features, skill, mask, action) -> float:
@@ -92,6 +104,37 @@ def test_masked_entropy_of_uniform_over_k_legal_actions_is_log_k():
     masks[:, :4] = True  # four legal actions per row
     ent = masked_entropy(logits, masks)
     assert torch.allclose(ent, torch.tensor(math.log(4.0)), atol=1e-6)
+
+
+def test_build_batch_flattens_one_trajectory_with_gae():
+    traj = Trajectory(
+        seat=0, team=0, reward=5.0,
+        steps=[_step(1, -0.5, 1.0), _step(2, -0.6, 2.0), _step(3, -0.7, 3.0)],
+    )
+    batch = build_batch([traj], skill_decile=9, gamma=1.0, lam=1.0)
+
+    assert isinstance(batch, PPOBatch)
+    assert batch.features.shape == (3, 4)
+    assert batch.legal_masks.shape == (3, 6)
+    assert torch.equal(batch.actions, torch.tensor([1, 2, 3]))
+    assert torch.allclose(batch.old_logp, torch.tensor([-0.5, -0.6, -0.7]))
+    assert batch.skill.shape == (3,) and torch.all(batch.skill == 9)
+    # GAE over (values=[1,2,3], terminal reward 5): adv=[4,3,2], returns=[5,5,5].
+    assert torch.allclose(batch.advantages, torch.tensor([4.0, 3.0, 2.0]))
+    assert torch.allclose(batch.returns, torch.tensor([5.0, 5.0, 5.0]))
+
+
+def test_build_batch_computes_gae_per_trajectory_independently():
+    a = Trajectory(seat=0, team=0, reward=10.0, steps=[_step(0, -0.1, 1.0), _step(1, -0.1, 1.0)])
+    b = Trajectory(seat=2, team=0, reward=0.0, steps=[_step(2, -0.1, 0.0)])
+
+    batch = build_batch([a, b], skill_decile=9, gamma=1.0, lam=1.0)
+
+    # Rows concatenate (2 + 1); trajectory a's terminal reward must not bleed
+    # into trajectory b's advantage.
+    assert batch.advantages.shape == (3,)
+    assert torch.allclose(batch.advantages, torch.tensor([9.0, 9.0, 0.0]))
+    assert torch.allclose(batch.returns, torch.tensor([10.0, 10.0, 0.0]))
 
 
 def test_ppo_update_raises_probability_of_a_positive_advantage_action():

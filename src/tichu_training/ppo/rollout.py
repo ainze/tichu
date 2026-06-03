@@ -40,6 +40,8 @@ class PlayChoice(NamedTuple):
     intent_index: int | None = None
     logprob: float | None = None
     value: float | None = None
+    features: object | None = None    # featurized state (for the PPO re-forward)
+    legal_mask: object | None = None  # legal-Intent mask at this decision
 
 
 class RolloutPolicy(Protocol):
@@ -60,6 +62,8 @@ class TrajectoryStep(NamedTuple):
     intent_index: int | None
     logprob: float | None
     value: float | None
+    features: object | None = None
+    legal_mask: object | None = None
 
 
 @dataclass
@@ -180,7 +184,10 @@ def _drive(
             for (run, seat), choice in zip(group.meta, choices):
                 if seat in run.trajs:
                     run.trajs[seat].steps.append(
-                        TrajectoryStep(choice.intent_index, choice.logprob, choice.value)
+                        TrajectoryStep(
+                            choice.intent_index, choice.logprob, choice.value,
+                            choice.features, choice.legal_mask,
+                        )
                     )
                 _advance(run, choice.concrete_action)
     else:

@@ -80,6 +80,8 @@ class BatchedPolicy:
                     intent_index=idx,
                     logprob=float(out.logprobs[row]),
                     value=float(out.values[row]),
+                    features=features[row],
+                    legal_mask=masks[row],
                 )
             )
         return choices
