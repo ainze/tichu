@@ -1,0 +1,62 @@
+# PPO Refine of the play policy (featurizer v5) — ADR-0029.
+#
+# Sharpens the BC play head + trunk by KL-anchored self-play against a small
+# opponent league, targeting the diagnosed bomb/strong-combo undervaluation
+# (caller passivity). Output is a Sharpened Checkpoint, byte-compatible with a BC
+# Checkpoint (drop-in `master`-tier swap).
+#
+# Run:
+#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5.yaml
+#
+# AFTER training (separate steps — not done in-loop):
+#   1. Export for serving:   py -3.14 -m tichu_training.cli.export_model ...
+#   2. Behavioral dials:     py -3.14 -m tichu_training.cli.eval_matrix \
+#                              --config configs/eval_behavioral_v5.yaml --mode behavioral
+#      Watch caller_passivity_rate / caller_bomb_passivity_rate FALL vs `master`.
+#   3. Tournament (north star): the full-zoo eval_matrix; the Sharpened Checkpoint
+#      must beat `master` AND frozen BC (RPS guard), Move-Prediction-Eval bounded.
+#
+# warm_start MUST be a BC *Checkpoint* (.bin, load_checkpoint format) — NOT a
+# TorchScript export (policy.pt). Its `model` dims MUST match the values below.
+
+warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5\REPLACE_WITH_BC_CHECKPOINT.bin
+out:        C:\workbench\tichu\data\runs\ppo_v5\sharpened.bin
+
+# Must match the warm_start BC Checkpoint's architecture (full-corpus v5 BC).
+model:
+  skill_dim:     64
+  trunk_hidden:  1024
+  trunk_depth:   4
+  trunk_out_dim: 512
+  head_hidden:   256
+
+# Separate critic off the policy trunk (ADR-0029 §value).
+critic:
+  hidden: 512
+
+# KL-anchor to frozen BC — the human-plausibility leash (lever #1). Adaptive:
+# beta_KL is steered toward keeping KL-to-BC near `target`.
+kl:
+  coef:   1.0
+  target: 0.02
+  factor: 2.0
+
+# Frozen-BC start, growing to a small league of frozen learner snapshots.
+league:
+  max_snapshots:  5
+  snapshot_every: 10   # iterations between snapshots
+
+ppo:
+  iterations:         500    # tune; set the kill-budget after the first throughput read
+  positions_per_iter: 256    # M concurrent self-play games per iteration
+  pool_seed:          0
+  gamma:              1.0     # one-Round episodes, terminal round_outcome
+  lam:                0.95
+  clip_eps:           0.1     # conservative — warm-started policy
+  vf_coef:            0.5
+  ent_coef:           0.01    # lever #2 — exploration toward under-tried bombs
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9       # self-play conditioned on decile-9 (master goal)
+  learner_team:       0
