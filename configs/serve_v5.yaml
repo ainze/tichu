@@ -1,0 +1,40 @@
+# Native serve spec, FULL-CORPUS v5 export (the strongest BC available).
+#
+# Single BC checkpoint serves all ML tiers; Difficulty = the Skill Decile fed to
+# the Skill Embedding (ADR-0027), not a separate checkpoint. `easy` is the
+# RuleAgent baseline (ADR-0003). Same decile-mapping shape as serve_docker.yaml
+# but with native (Windows) paths and the full-corpus export rather than the
+# 100k one — stronger play across every tier.
+#
+# Tier -> Skill Decile: medium=3, hard=6, master=9 (ascending strength).
+#
+# Play with a live decision tape (look up moves you think are bad):
+#   py -3.14 -m tichu_inference.cli.serve `
+#     --config configs\serve_v5.yaml `
+#     --tape-log C:\workbench\tichu\data\live_tape.txt -v
+
+_shared_nets: &shared_nets
+  schupfen:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+  tichu_call: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+  grand_call: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+agents:
+  easy:
+    factory: rule
+  medium:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+    skill_decile: 3
+    <<: *shared_nets
+  hard:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+    skill_decile: 6
+    <<: *shared_nets
+  master:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+    skill_decile: 9
+    <<: *shared_nets
+
+port: 8000

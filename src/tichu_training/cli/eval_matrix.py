@@ -22,6 +22,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from tichu_eval.starting_position_pool import load_starting_position_pool
 from tichu_eval.full_position_pool import load_full_position_pool
+from tichu_eval.behavioral import run_behavioral_profiles
 from tichu_eval.move_prediction import (
     decisions_from_game,
     evaluate_move_prediction,
@@ -60,8 +61,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--config", required=True, metavar="FILE", help="YAML config file")
     p.add_argument(
-        "--mode", choices=("tournament", "move_prediction"), default="tournament",
-        help="Evaluation mode (default: tournament)",
+        "--mode", choices=("tournament", "move_prediction", "behavioral"),
+        default="tournament",
+        help="Evaluation mode (default: tournament). 'behavioral' profiles each "
+             "agent's play style (bomb / call / trick-win rates) in self-play.",
     )
     p.add_argument(
         "--held-out", metavar="DIR",
@@ -111,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_move_prediction_mode(
             agent_builders, Path(args.held_out), config, output_path
         )
+    if args.mode == "behavioral":
+        return _run_behavioral_mode(agent_builders, config, output_path)
     raise AssertionError(f"unknown mode: {args.mode}")
 
 
@@ -198,6 +203,59 @@ def _run_move_prediction_mode(agent_builders, held_out_dir: Path, config, output
 
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=["agent", "decision_type", "top1", "top5", "n"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return 0
+
+
+_BEHAVIORAL_COLS = [
+    "bomb_per_round", "bomb_when_legal_rate", "tichu_call_rate",
+    "tichu_success_rate", "grand_call_rate", "grand_success_rate",
+    "trick_win_rate", "out_first_rate", "slam_rate", "caller_passivity_rate",
+    "caller_bomb_passivity_rate",
+]
+
+
+def _run_behavioral_mode(agent_builders, config, output_path: Path) -> int:
+    """Per-agent behavioral profile (self-play) over the Full-strength Pool."""
+    pool_path = Path(config["starting_position_pool"])
+    n_cap = config.get("n_deals")
+    positions = load_full_position_pool(pool_path)
+    positions = positions[: int(n_cap)] if n_cap is not None else positions
+
+    names = sorted(agent_builders)
+    log.info("behavioral profile: %d agents x %d positions (self-play, 4 seats)",
+             len(names), len(positions))
+    builders = {name: agent_builders[name] for name in names}
+    profiles = run_behavioral_profiles(builders, positions)
+
+    rows = []
+    for name in names:
+        row = {"agent": name, **profiles[name].as_row()}
+        rows.append(row)
+
+    # Console table: one agent per row, the headline rates as columns.
+    w = max(8, max(len(n) for n in names) + 1)
+    print("agent".rjust(w) + "".join(c.replace("_rate", "").replace("_", " ")[:11].rjust(13)
+                                     for c in _BEHAVIORAL_COLS))
+    for name in names:
+        p = profiles[name]
+        line = name.rjust(w)
+        for col in _BEHAVIORAL_COLS:
+            line += f"{getattr(p, col):.3f}".rjust(13)
+        print(line)
+    print(f"\n(seat-rounds per agent: {profiles[names[0]].seat_rounds}; "
+          "trick_win/out_first parity = 0.250)")
+
+    fieldnames = ["agent", "seat_rounds", "bomb_per_round", "bomb_when_legal_rate",
+                  "bombs_played", "bomb_legal_decisions", "grand_call_rate",
+                  "grand_success_rate", "tichu_call_rate", "tichu_success_rate",
+                  "trick_win_rate", "out_first_rate", "slam_rate",
+                  "caller_passivity_rate", "caller_pass_opportunities",
+                  "caller_bomb_passivity_rate", "caller_pass_bomb_opportunities"]
+    with output_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)

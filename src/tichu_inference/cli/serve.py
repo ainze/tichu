@@ -31,6 +31,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="Override config-supplied port.")
     p.add_argument("--no-serve", action="store_true",
                    help="Build the app and exit 0 without binding a port.")
+    p.add_argument("--tape-log", metavar="FILE", default=None,
+                   help="Append a human-reviewable decision tape (per served Play "
+                        "Decision: hand, trick top, chosen play, top-k ranked "
+                        "alternatives) to FILE. Off by default; for diagnosing "
+                        "play while playing visually.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -45,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config not found: {config_path}", file=sys.stderr)
         return 2
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if args.tape_log:
+        config["tape_log"] = args.tape_log
+        log.info("decision tape -> %s", args.tape_log)
 
     app = build_app_for_config(config)
     if args.no_serve:

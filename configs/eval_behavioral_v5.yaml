@@ -1,0 +1,46 @@
+# Behavioral profile (featurizer v5) — "HOW does each agent play?", not "how strong".
+#
+# Each agent is profiled in SELF-PLAY: seated in all four seats of a
+# Full-strength Round over the Starting-Position Pool, with per-seat telemetry
+# (bomb / call / trick-win / out-first / slam rates). This is the diagnostic for
+# the soft-policy / never-bombs hypothesis — and later the PPO Refine dashboard.
+#
+# Run (serial; behavioral mode ignores `workers`):
+#   py -3.14 -m tichu_training.cli.eval_matrix `
+#     --config configs/eval_behavioral_v5.yaml --mode behavioral -v
+#
+# Reads: bomb_per_round + bomb_when_legal_rate answer "does it ever Bomb, and
+# when it COULD bomb, how often does it?". trick_win_rate / out_first_rate have
+# parity 0.250 at a homogeneous 4-seat table. Compare `master` (decile 9) vs
+# `neutral` to see whether skill-conditioning shifts behavior at all.
+
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 500          # self-play x4 seats per agent; bump once you see it's fast enough
+seed: 0
+
+agents:
+  # The served `master` tier: full-corpus BC export pinned to top Skill Decile.
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  # Same Checkpoint, no Skill Conditioning (Neutral Decile) — isolates whether
+  # the decile-9 pin changes play style.
+  - name: neutral
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+  # Hand-coded reference: a non-zero bomb / trick-win rate to read the ML rows against.
+  - name: rule
+    factory: rule
+
+output: C:\workbench\tichu\data\runs\eval_behavioral_v5\profile.csv

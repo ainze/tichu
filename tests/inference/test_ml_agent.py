@@ -130,6 +130,75 @@ def test_fallback_fires_on_nan_logits(tmp_path):
     assert agent.last_fallback_used is True
 
 
+class _FixedCall:
+    """Call module returning a constant P(call) via logits [0, logit(p)]."""
+    def __init__(self, p_call: float) -> None:
+        import math
+        self._call_logit = math.log(p_call / (1.0 - p_call))
+
+    def __call__(self, features, skill):
+        n = features.shape[0]
+        return torch.tensor([[0.0, self._call_logit]]).repeat(n, 1)
+
+
+def test_call_threshold_controls_should_call(tmp_path):
+    from tichu_training.action_space import ACTION_SPACE_SIZE
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    # P(call) = 0.30: call when threshold <= 0.30, decline above.
+    a_low = MLAgent(artifact, tichu_threshold=0.25)
+    a_low._tichu_call = _FixedCall(0.30)
+    assert a_low.should_call(ps, "tichu") is True
+
+    a_hi = MLAgent(artifact, tichu_threshold=0.35)
+    a_hi._tichu_call = _FixedCall(0.30)
+    assert a_hi.should_call(ps, "tichu") is False
+
+    # Default threshold 0.5 reproduces argmax: P(call)=0.30 -> decline.
+    a_def = MLAgent(artifact)
+    a_def._tichu_call = _FixedCall(0.30)
+    assert a_def.should_call(ps, "tichu") is False
+
+
+def test_call_threshold_out_of_range_raises(tmp_path):
+    from tichu_training.action_space import ACTION_SPACE_SIZE
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    with pytest.raises(ValueError):
+        MLAgent(artifact, tichu_threshold=0.0)
+    with pytest.raises(ValueError):
+        MLAgent(artifact, grand_threshold=1.0)
+
+
+def test_wish_action_scores_softmax_on_mahjong_state(tmp_path):
+    from tichu_training.action_space import ACTION_SPACE_SIZE
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    from tichu_engine.cards import MAHJONG
+    from tichu_engine.combinations import Single
+    from tichu_engine.engine import step
+    from tichu_engine.state import MahjongWishPending
+
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    agent = MLAgent(artifact)
+    state = deal_initial_state(seed=0)
+    # The Mahjong holder leads; playing it triggers the Wish pending decision.
+    state2, _, _, _ = step(state, Single(MAHJONG))
+    ps = state2.private_view(state2.public.current_player)
+    assert isinstance(ps.public.pending_decision, MahjongWishPending)
+
+    scores = agent.wish_action_scores(ps)
+    assert scores, "expected legal wish ranks"
+    assert all(0.0 <= p <= 1.0 for _, p in scores)
+    assert abs(sum(p for _, p in scores) - 1.0) < 1e-5      # a softmax
+    assert scores == sorted(scores, key=lambda t: -t[1])    # sorted desc
+
+
 def test_rank_actions_returns_legal_actions(tmp_path):
     from tichu_training.action_space import ACTION_SPACE_SIZE
     from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM

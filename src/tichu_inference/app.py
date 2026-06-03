@@ -47,6 +47,12 @@ def create_app(config: dict) -> FastAPI:
     if missing:
         raise RuntimeError(f"missing agents for difficulties: {missing}")
 
+    # Optional live decision tape: when `tape_log` is set (serve --tape-log),
+    # every Play Decision served by an ML agent is appended to that file with its
+    # top-k ranked alternatives, so a human playing visually can look up a move
+    # they thought was bad. Lazy — costs nothing when the flag is off.
+    tape = _TapeLogger(config["tape_log"]) if config.get("tape_log") else None
+
     app = FastAPI()
     state = _AppState(agents=agents)
     app.state.agent_registry = agents
@@ -117,6 +123,10 @@ def create_app(config: dict) -> FastAPI:
         fallback_used = bool(getattr(agent, "last_fallback_used", False))
 
         state.record(difficulty, elapsed_ms, fallback_used)
+        # Live tape: every served Decision (Play / Wish / Dragon / Schupfen),
+        # dispatched on the pending type by the logger.
+        if tape is not None:
+            tape.log(agent, ps, action, difficulty)
 
         return {
             "action": action_to_json(action),
@@ -211,6 +221,56 @@ def _build_agents(spec: dict) -> dict[str, Agent]:
         else:
             raise ValueError(f"unknown agent factory {factory!r} for {difficulty}")
     return agents
+
+
+class _TapeLogger:
+    """Appends a human-reviewable decision tape during live serving. One block
+    per served Play Decision (ML agents only): the hand, Trick top, chosen play,
+    and top-k ranked alternatives with policy probabilities. See
+    `tichu_eval.decision_tape`. File is opened per-write (append) — simple and
+    safe for single-user interactive play; not a high-throughput path."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._seq = 0
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write("\n# --- live decision tape opened ---\n")
+
+    def log(self, agent: Agent, private_state, action, difficulty: str) -> None:
+        # Lazy import keeps the eval dependency off the default serve path.
+        from tichu_engine.state import (
+            DragonGivePending, MahjongWishPending, SchupfenPending,
+        )
+        from tichu_eval.decision_tape import (
+            build_record, render_dragon, render_record, render_schupfen, render_wish,
+        )
+
+        if not hasattr(agent, "play_action_scores"):
+            return  # baselines expose no ranked alternatives
+        ts = time.strftime("%H:%M:%S")
+        header = f"--- #{self._seq + 1}  {ts}  difficulty={difficulty} ---"
+        pending = private_state.public.pending_decision
+        if pending is None:
+            rec = build_record(agent, private_state, action,
+                               seat=private_state.public.current_player)
+            block = render_record(rec, header=header) if rec is not None else None
+        elif isinstance(pending, MahjongWishPending):
+            block = render_wish(agent, private_state, action, header=header)
+        elif isinstance(pending, DragonGivePending):
+            block = render_dragon(agent, private_state, action, header=header)
+        elif isinstance(pending, SchupfenPending):
+            block = render_schupfen(agent, private_state, action, header=header)
+        else:
+            block = None
+        if block is None:
+            return  # forced / no ranked alternatives — don't burn a sequence number
+        self._seq += 1
+        try:
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(block + "\n\n")
+        except Exception:  # noqa: BLE001 — tape logging must never break serving
+            log.exception("tape write failed (continuing)")
 
 
 class _AppState:

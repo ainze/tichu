@@ -64,6 +64,66 @@ def train_one_belief_epoch(
     return last_loss
 
 
+def _broadcast_mask(card_mask: np.ndarray, num_opp: int = 3) -> np.ndarray:
+    """(B, 56) card-level mask -> (B, 3, 56)."""
+    return np.broadcast_to(card_mask[:, None, :], (card_mask.shape[0], num_opp, card_mask.shape[1]))
+
+
+def train_one_belief_epoch_stream(
+    model: BeliefModel,
+    dataset,
+    optimizer: torch.optim.Optimizer,
+    *,
+    batch_size: int,
+    input_dim: int,
+    log_path: Path,
+) -> float:
+    """Low-RAM epoch: stream batched arrays off the memmap (no full-list
+    materialisation), slicing features to `input_dim` (the ADR-0028 tier prefix).
+    Mirrors `train_one_belief_epoch` but for the scale path."""
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    new = not log_path.exists()
+    step = _next_step(log_path)
+    last_loss = float("inf")
+    rows: list[dict] = []
+    for feats, labels, card_mask in dataset.iter_arrays(batch_size):
+        x = torch.from_numpy(feats[:, :input_dim])
+        y = torch.from_numpy(labels)
+        m = torch.from_numpy(_broadcast_mask(card_mask).copy())
+        logits = model(x)
+        loss = belief_loss(logits, y, m)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        acc = belief_accuracy(logits, y, m)
+        rows.append({"step": step, "loss": float(loss.detach()), "accuracy": acc})
+        last_loss = float(loss.detach())
+        step += 1
+    with log_path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(_STEP_FIELDS))
+        if new:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return last_loss
+
+
+def stream_accuracy(model: BeliefModel, dataset, *, batch_size: int, input_dim: int) -> float:
+    """Masked accuracy over the whole bundle, streamed (no materialisation)."""
+    matches = 0
+    total = 0
+    with torch.no_grad():
+        for feats, labels, card_mask in dataset.iter_arrays(batch_size):
+            x = torch.from_numpy(feats[:, :input_dim])
+            logits = model(x)
+            pred = (logits > 0).to(torch.float32).numpy()
+            m = _broadcast_mask(card_mask)
+            matches += int(((pred == labels) & m).sum())
+            total += int(m.sum())
+    return matches / total if total else 0.0
+
+
 def calibration_table(
     model: BeliefModel, examples: Sequence[BeliefExample]
 ) -> list[dict]:

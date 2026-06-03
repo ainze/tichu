@@ -11,8 +11,8 @@ On-disk layout for a slice of N examples:
 
   <out_dir>/
     manifest.json
-    belief_feat_bits.dat   (N, 27)   uint8   (packbits of 214 indicator cols)
-    belief_feat_cont.dat   (N, 10)   float32 (continuous columns)
+    belief_feat_bits.dat   (N, 27)   uint8   (packbits of the 214 policy indicator cols)
+    belief_feat_cont.dat   (N, 93)   float32 (10 policy continuous + 83 History cols; ADR-0028)
     belief_labels.dat      (N, 21)   uint8   (packbits of the 3*56=168 label bits)
     belief_mask.dat        (N, 7)    uint8   (packbits of the 56-card mask)
     belief_meta.dat        (N,)      structured (cards_played u1, game_id u4, round_id u1)
@@ -34,17 +34,21 @@ import numpy as np
 from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bc.packing import FeatureCodec, check_pin, pack_bool_rows, unpack_bool_rows
 from tichu_training.belief.dataset import BeliefExample
-from tichu_training.featurizer import (
-    CONTINUOUS_FEATURE_COLUMNS,
-    FEATURIZER_OUTPUT_DIM,
-    FEATURIZER_VERSION,
+from tichu_training.belief.history import (
+    BELIEF_FEATURE_DIM,
+    BELIEF_INPUT_VERSION,
+    belief_continuous_columns,
 )
+from tichu_training.featurizer import FEATURIZER_VERSION
 
 
 log = logging.getLogger("tichu_training.belief.belief_materialised")
 
 
-BELIEF_SCHEMA_VERSION = 1
+# v2: the belief input is the policy Feature Vector + the History block
+# (ADR-0028), no longer the bare 224-dim policy vector. Versioned independently
+# via `belief_input_version` in the manifest.
+BELIEF_SCHEMA_VERSION = 2
 
 _NUM_OPPONENTS = 3
 _NUM_CARDS = 56
@@ -73,8 +77,8 @@ class BeliefBundleWriter:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.chunk_size = chunk_size
-        self.cont_cols = list(CONTINUOUS_FEATURE_COLUMNS)
-        self._codec = FeatureCodec(FEATURIZER_OUTPUT_DIM, self.cont_cols)
+        self.cont_cols = list(belief_continuous_columns())
+        self._codec = FeatureCodec(BELIEF_FEATURE_DIM, self.cont_cols)
         self._label_dim = _NUM_OPPONENTS * _NUM_CARDS
 
         self._bits_path = self.out_dir / "belief_feat_bits.dat"
@@ -138,8 +142,9 @@ class BeliefBundleWriter:
         manifest = {
             "schema_version": BELIEF_SCHEMA_VERSION,
             "featurizer_version": FEATURIZER_VERSION,
+            "belief_input_version": BELIEF_INPUT_VERSION,
             "action_space_version": ACTION_SPACE_VERSION,
-            "feature_dim": FEATURIZER_OUTPUT_DIM,
+            "feature_dim": BELIEF_FEATURE_DIM,
             "features_packed": True,
             "continuous_feature_columns": self.cont_cols,
             "num_opponents": _NUM_OPPONENTS,
@@ -187,6 +192,7 @@ class MemmapBeliefDataset(Iterable[BeliefExample]):
         expected_featurizer_version: str = FEATURIZER_VERSION,
         expected_action_space_version: str = ACTION_SPACE_VERSION,
         expected_schema_version: int = BELIEF_SCHEMA_VERSION,
+        expected_belief_input_version: str = BELIEF_INPUT_VERSION,
     ) -> None:
         self.data_dir = Path(data_dir)
         manifest_path = self.data_dir / "manifest.json"
@@ -211,6 +217,11 @@ class MemmapBeliefDataset(Iterable[BeliefExample]):
             "schema_version",
             self.manifest.get("schema_version"),
             expected_schema_version,
+        )
+        check_pin(
+            "belief_input_version",
+            self.manifest.get("belief_input_version"),
+            expected_belief_input_version,
         )
 
         self.feature_dim: int = self.manifest["feature_dim"]
@@ -249,6 +260,26 @@ class MemmapBeliefDataset(Iterable[BeliefExample]):
 
     def __len__(self) -> int:
         return self.count
+
+    def iter_arrays(self, batch_size: int):
+        """Stream batched numpy arrays straight off the memmaps — the low-RAM
+        path for scale training (no full-list materialisation). Yields
+        ``(features (B, feature_dim) f32, labels (B, 3, 56) f32,
+        card_mask (B, 56) bool)`` in stored order. Vectorised unpack (one bulk
+        bit-unpack per batch), far faster than per-example `__iter__`."""
+        for start in range(0, self.count, batch_size):
+            end = min(start + batch_size, self.count)
+            feats = self._codec.unpack(
+                np.asarray(self._feat_bits[start:end]),
+                np.asarray(self._feat_cont[start:end]),
+            )
+            labels = unpack_bool_rows(
+                np.asarray(self._labels[start:end]), self._label_dim
+            ).reshape(end - start, self.num_opponents, self.num_cards).astype(np.float32)
+            card_mask = unpack_bool_rows(
+                np.asarray(self._mask[start:end]), self.num_cards
+            ).astype(bool)
+            yield feats, labels, card_mask
 
     def __iter__(self) -> Iterator[BeliefExample]:
         for i in range(self.count):

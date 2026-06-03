@@ -89,6 +89,8 @@ class MLAgent(Agent):
         tichu_call_path: str | Path | None = None,
         grand_call_path: str | Path | None = None,
         fallback_rng: random.Random | None = None,
+        tichu_threshold: float = 0.5,
+        grand_threshold: float = 0.5,
     ) -> None:
         # Load each artifact from its path, then hand off to the shared
         # initialiser. `from_loaded` is the path-free entry point the serve
@@ -100,6 +102,8 @@ class MLAgent(Agent):
             tichu_call=self._maybe_load(tichu_call_path),
             grand_call=self._maybe_load(grand_call_path),
             fallback_rng=fallback_rng,
+            tichu_threshold=tichu_threshold,
+            grand_threshold=grand_threshold,
         )
 
     @classmethod
@@ -112,6 +116,8 @@ class MLAgent(Agent):
         tichu_call=None,
         grand_call=None,
         fallback_rng: random.Random | None = None,
+        tichu_threshold: float = 0.5,
+        grand_threshold: float = 0.5,
     ) -> "MLAgent":
         """Build an agent over already-loaded modules, skipping disk I/O.
 
@@ -127,6 +133,8 @@ class MLAgent(Agent):
             tichu_call=tichu_call,
             grand_call=grand_call,
             fallback_rng=fallback_rng,
+            tichu_threshold=tichu_threshold,
+            grand_threshold=grand_threshold,
         )
         return self
 
@@ -139,6 +147,8 @@ class MLAgent(Agent):
         tichu_call,
         grand_call,
         fallback_rng: random.Random | None,
+        tichu_threshold: float = 0.5,
+        grand_threshold: float = 0.5,
     ) -> None:
         # Skill Embedding input fed to every network at inference. 0..9 are the
         # BSW skill deciles (9 = strongest players); 10 is the neutral/cold-start
@@ -148,6 +158,16 @@ class MLAgent(Agent):
             raise ValueError(
                 f"skill_decile must be in [0, {_NEUTRAL_SKILL}], got {skill_decile}"
             )
+        # Call decision threshold: call iff P(call) >= threshold. 0.5 == argmax
+        # (the historical behaviour). Lower => call more (less conservative); a
+        # per-tier lever for calibrating call rate / tournament EV. Tichu and
+        # Grand-Tichu are independent networks, so each gets its own threshold.
+        for name, t in (("tichu", tichu_threshold), ("grand", grand_threshold)):
+            if not 0.0 < float(t) < 1.0:
+                raise ValueError(f"{name}_threshold must be in (0, 1), got {t}")
+        self._call_thresholds = {
+            "tichu": float(tichu_threshold), "grand": float(grand_threshold),
+        }
         self._skill_decile = int(skill_decile)
         self._module = policy_module
         self._schupfen = schupfen
@@ -201,7 +221,10 @@ class MLAgent(Agent):
             logits = self._run(module, private_state)
             if not _is_finite(logits):
                 raise RuntimeError("non-finite call logits")
-            return bool(int(np.argmax(logits)) == 1)
+            # P(call) = softmax over [skip, call] = sigmoid(logit_call - logit_skip).
+            # Call iff P(call) >= threshold; threshold 0.5 reproduces argmax.
+            p_call = 1.0 / (1.0 + float(np.exp(logits[0] - logits[1])))
+            return p_call >= self._call_thresholds[kind]
         except Exception as exc:  # noqa: BLE001
             log.error("call inference fallback (%s): %s; declining", kind, exc)
             return False
@@ -258,9 +281,69 @@ class MLAgent(Agent):
         ranked = _rank_legal_by_logits(legal, play_logits)
         return ranked or legal
 
+    def play_action_scores(
+        self, private_state: PrivateState
+    ) -> list[tuple[ConcreteAction, float]]:
+        """Legal Play actions with their policy probability (softmax over the
+        legal set's logits), sorted descending. Diagnostic only (decision tapes
+        / analysis) — NOT on the `act()` hot path. Unmapped actions get 0.0."""
+        legal = list(legal_actions_for(private_state))
+        if not legal:
+            return []
+        play_logits = self._play_logits(private_state)
+        idxs = [_combination_to_action_index(a) for a in legal]
+        scored = [
+            (a, float(play_logits[i]))
+            for a, i in zip(legal, idxs)
+            if i is not None and 0 <= i < play_logits.shape[0]
+        ]
+        if not scored:
+            return [(a, 0.0) for a in legal]
+        logits = np.array([s for _, s in scored], dtype=np.float64)
+        exp = np.exp(logits - logits.max())
+        probs = exp / exp.sum()
+        out = [(a, float(p)) for (a, _), p in zip(scored, probs)]
+        out.sort(key=lambda t: -t[1])
+        return out
+
     def _play_logits(self, private_state: PrivateState) -> np.ndarray:
         out = self._policy_forward(private_state)
         return out["play"][0].detach().cpu().numpy()
+
+    # ------------------------------------------------------------
+    # Diagnostic score methods (decision tapes) for the non-Play Decisions —
+    # NOT on the act() hot path.
+    # ------------------------------------------------------------
+
+    def wish_action_scores(self, private_state: PrivateState) -> list[tuple[ConcreteAction, float]]:
+        """Legal Mahjong-Wish ranks with policy probability, sorted descending."""
+        out = self._policy_forward(private_state)
+        wish_logits = out["wish"][0].detach().cpu().numpy()
+        legal = [a for a in legal_actions_for(private_state) if isinstance(a, MahjongWish)]
+        return _softmax_scores([(a, float(wish_logits[wish_intent_index(a)])) for a in legal])
+
+    def dragon_action_scores(self, private_state: PrivateState) -> list[tuple[ConcreteAction, float]]:
+        """The two DragonGive targets with policy probability, sorted descending."""
+        pending = private_state.public.pending_decision
+        winner = getattr(pending, "winner", None)
+        out = self._policy_forward(private_state)
+        dl = out["dragon_assignment"][0].detach().cpu().numpy()
+        legal = [a for a in legal_actions_for(private_state) if isinstance(a, DragonGive)]
+        return _softmax_scores([(a, float(dl[dragon_intent_index(a, winner)])) for a in legal])
+
+    def schupfen_action_scores(self, private_state: PrivateState) -> dict[str, list[tuple]]:
+        """Per-direction ranked candidate cards (softmax over the Hand) for the
+        Schupfen Network's three 56-way heads — {next/partner/previous: [(card, p)]}."""
+        if self._schupfen is None:
+            return {}
+        features, skill = self._inputs(private_state)
+        heads = self._schupfen(features, skill)
+        hand = list(private_state.hand)
+        out: dict[str, list[tuple]] = {}
+        for name, head in zip(("next", "partner", "previous"), heads):
+            row = head[0].detach().cpu().numpy()
+            out[name] = _softmax_scores([(c, float(row[card_slot(c)])) for c in hand])
+        return out
 
     # ------------------------------------------------------------
     # Wish / dragon — policy heads scored over the legal-action set.
@@ -362,6 +445,18 @@ def _best_slot(logits_row: np.ndarray, allowed_slots: list[int], used: set[int])
 
 def _is_finite(logits: np.ndarray) -> bool:
     return bool(np.isfinite(logits).all())
+
+
+def _softmax_scores(pairs: list[tuple]) -> list[tuple]:
+    """[(item, logit)] -> [(item, prob)] softmaxed over the set, sorted desc."""
+    if not pairs:
+        return []
+    logits = np.array([s for _, s in pairs], dtype=np.float64)
+    exp = np.exp(logits - logits.max())
+    probs = exp / exp.sum()
+    out = [(item, float(p)) for (item, _), p in zip(pairs, probs)]
+    out.sort(key=lambda t: -t[1])
+    return out
 
 
 def _rank_legal_by_logits(legal: list[ConcreteAction], play_logits: np.ndarray) -> list[ConcreteAction]:

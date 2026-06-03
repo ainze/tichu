@@ -1,0 +1,39 @@
+# Belief SCALE check — B-core, ~10x data + 2x capacity + more epochs vs the gate.
+#
+# Tests whether belief is scale-limited (worth integrating) or near-ceiling
+# (pivot). Uses the low-RAM `streaming: true` path (ADR-0028 follow-up) so 10M+
+# examples never materialise as a list. Gate reference to beat: B-core top-1
+# 0.505 aggregate / 0.669 late-game (docs/notes/2026-06-03-belief-history-gate.md).
+#
+# 1. Materialise a bigger B-full bundle (subset to taste; ~534 examples/game):
+#   py -3.14 -m tichu_training.cli.parse_bsw `
+#     --archive        C:\workbench\tichu\data\archive.zst `
+#     --output         C:\workbench\tichu\data\parquet_belief_scale_v5 `
+#     --bundle-out-dir C:\workbench\tichu\data\materialised_belief_scale_v5 `
+#     --bundle-tasks   belief --subset 20000 --workers 10
+#
+# 2. Train (streaming; ~2 min/epoch per ~10M examples on this box):
+#   py -3.14 -m tichu_training.cli.train_belief `
+#     --config configs\belief_v5_scale_Bcore.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\belief_scale_Bcore -v
+#
+# 3. Eval top-1 by round vs the gate:
+#   py -3.14 scripts\belief_naive_baseline.py `
+#     --bundle C:\workbench\tichu\data\materialised_belief_scale_v5\belief `
+#     --checkpoint C:\workbench\tichu\data\runs\belief_scale_Bcore\checkpoints\belief_final.bin `
+#     --tier B_core --max-examples 100000
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_belief_scale_v5\belief
+
+streaming: true
+tier: B_core
+
+model:
+  hidden: 512          # 256 -> 512 (capacity test)
+
+learning_rate: 1.0e-3
+batch_size: 2048
+epochs: 12
+seed: 0
