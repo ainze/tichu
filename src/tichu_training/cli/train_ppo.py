@@ -14,7 +14,9 @@ the existing tooling already supports.
 
 import argparse
 import copy
+import csv
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -26,7 +28,9 @@ from tichu_training.bc.training import load_checkpoint, save_checkpoint
 from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
 from tichu_training.ppo.league import League
 from tichu_training.ppo.policy import BatchedPolicy
+from tichu_training.ppo.rollout import collect_rollout
 from tichu_training.ppo.train import AdaptiveKLController, train_ppo
+from tichu_training.ppo.update import build_batch, value_loss
 
 
 def _build_model(config) -> BCModel:
@@ -49,9 +53,41 @@ def _freeze(module):
     return module
 
 
-def run_ppo_training(config, *, on_iteration=None) -> dict:
+def _critic_warmup(
+    bc_model, critic, sample_positions, *,
+    iters: int, epochs: int, critic_lr: float,
+    skill_decile: int, learner_team: int, gamma: float, lam: float,
+    progress: bool,
+) -> None:
+    """Fit the critic under the FROZEN BC policy before the policy moves, so the
+    first PPO advantages aren't computed against an ignorant value baseline
+    (ADR-0029 §value). Pure BC self-play; only the critic learns. Also a clean
+    test of the value floor: if `value_loss` keeps falling here the critic was
+    under-fit; if it plateaus immediately, ~that floor is irreducible variance."""
+    warm_opt = torch.optim.Adam(critic.parameters(), lr=critic_lr)
+    actor = BatchedPolicy(bc_model, critic, skill_decile=skill_decile)
+    for it in range(iters):
+        positions = sample_positions(it)
+        traj = collect_rollout(positions, actor, opponent_policy=actor, learner_team=learner_team)
+        batch = build_batch(traj, skill_decile=skill_decile, gamma=gamma, lam=lam)
+        last = 0.0
+        for _ in range(epochs):
+            loss = value_loss(critic(batch.features), batch.returns)
+            warm_opt.zero_grad()
+            loss.backward()
+            warm_opt.step()
+            last = float(loss.detach())
+        if progress:
+            print(f"warmup {it + 1:>3}/{iters} | value_loss {last:.3e}", flush=True)
+
+
+def run_ppo_training(config, *, on_iteration=None, progress: bool = True) -> dict:
     """Run PPO Refine from `config` (a parsed dict) and write the Sharpened
-    Checkpoint. Returns `{history, checkpoint_path, league_size}`."""
+    Checkpoint. Returns `{history, checkpoint_path, league_size}`.
+
+    `progress=True` prints a one-line-per-iteration progress readout (loss /
+    value / policy / entropy / kl / beta + seconds and rounds/hour) so a
+    foreground or backgrounded run shows live progress, not just a final line."""
     ppo = config["ppo"]
     skill_decile = int(ppo.get("skill_decile", 9))
     learner_team = int(ppo.get("learner_team", 0))
@@ -82,17 +118,85 @@ def run_ppo_training(config, *, on_iteration=None) -> dict:
 
     pool_seed = int(ppo.get("pool_seed", 0))
     positions_per_iter = int(ppo["positions_per_iter"])
+    total_iters = int(ppo["iterations"])
 
     def _sample_positions(iteration: int):
         return generate_full_position_pool(
             seed=pool_seed + iteration * positions_per_iter, n=positions_per_iter
         )
 
+    # Observability for the long background run (ADR-0029 §eval/stopping/kill needs
+    # mid-run dials + a crash-safe trail). The training loop itself only returns
+    # `history` at the very end and persists one final Checkpoint; here we (a) append
+    # each iteration's stats to a CSV under the run dir, and (b) persist an
+    # intermediate .bin every `snapshot_every` iterations so it can be exported and
+    # behaviorally evaluated to apply the kill rule. This is plumbing, not a change
+    # to the locked algorithm.
+    run_dir = Path(config["out"]).parent
+    snapshots_dir = run_dir / "snapshots"
+    log_path = run_dir / "ppo_log.csv"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    log_state = {"writer": None, "fh": None, "last_t": time.perf_counter()}
+
     def _on_iteration(iteration: int, stats: dict) -> None:
-        if (iteration + 1) % snapshot_every == 0:
+        now = time.perf_counter()
+        row = {"iter": iteration, "wall_s": round(now - log_state["last_t"], 3), **stats}
+        log_state["last_t"] = now
+        if log_state["writer"] is None:
+            fh = open(log_path, "w", newline="", encoding="utf-8")
+            writer = csv.DictWriter(fh, fieldnames=list(row.keys()))
+            writer.writeheader()
+            log_state["fh"], log_state["writer"] = fh, writer
+        log_state["writer"].writerow(row)
+        log_state["fh"].flush()
+
+        snapped = (iteration + 1) % snapshot_every == 0
+        if snapped:
             league.snapshot(model, critic, skill_decile=skill_decile)
+            save_checkpoint(
+                model, optimizer, step=iteration + 1,
+                path=str(snapshots_dir / f"iter_{iteration + 1:05d}.bin"),
+            )
+
+        if progress:
+            wall_s = row["wall_s"]
+            rph = positions_per_iter * 3600.0 / wall_s if wall_s > 0 else float("nan")
+            print(
+                f"iter {iteration + 1:>4}/{total_iters} | "
+                f"loss {stats['loss']:.3e}  v {stats['value_loss']:.3e}  "
+                f"p {stats['policy_loss']:+.4f}  ent {stats['entropy']:.3f}  "
+                f"kl {stats['kl_to_bc']:.4f}  beta {stats['kl_coef']:.2e} | "
+                f"{wall_s:.1f}s  ~{rph:,.0f} r/h"
+                f"{'  [snap]' if snapped else ''}",
+                flush=True,
+            )
+
         if on_iteration is not None:
             on_iteration(iteration, stats)
+
+    warmup_iters = int(config.get("critic", {}).get("warmup_iters", 0))
+    if progress:
+        print(
+            f"PPO Refine: {total_iters} iters x M={positions_per_iter} "
+            f"(decile {skill_decile}, learner team {learner_team})\n"
+            f"  warm_start: {config['warm_start']}\n"
+            f"  out:        {config['out']}  (snapshots every {snapshot_every} -> {snapshots_dir})\n"
+            f"  log:        {log_path}"
+            + (f"\n  critic warm-up: {warmup_iters} iters (frozen BC policy)" if warmup_iters else ""),
+            flush=True,
+        )
+
+    if warmup_iters > 0:
+        _critic_warmup(
+            bc_model, critic, _sample_positions,
+            iters=warmup_iters,
+            epochs=int(config.get("critic", {}).get("warmup_epochs", 3)),
+            critic_lr=float(ppo.get("critic_lr", 1e-3)),
+            skill_decile=skill_decile, learner_team=learner_team,
+            gamma=float(ppo.get("gamma", 1.0)), lam=float(ppo.get("lam", 0.95)),
+            progress=progress,
+        )
 
     history = train_ppo(
         model, critic, bc_model, _sample_positions,
@@ -110,6 +214,9 @@ def run_ppo_training(config, *, on_iteration=None) -> dict:
         opponent_policy_provider=league.sample,
         on_iteration=_on_iteration,
     )
+
+    if log_state["fh"] is not None:
+        log_state["fh"].close()
 
     out_path = config["out"]
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)

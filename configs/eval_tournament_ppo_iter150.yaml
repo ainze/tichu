@@ -1,0 +1,57 @@
+# Full-strength Tournament: does PPO Refine iter_00150 actually WIN more, or was
+# the -10% caller_bomb_passivity dial move cosmetic? (ADR-0025 / ADR-0029 ship gate.)
+#
+# Ship gate (ADR-0029): the Sharpened Checkpoint must beat `master` AND frozen BC
+# (the RPS guard) with bootstrap CI excluding 0. master/bc_neutral are the same
+# full-corpus BC Checkpoint the PPO run sharpened (decile 9 vs neutral). ppo_iter150
+# reuses master's frozen schupfen/call nets and swaps in the sharpened play policy.
+# rule/random anchor the score scale.
+#
+# Run (parallel; workers spawn fresh, so keep PYTHONPATH on the env):
+#   py -3.14 -m tichu_training.cli.eval_matrix --config configs/eval_tournament_ppo_iter150.yaml -v
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 2000
+bootstrap_iters: 1000
+seed: 0
+workers: 10
+
+agents:
+  - name: ppo_iter150
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\ppo_v5_iter150\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  # Frozen BC, no skill conditioning — the RPS-guard reference (PPO must beat this too).
+  - name: bc_neutral
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+  - name: rule
+    factory: rule
+    kwargs: {}
+
+  - name: random
+    factory: random
+    kwargs:
+      seed: 0
+
+output: C:\workbench\tichu\data\runs\ppo_v5\tournament_iter150.parquet

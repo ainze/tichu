@@ -1,0 +1,39 @@
+# Behavioral dials for the PPO Refine snapshot iter_00020 vs the master baseline.
+#
+# Mid-run kill-rule check (ADR-0029 §eval/stopping/kill): does the Sharpened
+# policy's caller_bomb_passivity_rate fall from master's 0.323? The sharpened
+# agent reuses master's UNCHANGED Schupfen/Call exports (PPO only touched the
+# play head + trunk; calls/schupfen are separate frozen networks) and only swaps
+# in the sharpened policy.pt. master is re-profiled here so the comparison is in
+# one run, not against a remembered number.
+#
+# Run:
+#   py -3.14 -m tichu_training.cli.eval_matrix `
+#     --config configs/eval_behavioral_ppo_iter20.yaml --mode behavioral -v
+
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 500          # x4 seats = 2000 self-play seat-rounds, matches the 0.323 measurement
+seed: 0
+
+agents:
+  # PPO Refine, iteration 20 (sharpened policy + master's frozen call/schupfen nets).
+  - name: ppo_iter20
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\ppo_v5_iter20\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  # Baseline: the served master (the policy PPO is sharpening), re-measured here.
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\ppo_v5\behavioral_iter20.csv

@@ -19,7 +19,7 @@
 # warm_start MUST be a BC *Checkpoint* (.bin, load_checkpoint format) — NOT a
 # TorchScript export (policy.pt). Its `model` dims MUST match the values below.
 
-warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5\REPLACE_WITH_BC_CHECKPOINT.bin
+warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
 out:        C:\workbench\tichu\data\runs\ppo_v5\sharpened.bin
 
 # Must match the warm_start BC Checkpoint's architecture (full-corpus v5 BC).
@@ -38,7 +38,7 @@ critic:
 # beta_KL is steered toward keeping KL-to-BC near `target`.
 kl:
   coef:   1.0
-  target: 0.02
+  target: 0.04   # was 0.02 — anchor was snapping the policy back to passive BC
   factor: 2.0
 
 # Frozen-BC start, growing to a small league of frozen learner snapshots.
@@ -54,9 +54,9 @@ ppo:
   lam:                0.95
   clip_eps:           0.1     # conservative — warm-started policy
   vf_coef:            0.5
-  ent_coef:           0.01    # lever #2 — exploration toward under-tried bombs
+  ent_coef:           0.02    # was 0.01 — entropy was falling; push exploration harder
   ppo_epochs:         3
   policy_lr:          1.0e-4
-  critic_lr:          1.0e-3
+  critic_lr:          3.0e-3   # was 1e-3 — value_loss was flat ~7000 (critic not learning)
   skill_decile:       9       # self-play conditioned on decile-9 (master goal)
   learner_team:       0

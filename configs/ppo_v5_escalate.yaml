@@ -1,0 +1,58 @@
+# PPO Refine ESCALATION run (ADR-0029, path A from the 2026-06-03 conservative
+# result). The conservative config moved caller_bomb_passivity only -10% and
+# plateaued ~iter 70; Tournament-vs-master came back within noise (+2.1, CI
+# [-4.74, +9.08]) -> did not ship. This run pushes the same approach decisively:
+#   * ent_coef 0.02 -> 0.03   (huge over-correction headroom: bomb_when_legal was
+#                              only ~0.11, nowhere near the ~1.0 spam regime)
+#   * critic warm-up           (fit V under frozen BC before the policy moves;
+#                              also tests whether the ~6000 value_loss floor is
+#                              irreducible variance)
+#   * fresher/larger league    (snapshot_every 10->5, max_snapshots 5->8) so
+#                              opponents skew toward the more-aggressive recent
+#                              learner and actually punish caller passivity
+# kl.target stays 0.04 and critic_lr 3e-3 (run-2 values that fixed the early
+# collapse). Separate out dir so run-2's logs/snapshots are preserved.
+#
+# Run:
+#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_escalate.yaml
+# Bet: the plateau was the timid lever setting, not the method's ceiling. If this
+# ALSO moves the dial without moving the Tournament -> v1 scope is too narrow (B).
+
+warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+out:        C:\workbench\tichu\data\runs\ppo_v5_escalate\sharpened.bin
+
+model:
+  skill_dim:     64
+  trunk_hidden:  1024
+  trunk_depth:   4
+  trunk_out_dim: 512
+  head_hidden:   256
+
+critic:
+  hidden:        512
+  warmup_iters:  15    # fit the critic under frozen BC before the policy moves
+  warmup_epochs: 3
+
+kl:
+  coef:   1.0
+  target: 0.04
+  factor: 2.0
+
+league:
+  max_snapshots:  8     # was 5 — bigger, fresher pool of (aggressive) opponents
+  snapshot_every: 5     # was 10 — snapshot more often so opponents track the learner
+
+ppo:
+  iterations:         500
+  positions_per_iter: 256
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ent_coef:           0.03    # was 0.02 — push exploration past the plateau
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          3.0e-3
+  skill_decile:       9
+  learner_team:       0

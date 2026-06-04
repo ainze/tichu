@@ -103,7 +103,20 @@ move but Tournament-vs-master stays within noise (fix didn't translate to wins);
 no β_KL/entropy setting satisfies both passivity↓ and Move-Pred-bounded. Commit now
 to the rule **"if the dials haven't moved by 50% of budget, stop and diagnose rather
 than extend"**; set the budget *number* after the rollout harness gives a rounds/hour
-figure. Two self-play guards: **non-transitivity** — the latest snapshot must beat
+figure.
+
+**Kill-criterion specifics (resolved 2026-06-03, run session).** Budget unit is
+**iterations** (what the config controls and snapshots key to), with the implied
+wall-clock as a backstop ceiling; the absolute number is filled in after the first
+throughput read. Headline kill metric is **`caller_bomb_passivity_rate`** (baseline
+**0.323**), not the broader `caller_passivity_rate`. "Moved meaningfully" = a **≥30%
+relative drop by the half-budget snapshot** (≤ ~0.226) — a deliberately modest
+direction-check, not the ship bar of single digits. Below it at halfway → stop and
+diagnose. Dials are read by **exporting a persisted snapshot and running `eval_matrix
+--mode behavioral`** (every snapshot for the first ~3 to confirm direction, then every
+2nd–3rd). Enabled by mid-run observability added to `train_ppo`: per-iteration stats →
+`{run_dir}/ppo_log.csv`; intermediate Checkpoints → `{run_dir}/snapshots/iter_NNNNN.bin`
+every `snapshot_every`. Two self-play guards: **non-transitivity** — the latest snapshot must beat
 frozen BC and master, not just recent predecessors (the full-zoo Tournament detects
 RPS cycling; the owner play-test is the out-of-distribution backstop); and
 **over-correction** — `bomb_when_legal_rate` must rise from BC's near-zero but stay
@@ -120,3 +133,28 @@ looks fine).
   Trunk+Heads payload), so it remains a drop-in `master`-tier swap.
 - v1 explicitly excludes: out-of-turn bombs, the Game-to-1000 meta-game, and
   decile-mapped serving of the Sharpened Checkpoint.
+
+## Run result (2026-06-03, conservative config)
+
+First real run (full-corpus v5 `master` warm-start). After re-tuning out an early
+collapse, `caller_bomb_passivity_rate` fell 0.323 → **~0.285 (−10%)** but **plateaued
+by ~iter 70**, and the full-strength **Tournament-vs-master came back +2.1, CI
+[−4.74, +9.08] — within noise**. The behavioral fix did **not** translate into wins;
+beating `bc_neutral` (+20.7) is purely the decile-9 effect (`master` beats neutral by
+more, +23.2). Per the kill logic above ("dials move but Tournament-vs-master stays
+within noise") this checkpoint **does not ship**. The `value_loss` ~6000 floor is
+largely irreducible `round_outcome` variance, not critic ignorance (the dial moved
+regardless), so the critic is not the primary bottleneck; the suspected ceiling is
+rare-event frequency + a league that doesn't punish passivity. Escalation (stronger
+entropy + critic warm-up + fresher/larger league, `configs/ppo_v5_escalate.yaml`) was
+run next.
+
+**Escalation result — method abandoned at v1 scope.** The aggressive config (500 iters)
+moved the dial *less* (caller_bomb_passivity 0.316, −2%) and broad passivity *worse*
+(0.183), with Tournament-vs-master still within noise (+4.0, CI [−3.32, +11.09]). Run at
+both ends of the lever range, **PPO Refine v1 never beats master**; pushing harder slightly
+hurt (high entropy kept the policy too diffuse to commit to the decisive bomb). **Decision:
+stop tuning PPO Refine v1 — the on-turn-only scope is too narrow to move win-rate; no
+Sharpened Checkpoint ships and `master` stays the served top tier.** The strength gap needs
+the descoped scope (out-of-turn bombs, Game-to-1000 meta-game, or Phase-2 search). Full
+write-up: [docs/notes/2026-06-03-ppo-refine-v1-conservative-result.md].
