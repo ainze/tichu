@@ -1,0 +1,18 @@
+# Control: master caller_passivity on the SAME 40 positions (0-39) as the deep
+# search run, to kill the position-slice confound. Master self-play is fast (no
+# search), so one serial job suffices.
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 40
+seed: 0
+
+agents:
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\search_behavioral_deep\profile_master40.csv

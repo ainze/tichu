@@ -660,6 +660,31 @@ def test_round_end_with_dragon_during_slam_nets_to_slam_bonus_only():
     assert next_state.public.pending_decision is None
 
 
+def test_step_reports_done_on_slam():
+    # Player 0 (team 0) is 1st-out; partner player 2 plays their last card ->
+    # 2nd-out -> SLAM, round over. Regression: _finalise_round resets out_order,
+    # so re-evaluating _round_done_state AFTER finalising wrongly returned
+    # done=False for slams (fewer than 3 hands empty). step must report done=True.
+    state = GameState(
+        hands=(
+            frozenset(),
+            frozenset({_c(Suit.STAR, 9)}),
+            frozenset({_c(Suit.STAR, 14)}),
+            frozenset({_c(Suit.SWORD, 4)}),
+        ),
+        public=PublicState(
+            current_player=2,
+            hand_sizes=(0, 1, 1, 1),
+            scores=(0, 0),
+            trick=Trick.empty(),
+            out_order=(0,),
+        ),
+    )
+    next_state, _, done, _ = step(state, Single(_c(Suit.STAR, 14)))
+    assert done is True
+    assert next_state.public.scores == (200, 0)  # slam bonus; finalised exactly once
+
+
 def test_bomb_interrupt_legal_on_empty_trick():
     # When the previous trick has just resolved and the winner (current_player)
     # hasn't led yet, a non-current player holding a bomb can preempt-bomb to

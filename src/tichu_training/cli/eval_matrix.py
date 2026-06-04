@@ -37,6 +37,11 @@ from tichu_training.bsw.parser import parse_tch
 # callers; the eval CLI is already an ML entry point.
 import tichu_inference.ml_agent  # noqa: F401,E402
 
+# Side-effect import: registers the `search` factory (SearchAgent, Phase-2 PIMC —
+# ADR-0030) in the registry so configs can reference `factory: search` and spawned
+# workers resolve it. Torch-free at import (SearchAgent lazy-loads MLAgent).
+import tichu_training.search.agent  # noqa: F401,E402
+
 
 log = logging.getLogger("eval_matrix")
 
@@ -55,6 +60,15 @@ def _build_agent(factory: str, **kwargs):
     return build_agent(factory, **kwargs)
 
 
+def _slice_positions(positions, n_cap, n_offset=0):
+    """Select the ``[n_offset, n_offset + n_cap)`` window of the Pool. ``n_offset``
+    lets parallel jobs cover disjoint Position ranges — behavioral mode is serial,
+    so we fan out across processes by slice and pool the counts afterwards."""
+    if n_offset:
+        positions = positions[int(n_offset):]
+    return positions[: int(n_cap)] if n_cap is not None else positions
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Run an all-vs-all tournament or held-out move-prediction eval.",
@@ -69,6 +83,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--held-out", metavar="DIR",
         help="Directory of .tch files (required for --mode move_prediction)",
+    )
+    p.add_argument(
+        "--n-offset", type=int, default=0,
+        help="skip the first N positions before applying n_deals — lets parallel "
+             "jobs cover disjoint Pool slices (mainly for serial behavioral runs)",
+    )
+    p.add_argument(
+        "--output", default=None,
+        help="override the config's output path (so parallel slices write to "
+             "distinct files for later pooling)",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument(
@@ -88,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config)
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-    output_path = Path(config["output"])
+    output_path = Path(args.output or config["output"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     config_copy = output_path.parent / config_path.name
     if config_copy.resolve() != config_path.resolve():
@@ -106,7 +130,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "tournament":
         return _run_tournament_mode(
-            agent_builders, config, output_path, show_progress=args.progress
+            agent_builders, config, output_path,
+            show_progress=args.progress, n_offset=args.n_offset,
         )
     if args.mode == "move_prediction":
         if not args.held_out:
@@ -115,12 +140,15 @@ def main(argv: list[str] | None = None) -> int:
             agent_builders, Path(args.held_out), config, output_path
         )
     if args.mode == "behavioral":
-        return _run_behavioral_mode(agent_builders, config, output_path)
+        return _run_behavioral_mode(
+            agent_builders, config, output_path, n_offset=args.n_offset
+        )
     raise AssertionError(f"unknown mode: {args.mode}")
 
 
 def _run_tournament_mode(
-    agent_builders, config, output_path: Path, *, show_progress: bool = True
+    agent_builders, config, output_path: Path, *,
+    show_progress: bool = True, n_offset: int = 0,
 ) -> int:
     variant = config.get("variant", "full_strength")
     pool_path = Path(config["starting_position_pool"])
@@ -130,8 +158,7 @@ def _run_tournament_mode(
     workers = int(config.get("workers", 1))
 
     if variant == "full_strength":
-        positions = load_full_position_pool(pool_path)
-        positions = positions[: int(n_cap)] if n_cap is not None else positions
+        positions = _slice_positions(load_full_position_pool(pool_path), n_cap, n_offset)
         # One matrix-wide bar over every unit of work: each unordered agent pair
         # plays every Position once. The tournament reports progress through the
         # `progress` hook (one tick per Position); `logging_redirect_tqdm` keeps
@@ -217,12 +244,11 @@ _BEHAVIORAL_COLS = [
 ]
 
 
-def _run_behavioral_mode(agent_builders, config, output_path: Path) -> int:
+def _run_behavioral_mode(agent_builders, config, output_path: Path, *, n_offset: int = 0) -> int:
     """Per-agent behavioral profile (self-play) over the Full-strength Pool."""
     pool_path = Path(config["starting_position_pool"])
     n_cap = config.get("n_deals")
-    positions = load_full_position_pool(pool_path)
-    positions = positions[: int(n_cap)] if n_cap is not None else positions
+    positions = _slice_positions(load_full_position_pool(pool_path), n_cap, n_offset)
 
     names = sorted(agent_builders)
     log.info("behavioral profile: %d agents x %d positions (self-play, 4 seats)",

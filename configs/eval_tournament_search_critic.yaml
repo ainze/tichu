@@ -1,0 +1,35 @@
+# Phase-B tracer (ADR-0030): Search Agent with the critic-bootstrap leaf vs master.
+# Sim budget now ABOVE the ~41-action branching factor (the fast-rollout tracer was
+# starved at 12). Still a small pool — directional read on whether critic-leaf search
+# closes the gap to master before scaling to the Stage-1 pool.
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 8
+bootstrap_iters: 500
+seed: 0
+workers: 4
+
+agents:
+  - name: search
+    factory: search
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      critic_path:     C:\workbench\tichu\data\export\search_critic_master_selfplay_v5\critic.bin
+      skill_decile: 9
+      worlds: 6
+      sims: 60
+      seed: 0
+
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\search_critic\tournament.parquet

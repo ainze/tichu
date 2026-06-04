@@ -1,0 +1,34 @@
+# TRACER — Phase-2 PIMC Search Agent integration check (ADR-0030).
+# NOT a strength verdict: tiny pool + fast-rollout leaf (no critic yet). Goal is
+# only to prove the SearchAgent plugs into eval_matrix, plays clean full rounds vs
+# master, and emits a Tournament Matrix row. Scale + critic come in Phase B.
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 4
+bootstrap_iters: 200
+seed: 0
+workers: 4
+
+agents:
+  - name: search
+    factory: search
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      worlds: 3
+      sims: 12
+      seed: 0
+
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\search_tracer\tournament.parquet

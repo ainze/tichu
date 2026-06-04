@@ -104,7 +104,8 @@ The JSON form of a PrivateState as transmitted to the inference HTTP endpoint, e
 _Avoid_: request payload, blob, state JSON.
 
 **Observation**:
-Reserved word — not used in Phase 1. Will be introduced in Phase 2 (search / RL) for a state-plus-belief-distribution composite.
+The Phase-2 search root: a **PublicState** + the acting Player's **Hand** + the **Belief Model**'s opponent-card distribution over the unseen cards — the composite from which **Determinized Worlds** are sampled. Distinct from a **PrivateState**, which is the same Hand + PublicState but carries *no* belief distribution; the Observation is a PrivateState enriched with belief. See [ADR-0030](docs/adr/0030-phase-2-search-design.md).
+_Avoid_: view, belief state, info-set, perspective.
 
 ### Action terms
 
@@ -398,6 +399,26 @@ _Avoid_: PPO checkpoint, RL model.
 The per-Agent behavioral-rate panel — *how* an Agent plays, orthogonal to the strength the **Tournament Matrix** measures. Metrics: `bomb_per_round`, `bomb_when_legal_rate` (of Play decisions where a Bomb was legal, the fraction that Bombed — the headline soft-policy diagnostic), `tichu_call_rate` / `tichu_success_rate`, `grand_call_rate` / `grand_success_rate`, `trick_win_rate` (neutral 0.25 at a homogeneous 4-seat table), `out_first_rate` (neutral 0.25), `slam_rate`, `caller_passivity_rate` (as a Tichu/GT caller following an opponent with a legal beat, the fraction of tricks ceded by Passing) and its `caller_bomb_passivity_rate` subset (beat was a Bomb — a near-pure error rate). The caller-passivity metrics quantified the play-policy's bomb/strong-combo undervaluation — see [docs/notes/2026-06-03-caller-passivity-bomb-undervaluation.md]. Captured per-Round per-seat by `play_full_round(..., collect_telemetry=True)` (a zero-overhead opt-in side-channel; the Tournament hot path leaves it off), aggregated in self-play by [tichu_eval/behavioral.py](src/tichu_eval/behavioral.py), exposed as `eval_matrix --mode behavioral` ([configs/eval_behavioral_v5.yaml](configs/eval_behavioral_v5.yaml)). The engine surfaces the trick winner via the previously-unused `step` `info` dict (`{"trick_winner", "trick_points"}`) — also the reward-shaping hook for **PPO Refine**. Built first as the diagnostic instrument for the soft-policy / never-bombs hypothesis, reused later as the PPO Refine tuning dashboard (RL is tuned by watching behavior drift, not win-rate alone).
 _Avoid_: eval stats, metrics dump.
 
+### Phase 2 / search terms
+
+**Rule:** "search" used bare for the Phase-2 lever is banned — it is **PIMC** (the algorithm) producing a **Search Agent** (the strategy). All terms below are proposed in [ADR-0030](docs/adr/0030-phase-2-search-design.md); v1 is a latency-free offline strength experiment, not a served tier.
+
+**PIMC** (Perfect-Information Monte-Carlo search):
+The Phase-2 algorithm. From an **Observation**, sample K **Determinized Worlds** from the **Belief Model**, run an independent **PUCT**-MCTS to completion in each, sum root visit counts across worlds, and pick the argmax **Intent**. Chosen over single-tree ISMCTS for v1 (simpler, parallelizes onto the [ADR-0026] process pool, consumes the Belief Model as designed); its strategy-fusion weakness is the documented ISMCTS escalation. Runs on **frozen** nets — no learning in v1 (AlphaZero-style self-play training is a later phase).
+_Avoid_: MCTS (bare), AlphaZero, tree search, lookahead.
+
+**Determinized World**:
+A perfect-information `GameState` sampled from an **Observation** — the acting Player's real **Hand** plus a constraint-respecting assignment of every unseen card to the three opponents (honoring their known `hand_sizes`, shown voids, and the Mahjong Wish obligation), drawn to match the **Belief Model**'s per-card marginals. The unit a single MCTS tree searches.
+_Avoid_: world, sample, hypothesis, particle, determinization (use the noun "Determinized World").
+
+**Search Agent**:
+An **Agent** whose `act` runs **PIMC** over the frozen `master` Policy Network (the **PUCT** prior), Belief Model (the **Determinized World** sampler), and rules engine (the simulator). The opponents and partner are simulated *in-tree* by the frozen `master` policy as environment dynamics — only the root seat's own Decisions branch. Leaf value is a **Leaf Rollout**. The strategy v1 measures against `master`.
+_Avoid_: MCTS agent, search bot, PIMC agent (use **Search Agent**).
+
+**Leaf Rollout**:
+The v1 leaf evaluator: from a tree leaf, continue the frozen-`master` policy-driven simulation of the **Determinized World** to round-terminal (`_finalise_round`) and back up the actual `round_outcome` (team-relative, includes the ±100/±200 call bonus). Unbiased within the world; trusts only the engine and the `master` policy, not the off-distribution critic. The frozen critic / **Value Baseline** as a depth-truncated bootstrap is the documented variance-reduction escalation, not the v1 default.
+_Avoid_: rollout (bare), playout, leaf eval, value bootstrap.
+
 ## Example dialogue
 
 > **Game designer:** "When the user picks `hard`, they get a stronger AI than `medium`, right?"
@@ -423,7 +444,7 @@ _Avoid_: eval stats, metrics dump.
 - "pass" used for both in-trick decline and pre-Round card exchange — resolved: **Pass** is in-trick only; pre-Round card exchange is **Schupfen**.
 - `pass_card` / `wish_rank` / `dragon_give` (parquet shard names + BC head labels) — resolved: canonical names are **schupfen** / **wish** / **dragon_assignment**. Renames done in session 2026-05-25.
 - "state" used bare across engine, training, and inference — resolved: always qualify (GameState / PublicState / PrivateState / Feature Vector / Wire PrivateState).
-- "observation" — resolved: reserved for Phase 2, banned in Phase 1.
+- "observation" — resolved: banned in Phase 1; **introduced in Phase 2** as the **PIMC** search root (a **PrivateState** enriched with the **Belief Model**'s opponent-card distribution, from which **Determinized Worlds** are sampled). See [ADR-0030](docs/adr/0030-phase-2-search-design.md).
 - Type name `Action` exported by both `tichu_engine.legality` and `tichu_training.action_space` — resolved: canonical names are **ConcreteAction** and **Intent**. Renames done in session 2026-05-25.
 - "combination" vs "intent" — resolved: **Combination** is engine-only (concrete cards); **Combination Intent** (or the specific intent class like `PlayPair`) is training/inference.
 - "policy" used to mean both "the Agent as a function" and "the neural network inside an ML Agent" — resolved: bare **policy** is banned; the network is the **Policy Network** (in-game heads) or a **Call Network** (Tichu/Grand-Tichu).
