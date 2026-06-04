@@ -69,9 +69,13 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             pending_decision=None,
         )
         new_state = GameState(hands=state.hands, public=next_public)
-        if _round_done_state(new_state):
+        # Capture done BEFORE finalising: _finalise_round resets out_order, after
+        # which _round_done_state no longer recognises a slam (fewer than 3 hands
+        # empty) and would wrongly report done=False.
+        done = _round_done_state(new_state)
+        if done:
             new_state = _finalise_round(new_state)
-        return new_state, 0.0, _round_done_state(new_state), {}
+        return new_state, 0.0, done, {}
 
     if isinstance(action, SchupfenPass):
         assert isinstance(pending, SchupfenPending)
@@ -96,9 +100,10 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         # If the Mahjong play ended the round (wisher went out via the last
         # play), finalise now — the wish is moot but Tichu/Grand-Tichu bonuses
         # still need to be applied.
-        if _round_done_state(new_state):
+        done = _round_done_state(new_state)  # capture before finalise resets out_order
+        if done:
             new_state = _finalise_round(new_state)
-        return new_state, 0.0, _round_done_state(new_state), {}
+        return new_state, 0.0, done, {}
 
     current = state.public.current_player
 
@@ -123,9 +128,10 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             played_cards_this_round=state.public.played_cards_this_round | {DOG},
         )
         new_state = GameState(hands=next_hands, public=next_public)
-        if _round_done_state(new_state):
+        done = _round_done_state(new_state)  # capture before finalise resets out_order
+        if done:
             new_state = _finalise_round(new_state)
-        return new_state, 0.0, _round_done_state(new_state), {}  # type: ignore[arg-type]
+        return new_state, 0.0, done, {}  # type: ignore[arg-type]
 
     if isinstance(action, Pass):
         next_trick = state.public.trick.add_pass(current)
@@ -234,9 +240,12 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         played_cards_this_round=next_played_cards_this_round,
     )
     new_state = GameState(hands=next_hands, public=next_public)
-    if new_pending is None and _round_done_state(new_state):
+    # Capture done before finalise resets out_order (else a slam — partner pair
+    # out, fewer than 3 hands empty — re-checks as not-done and reports False).
+    done = new_pending is None and _round_done_state(new_state)
+    if done:
         new_state = _finalise_round(new_state)
-    return new_state, 0.0, _round_done_state(new_state), info  # type: ignore[arg-type]
+    return new_state, 0.0, done, info  # type: ignore[arg-type]
 
 
 def _play_fulfils_wish(combo: Combination, wish_rank: int) -> bool:
@@ -470,9 +479,12 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
         played_cards_this_round=state.public.played_cards_this_round | played_cards,
     )
     new_state = GameState(hands=next_hands, public=next_public)
-    if new_pending is None and _round_done_state(new_state):
+    # Capture done before finalise resets out_order (else a slam — partner pair
+    # out, fewer than 3 hands empty — re-checks as not-done and reports False).
+    done = new_pending is None and _round_done_state(new_state)
+    if done:
         new_state = _finalise_round(new_state)
-    return new_state, 0.0, _round_done_state(new_state), info  # type: ignore[arg-type]
+    return new_state, 0.0, done, info  # type: ignore[arg-type]
 
 
 def _partner_target(partner: int, hand_sizes: tuple[int, int, int, int]) -> int:

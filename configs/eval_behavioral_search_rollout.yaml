@@ -1,0 +1,23 @@
+# Phase-B Stage-0 CONTROL (ADR-0030): same budget as eval_behavioral_search.yaml
+# (3 worlds x 30 sims, 12 rounds, seed 0) but the fast-ROLLOUT leaf (no critic).
+# Isolates the leaf/critic from the sim budget: if random-rollout search bombs more
+# than critic-leaf search at identical sims, the critic suppresses bombs; if equal,
+# it's the budget, not the value.
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 12
+seed: 0
+
+agents:
+  - name: search_rollout
+    factory: search
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      worlds: 3
+      sims: 30
+      seed: 0
+
+output: C:\workbench\tichu\data\runs\search_behavioral\profile_rollout.csv

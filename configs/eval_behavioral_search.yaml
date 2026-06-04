@@ -1,0 +1,33 @@
+# Phase-B Stage-0 (ADR-0030): does the Search Agent structurally fix the bomb
+# undervaluation PPO could not? Self-play behavioral profile; headline dial is
+# caller_bomb_passivity_rate (baseline 0.323; PPO Refine only reached ~0.285).
+# Reduced search budget (3 worlds x 30 sims) to afford enough rounds for the sparse
+# caller-bomb opportunities; master included as the baseline comparison.
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 12
+seed: 0
+
+agents:
+  - name: search
+    factory: search
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      critic_path:     C:\workbench\tichu\data\export\search_critic_master_selfplay_v5\critic.bin
+      skill_decile: 9
+      worlds: 3
+      sims: 30
+      seed: 0
+
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\search_behavioral\profile.csv
