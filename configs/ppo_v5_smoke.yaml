@@ -1,0 +1,47 @@
+# PPO Refine SMOKE config — pipeline shakeout, NOT a training run.
+#
+# Proves the wired-up CLI completes end-to-end on the real BC Checkpoint before
+# the long job: warm-start loads with matching dims, one full iteration runs
+# (rollout -> GAE -> masked PPO update, no 0*-inf NaN), and the Sharpened
+# Checkpoint round-trips through save_checkpoint -> load_checkpoint.
+#
+# Run:
+#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_smoke.yaml
+# Expect: 2 iterations, finishes in well under a minute, writes a loadable .bin.
+
+warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+out:        C:\workbench\tichu\data\runs\ppo_v5_smoke\sharpened_smoke.bin
+
+model:
+  skill_dim:     64
+  trunk_hidden:  1024
+  trunk_depth:   4
+  trunk_out_dim: 512
+  head_hidden:   256
+
+critic:
+  hidden: 512
+
+kl:
+  coef:   1.0
+  target: 0.02
+  factor: 2.0
+
+league:
+  max_snapshots:  5
+  snapshot_every: 1    # snapshot every iteration so the league path is exercised
+
+ppo:
+  iterations:         2     # smoke: just prove the loop closes
+  positions_per_iter: 8     # tiny M so a rollout finishes in seconds
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ent_coef:           0.01
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

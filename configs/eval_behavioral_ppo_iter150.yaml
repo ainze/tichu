@@ -1,0 +1,27 @@
+# Behavioral dials for PPO Refine snapshot iter_00150 vs the master baseline.
+# Same setup as eval_behavioral_ppo_iter70.yaml, pointed at the iter_00150 export.
+
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 500
+seed: 0
+
+agents:
+  - name: ppo_iter150
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\ppo_v5_iter150\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\ppo_v5\behavioral_iter150.csv

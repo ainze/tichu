@@ -1,0 +1,35 @@
+# SMOKE for the escalation path — proves warm-up + new league settings run
+# end-to-end on the real BC checkpoint. Throwaway. NOT a training run.
+warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+out:        C:\workbench\tichu\data\runs\ppo_v5_escalate_smoke\sharpened_smoke.bin
+model:
+  skill_dim: 64
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  head_hidden: 256
+critic:
+  hidden: 512
+  warmup_iters: 3
+  warmup_epochs: 2
+kl:
+  coef: 1.0
+  target: 0.04
+  factor: 2.0
+league:
+  max_snapshots: 8
+  snapshot_every: 1
+ppo:
+  iterations: 2
+  positions_per_iter: 8
+  pool_seed: 0
+  gamma: 1.0
+  lam: 0.95
+  clip_eps: 0.1
+  vf_coef: 0.5
+  ent_coef: 0.03
+  ppo_epochs: 3
+  policy_lr: 1.0e-4
+  critic_lr: 3.0e-3
+  skill_decile: 9
+  learner_team: 0
