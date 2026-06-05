@@ -4,8 +4,61 @@ import torch
 
 from tichu_training.action_space import ACTION_SPACE_SIZE
 from tichu_training.bc.heads import BCModel, HEAD_LOGIT_DIMS
-from tichu_training.bc.loss import masked_cross_entropy
+from tichu_training.bc.loss import masked_cross_entropy, masked_kl_divergence
 from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+
+
+def test_kl_is_zero_when_prediction_matches_target():
+    # Uniform logits over the legal set => uniform predicted distribution; a uniform
+    # target distribution then has zero divergence. The policy-improvement loss must
+    # bottom out at 0 when the net already reproduces the visit distribution.
+    logits = torch.zeros(1, 4)
+    legal = torch.ones(1, 4, dtype=torch.bool)
+    target = torch.full((1, 4), 0.25)
+    loss = masked_kl_divergence(logits, target, legal, torch.ones(1))
+    assert torch.isclose(loss, torch.tensor(0.0), atol=1e-6)
+
+
+def test_kl_ignores_illegal_action_logits():
+    # Two logit tensors differing ONLY on illegal positions must give the same loss —
+    # the net can put anything on actions the engine forbade; it cannot move the loss.
+    legal = torch.tensor([[True, True, False, False]])
+    target = torch.tensor([[0.5, 0.5, 0.0, 0.0]])
+    base = masked_kl_divergence(torch.zeros(1, 4), target, legal, torch.ones(1))
+    spiked = torch.zeros(1, 4)
+    spiked[0, 2] = spiked[0, 3] = 1000.0  # huge logits on illegal actions
+    other = masked_kl_divergence(spiked, target, legal, torch.ones(1))
+    assert torch.isclose(base, other, atol=1e-6)
+
+
+def test_kl_with_one_hot_target_equals_cross_entropy():
+    # A one-hot visit distribution is just a hard label; KL must then collapse to the
+    # existing masked_cross_entropy (target-entropy term is 0), so the soft-target loss
+    # is a strict generalisation of the hard-label one the BC trainer already uses.
+    torch.manual_seed(0)
+    logits = torch.randn(3, 6)
+    legal = torch.tensor([
+        [True, True, True, False, False, False],
+        [True, False, True, True, False, False],
+        [False, True, True, True, True, False],
+    ])
+    target_idx = torch.tensor([0, 2, 3])
+    weight = torch.tensor([1.0, 0.5, 2.0])
+    one_hot = torch.zeros(3, 6).scatter_(1, target_idx.unsqueeze(1), 1.0)
+
+    ce = masked_cross_entropy(logits, target_idx, legal, weight)
+    kl = masked_kl_divergence(logits, one_hot, legal, weight)
+    assert torch.isclose(ce, kl, atol=1e-6)
+
+
+def test_kl_sample_weight_scales_loss():
+    logits = torch.zeros(2, 4)  # uniform pred; non-uniform target => positive KL
+    legal = torch.ones(2, 4, dtype=torch.bool)
+    target = torch.tensor([[0.7, 0.1, 0.1, 0.1], [0.4, 0.2, 0.2, 0.2]])
+    base = masked_kl_divergence(logits, target, legal, torch.ones(2))
+    doubled = masked_kl_divergence(logits, target, legal, torch.full((2,), 2.0))
+    assert base > 0
+    assert torch.isclose(doubled, base * 2)
 
 
 def test_masked_loss_zero_grad_on_illegal_positions():

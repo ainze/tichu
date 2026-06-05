@@ -1,0 +1,28 @@
+# Exploration-critic pilot (ADR-0030): same DEEP budget as eval_behavioral_search_deep
+# (360 sims = worlds 6 x sims 60) but the leaf value is the EXPLORATION critic —
+# a ValueBaseline fit on ε-greedy self-play, so aggressive caller-states carry
+# their true round_outcome. Tests whether a less-passive value lets deep PIMC
+# press the lead instead of amplifying passivity (the deep master-critic run hit
+# 0.323 caller_passivity vs master 0.183 — worse, not better).
+# Run as 4 parallel DISJOINT slices (--n-offset 0/10/20/30, 10 rounds each = 40
+# total, same positions as the deep run) and pool the counts; behavioral mode is
+# serial per process. Master baseline (0.183 broad / 0.139 bomb) is sims-independent.
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 10
+seed: 0
+
+agents:
+  - name: search
+    factory: search
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      critic_path:     C:\workbench\tichu\data\export\search_critic_explore_v5\critic.bin
+      skill_decile: 9
+      worlds: 6
+      sims: 60
+      seed: 0
+
+output: C:\workbench\tichu\data\runs\search_behavioral_explore\profile_explore.csv

@@ -19,6 +19,26 @@ from tichu_engine.legality import legal_actions
 from tichu_engine.state import GameState
 
 
+def sample_from_scores(scores, rng: random.Random):
+    """Sample one action from ``[(action, prob)]`` proportional to prob (τ=1).
+
+    The in-tree opponent model for the search+learning loop (ADR-0031 Decision F):
+    instead of greedy argmax over the policy, draw from its play distribution so the
+    visit target reflects play that is good against the opponent's *distribution*,
+    not one deterministic line. Falls back to the last action on float round-off, and
+    to a uniform pick if every prob is zero (the unmapped-legal-actions case)."""
+    total = sum(p for _, p in scores)
+    if total <= 0.0:
+        return rng.choice([a for a, _ in scores])
+    r = rng.random() * total
+    upto = 0.0
+    for action, p in scores:
+        upto += p
+        if r <= upto:
+            return action
+    return scores[-1][0]
+
+
 def round_outcome(state: GameState, root: int) -> float:
     """Team-relative round result for the root seat, normalized to ~[-1, 1]."""
     t = root % 2
@@ -38,12 +58,16 @@ def fast_rollout_leaf(state: GameState, root: int, rng: random.Random) -> float:
 
 
 class EngineWorld:
-    __slots__ = ("root", "_policy", "_leaf_fn")
+    __slots__ = ("root", "_policy", "_leaf_fn", "_opponent_sample")
 
-    def __init__(self, root: int, policy, leaf_fn) -> None:
+    def __init__(self, root: int, policy, leaf_fn, *, opponent_sample: bool = False) -> None:
         self.root = root
         self._policy = policy
         self._leaf_fn = leaf_fn
+        # opponent_sample=False (default) advances in-tree seats by greedy policy.act
+        # — the frozen-experiment behaviour (ADR-0030). True samples Play Decisions
+        # from the policy (τ=1) for the learning loop (ADR-0031 Decision F).
+        self._opponent_sample = bool(opponent_sample)
 
     def legal_actions(self, state: GameState):
         return tuple(legal_actions(state))
@@ -74,7 +98,13 @@ class EngineWorld:
         while not (state.public.current_player == self.root
                    and state.public.pending_decision is None):
             actor = state.public.current_player
-            action = self._policy.act(state.private_view(actor))
+            view = state.private_view(actor)
+            # Sample only normal Play Decisions; pending wish/dragon/schupfen have no
+            # play distribution, so they always delegate to the policy's own choice.
+            if self._opponent_sample and state.public.pending_decision is None:
+                action = sample_from_scores(self._policy.play_action_scores(view), rng)
+            else:
+                action = self._policy.act(view)
             state, _, done, _ = step(state, action)
             if done:
                 return state, True

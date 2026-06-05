@@ -1,0 +1,34 @@
+# Premise test, sharpened (ADR-0031): does the master UNDER-deploy bombs?
+# forced_bomb = master that deploys its bomb whenever it would otherwise Pass with a legal
+# bomb (converting cedes to deploys; never wasting a bomb on a contested trick), vs the bare
+# master. Head-to-head EV over the full pool. This tests the actual bomb-undervaluation
+# diagnosis that forced_press sidestepped.
+#   forced_bomb EV > master  -> bombs under-deployed (real, policy-side pathology)
+#   forced_bomb EV <= master -> the master holds/deploys bombs about right
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 2000
+bootstrap_iters: 1000
+seed: 0
+workers: 6
+
+agents:
+  - name: forced_bomb
+    factory: forced_bomb
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\forced_bomb\tournament.parquet

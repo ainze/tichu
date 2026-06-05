@@ -1,0 +1,19 @@
+# Control: master caller_passivity on positions 0-119 — the SAME 120 positions the
+# extended exploration-critic dial covers, so the explore-vs-master comparison stays
+# paired on identical deals at the larger n. Master self-play is fast (no search), so
+# one serial job over all 120 suffices. Anchors the n=40 master baseline (0.183) at 3x n.
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 120
+seed: 0
+
+agents:
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\search_behavioral_explore\profile_master120.csv

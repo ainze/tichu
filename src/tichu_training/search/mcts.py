@@ -34,33 +34,69 @@ class Node:
         self.children: dict = {}  # action -> Node | ("TERMINAL", value)
 
 
-def run_mcts(world, root_state, sims: int, rng: random.Random, c_puct: float = 1.4):
+def run_mcts(world, root_state, sims: int, rng: random.Random, c_puct: float = 1.4,
+             root_noise: tuple[float, float] | None = None):
     """Run ``sims`` PUCT simulations from ``root_state`` in one world.
+
+    ``root_noise=(alpha, eps)`` mixes Dirichlet(alpha) noise into the ROOT prior
+    (``prior ← (1-eps)·prior + eps·Dir``) — the AlphaZero exploration knob that floors
+    suppressed actions so they get visited and evaluated (ADR-0031 Decision G). Applied
+    only at the root, only when supplied; ``None`` reproduces the frozen-search behaviour.
 
     Returns ``(visits, values)`` — per root-action visit counts ``N`` and summed
     backed-up values ``W`` (so the mean action-value is ``W[a] / N[a]``)."""
-    root = Node(root_state, tuple(world.legal_actions(root_state)), world.prior(root_state))
+    prior = world.prior(root_state)
+    if root_noise is not None:
+        prior = _apply_root_noise(prior, root_noise, rng)
+    root = Node(root_state, tuple(world.legal_actions(root_state)), prior)
     for _ in range(sims):
         _simulate(world, root, rng, c_puct)
     return dict(root.N), dict(root.W)
 
 
-def pimc_decide(make_world, worlds: int, sims: int, rng: random.Random, c_puct: float = 1.4):
+def _apply_root_noise(prior: dict, root_noise: tuple[float, float], rng: random.Random) -> dict:
+    """Mix symmetric Dirichlet(alpha) noise into a prior. Dirichlet is drawn from the
+    passed `rng` via gamma variates (Dir = normalised independent Gammas), so the search
+    stays numpy-free and reproducible under a seeded rng."""
+    alpha, eps = root_noise
+    actions = list(prior)
+    gammas = [rng.gammavariate(alpha, 1.0) for _ in actions]
+    total = sum(gammas) or 1.0
+    return {a: (1.0 - eps) * prior[a] + eps * (g / total)
+            for a, g in zip(actions, gammas)}
+
+
+def pimc_decide(make_world, worlds: int, sims: int, rng: random.Random, c_puct: float = 1.4,
+                root_noise: tuple[float, float] | None = None):
     """Root-parallel PIMC: sample ``worlds`` Determinized Worlds, run ``sims`` MCTS
     in each, sum root visit counts across worlds, pick the argmax action.
 
     ``make_world(rng) -> (world, root_state)`` produces one Determinized World and
-    its root decision state. Returns ``(best_action, agg_visits, agg_values)``."""
+    its root decision state. ``root_noise=(alpha, eps)`` is forwarded to every
+    per-world ``run_mcts`` (the self-play exploration knob, ADR-0031 Decision G).
+    Returns ``(best_action, agg_visits, agg_values)``."""
     agg_visits: dict = defaultdict(int)
     agg_values: dict = defaultdict(float)
     for _ in range(worlds):
         world, root_state = make_world(rng)
-        visits, values = run_mcts(world, root_state, sims, rng, c_puct)
+        visits, values = run_mcts(world, root_state, sims, rng, c_puct, root_noise)
         for a in visits:
             agg_visits[a] += visits[a]
             agg_values[a] += values[a]
     best = max(agg_visits, key=lambda a: agg_visits[a])
     return best, dict(agg_visits), dict(agg_values)
+
+
+def visit_policy(agg_visits: dict) -> dict:
+    """Normalise aggregated root visit counts into the policy-improvement target π
+    (ADR-0031 Decision C): π(a) = visits(a) / Σ visits, over the searched (legal)
+    actions. Zero-visit actions keep 0 mass; a forced single action gets {a: 1.0}.
+    Defensive uniform fallback if the total is somehow 0 (never under sims ≥ 1)."""
+    total = sum(agg_visits.values())
+    if total <= 0:
+        n = len(agg_visits) or 1
+        return {a: 1.0 / n for a in agg_visits}
+    return {a: v / total for a, v in agg_visits.items()}
 
 
 def _simulate(world, node: Node, rng: random.Random, c_puct: float) -> float:

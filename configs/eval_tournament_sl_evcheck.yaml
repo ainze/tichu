@@ -1,0 +1,50 @@
+# Free EV check (ADR-0031): did the starved-value search+learning run move self-play EV at
+# all? Tournament the master against a few generations (raw policy, no search; the loop only
+# retrained play/wish/dragon, so each reuses the original call/schupfen nets). The
+# master-vs-genN deltas show the EV trajectory (expected DOWN — passivity rose, value was
+# starved — but this confirms the loop machinery affects EV and quantifies which way).
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 500
+bootstrap_iters: 500
+seed: 0
+workers: 6
+
+agents:
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: sl_gen1
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\search_learning_v1\gen1\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: sl_gen5
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\search_learning_v1\gen5\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: sl_gen10
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\search_learning_v1\gen10\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\search_learning_v1\ev_check.parquet

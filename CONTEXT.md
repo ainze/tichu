@@ -419,6 +419,14 @@ _Avoid_: MCTS agent, search bot, PIMC agent (use **Search Agent**).
 The v1 leaf evaluator: from a tree leaf, continue the frozen-`master` policy-driven simulation of the **Determinized World** to round-terminal (`_finalise_round`) and back up the actual `round_outcome` (team-relative, includes the ±100/±200 call bonus). Unbiased within the world; trusts only the engine and the `master` policy, not the off-distribution critic. The frozen critic / **Value Baseline** as a depth-truncated bootstrap is the documented variance-reduction escalation, not the v1 default.
 _Avoid_: rollout (bare), playout, leaf eval, value bootstrap.
 
+**Search + Learning loop**:
+The Phase-2 escalation ([ADR-0031](docs/adr/0031-search-and-learning-loop.md)) after search-only on frozen nets was falsified: **PIMC** self-play generates targets (root visit-distribution for the play head, `round_outcome` for the value) on which the Policy Network *and* **Value Baseline** are retrained, iterated over **Generations**. The value/policy are *discovered by search*, not regressed from the soft policy — the only mechanism that escapes the frozen-value passivity ceiling.
+_Avoid_: AlphaZero (bare — name the loop), RL fine-tune, online training.
+
+**Generation**:
+One cycle of the **Search + Learning loop** — self-play with the current `(policy, critic)`, retrain both on the produced targets, export, evaluate, and gate promotion to the next Generation on strength-non-regression vs `master`.
+_Avoid_: epoch, iteration, round (a Round is one deal — distinct).
+
 ## Example dialogue
 
 > **Game designer:** "When the user picks `hard`, they get a stronger AI than `medium`, right?"

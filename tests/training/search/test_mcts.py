@@ -9,7 +9,21 @@ rollout) is a separate `world` implementation tested at the agent level.
 
 import random
 
-from tichu_training.search.mcts import pimc_decide, run_mcts
+from tichu_training.search.mcts import pimc_decide, run_mcts, visit_policy
+
+
+def test_visit_policy_is_normalized_and_proportional():
+    # The policy-improvement target (ADR-0031 Decision C): π ∝ aggregated root visits,
+    # normalised over the legal actions, with 0-visit actions getting 0 mass.
+    pi = visit_policy({"a": 30, "b": 10, "c": 0})
+    assert abs(sum(pi.values()) - 1.0) < 1e-9
+    assert abs(pi["a"] - 0.75) < 1e-9
+    assert abs(pi["b"] - 0.25) < 1e-9
+    assert pi["c"] == 0.0
+
+
+def test_visit_policy_single_action_is_certain():
+    assert visit_policy({"only": 7}) == {"only": 1.0}
 
 
 class FakeWorld:
@@ -44,6 +58,45 @@ class FakeWorld:
         return 0.5  # neutral non-terminal estimate
 
 
+class SkewedWorld:
+    """Two root actions, both terminal value 0.0, with a near-degenerate prior
+    (hi=0.99, lo=0.01). With equal action-values, PUCT after the forced first visit
+    is governed purely by the prior, so 'lo' is starved — exactly the suppressed-move
+    case root Dirichlet noise (ADR-0031 Decision G) must rescue."""
+
+    def legal_actions(self, state):
+        return ("hi", "lo")
+
+    def prior(self, state):
+        return {"hi": 0.99, "lo": 0.01}
+
+    def transition(self, state, action, rng):
+        return None, 0.0, True
+
+    def leaf_value(self, state, rng):
+        return 0.0
+
+
+def test_root_dirichlet_noise_rescues_a_suppressed_action():
+    # No noise: 'lo' gets only its single forced expansion, then the 0.99-prior 'hi'
+    # wins every PUCT step. With ε=0.5 Dirichlet noise on the root prior, 'lo' is
+    # floored well above 0.01 and gets visited many more times.
+    bare, _ = run_mcts(SkewedWorld(), "root", sims=50, rng=random.Random(0))
+    noised, _ = run_mcts(SkewedWorld(), "root", sims=50, rng=random.Random(0),
+                         root_noise=(1.0, 0.5))
+    assert bare["lo"] == 1
+    assert noised["lo"] > 5
+
+
+def test_root_noise_none_matches_default():
+    # The exploration knob is strictly opt-in: omitting it and passing None are identical,
+    # so the frozen-search path (ADR-0030) is untouched.
+    default, _ = run_mcts(FakeWorld(), "root", sims=40, rng=random.Random(7))
+    explicit_none, _ = run_mcts(FakeWorld(), "root", sims=40, rng=random.Random(7),
+                                root_noise=None)
+    assert default == explicit_none
+
+
 def test_every_root_action_is_expanded_at_least_once():
     visits, _ = run_mcts(FakeWorld(), "root", sims=20, rng=random.Random(0))
     assert set(visits) == {"SAFE", "RISKY"}
@@ -61,6 +114,20 @@ def test_search_prefers_the_deep_winning_line():
     assert visits["RISKY"] > visits["SAFE"]
     q_risky = values["RISKY"] / visits["RISKY"]
     assert q_risky > 0.3  # backed-up value exceeds the safe terminal
+
+
+def test_pimc_threads_root_noise_into_each_world():
+    # The self-play loop runs PIMC with root Dirichlet noise; pimc_decide must pass it
+    # through to every per-world run_mcts so the suppressed action is explored in all of
+    # them (ADR-0031 Decision G), not just a single tree.
+    def make_world(rng):
+        return SkewedWorld(), "root"
+
+    _, bare, _ = pimc_decide(make_world, worlds=2, sims=25, rng=random.Random(0))
+    _, noised, _ = pimc_decide(make_world, worlds=2, sims=25, rng=random.Random(0),
+                               root_noise=(1.0, 0.5))
+    assert bare["lo"] == 2          # one forced expansion per world, then starved
+    assert noised["lo"] > bare["lo"]
 
 
 def test_pimc_aggregates_visits_across_worlds_and_picks_best():

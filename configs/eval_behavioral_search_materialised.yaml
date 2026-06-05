@@ -1,0 +1,24 @@
+# Cheap decisive test (ADR-0031): does a real-signal value (R^2=0.46, pre-trained on the
+# materialised decile-9 corpus) make FROZEN PIMC search press the lead instead of ceding?
+# Same deep budget (360 sims = worlds 6 x sims 60) and positions as the master-critic deep
+# run (0.323) and the exploration-critic run (0.247/0.263); only critic_path changes.
+# 4 parallel slices (--n-offset 0/10/20/30, 10 rounds each = 40), pooled. Master = 0.183 (n=40).
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 10
+seed: 0
+
+agents:
+  - name: search
+    factory: search
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      critic_path:     C:\workbench\tichu\data\export\search_critic_materialised_d9_v5\critic.bin
+      skill_decile: 9
+      worlds: 6
+      sims: 60
+      seed: 0
+
+output: C:\workbench\tichu\data\runs\search_behavioral_materialised\profile_mat.csv

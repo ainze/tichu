@@ -316,3 +316,94 @@ frozen soft-policy value. The Phase-2 effort thus pivots from "search-only on fr
 nets" (now empirically falsified as a stand-alone fix) to search-as-target-generator
 for learning. The built PIMC stack (sampler, MCTS, EngineWorld, SearchAgent, critic) is
 exactly the engine that escalation reuses.
+
+### Exploration-critic pilot — setup (2026-06-04)
+
+Before committing to the multi-week search+learning loop, a cheap one-shot test of its
+load-bearing premise: *is the value the fixable lever?* The deep run showed the wall is a
+value regressed from master self-play — the passive policy rarely contests tricks, so the
+critic never sees aggressive caller-states and learns to prefer ceding. The pilot refits
+the critic on a deliberately **aggression-exploring** distribution and asks whether that
+alone moves deep search off the ceiling — **no new search code**, just a different
+`critic_path` into the existing `SearchAgent`.
+
+- **Mechanism** — `ExplorationAgent` (`src/tichu_training/search/exploration.py`) wraps the
+  master and perturbs *only* Play Decisions with **uniform ε-greedy (ε=0.25) over the full
+  legal set**; pending wish/dragon/schupfen and the Tichu/Grand calls stay master. Uniform
+  (not policy-weighted) is deliberate — it surfaces beating plays *and* bombs at their
+  structural frequency, covering **passivity as a whole**, not just the bomb subset. The
+  call/leadership structure stays realistic, so explored play-states get near-on-policy
+  continuations and thus *true* `round_outcome` labels for aggressive choices the master
+  suppresses. Wired as `fit_search_critic.py --explore-epsilon` (ε=0 reproduces the
+  baseline critic exactly); critic → `data/export/search_critic_explore_v5/critic.bin`.
+- **Test** — re-run the *identical* deep dial (`configs/eval_behavioral_search_explore.yaml`,
+  360 sims, same 40 positions, 4 `--n-offset` slices) and compare `caller_passivity_rate`.
+- **Falsification criterion** — the master-critic deep run sits at **0.323** vs master
+  **0.183**. The pilot **confirms** the value-is-the-lever hypothesis only if the
+  exploration critic pulls deep search *below master* (≈0.18 or lower); a value that merely
+  lands between 0.18 and 0.32 is a partial signal (the loop may need policy retraining too);
+  a value that stays ≥0.32 **refutes** the cheap fix and says the passivity is not curable
+  by reweighting the value's training data alone — the full search+learning loop (with
+  iterated policy improvement, not just value) is then required.
+
+### Exploration-critic pilot — result (2026-06-04)
+
+Critic fit on ε=0.25 self-play (40,556 samples, MSE 4.43 — higher than the master-critic
+baseline, as expected: ε-greedy continuations raise outcome variance). Re-ran the identical
+deep dial (360 sims, same 40 positions, 4 pooled slices). Broad metric n≈146 opportunities:
+
+| 40 positions, 360 sims | `caller_passivity_rate` (broad) | bomb subset (n=16) |
+|---|---|---|
+| master | 0.183 | 0.222 |
+| master-critic deep search | 0.323 | 0.471 |
+| **exploration-critic deep search** | **0.247** | 0.375 |
+
+**Partial / weak-positive — lands in the pre-registered middle band.** The exploration critic
+pulled deep search **down** from the master-critic's 0.323 toward master (0.247), i.e. the
+value moved the *right* direction — but it did **not** clear master's 0.183. And both deltas
+are modest: 0.247 vs 0.323 is **~1.4σ** (unpaired, n≈146), 0.247 vs 0.183 is **~1.3σ**.
+Directional, **not decisive** at n=40 rounds. The bomb subset (0.375) is uninformative —
+n=16, only 2 of 4 slices had any bomb opportunity.
+
+**Read:** the load-bearing premise of search+learning is *supported, not proven* — a value
+**does** respond to its training distribution, and refitting on aggression-exploring data
+demonstrably reduces the passivity that the frozen master-self-play value amplified. But a
+**one-shot value swap is not sufficient** to beat master: the prior/policy is still the
+passive master, and PUCT exploration is steered by that prior, so the residual passivity
+plausibly lives in the policy, not only the value. This is exactly the "loop may need policy
+retraining too" branch. **Conclusion:** the cheap value-only fix is partially effective but
+falls short of master — which (a) de-risks the full **search + learning** loop (value is a
+real lever) while (b) confirming it must co-train the **policy**, not just the value. Two
+cheap follow-ups could sharpen the verdict before the multi-week build: more rounds (n=40 is
+underpowered for a ~0.07 effect — 80–120 rounds would move the ~1.4σ toward significance),
+and/or a stronger exploration distribution (higher ε or forced-beat-when-legal) to test
+whether a less-passive value *can* clear master, pinning down the value ceiling.
+
+#### Firming the result — 120 rounds (2026-06-04)
+
+Ran the cheap follow-up (1): extended the exploration-critic dial to **120 rounds** (8 more
+`--n-offset` slices, pooled with the original 4 → positions 0–119) and re-profiled **master
+on the identical 120 positions** (fast, no search) so the comparison is paired at 3× the n.
+
+| 120 positions, 360 sims | `caller_passivity_rate` (broad) | n (opportunities) |
+|---|---|---|
+| master | **0.162** | 364 |
+| exploration-critic deep search | **0.263** | 441 |
+
+**The weak-positive evaporated — the verdict flips and is now decisive.** At n=40 the
+exploration critic looked like 0.247 (a hair toward master); the extra 80 rounds came in
+≈0.27 and master tightened *down* to 0.162, so the pooled gap is **+0.101 at ~3.5σ**:
+exploration-critic deep search is **decisively MORE passive than master**, not less. The
+n=40 "moved the right direction" read was mostly noise — the power check earned its keep.
+
+**Conclusion (firmed): the cheap value-only fix is refuted as a way to beat master.**
+Refitting the critic on aggression-exploring data plausibly still beats the *master-self-play*
+critic (0.263 vs that run's 0.323 — but that anchor is only n=40, so treat as suggestive, not
+established), yet it does **not** get deep search below the master policy itself. Reweighting
+the value's training distribution alone does not remove the passivity. The residual sits in
+the **policy/prior** — which steers PUCT's expansion and the in-tree environment moves — so a
+value swap cannot reach it. This decisively selects the "loop must co-train the policy"
+branch: the indicated path is the full **search + learning** loop (iterated policy *and*
+value improvement on search targets), not any one-shot value intervention. A higher-ε /
+forced-beat critic might shave the gap, but the n=120 result makes it implausible that a
+value-only change clears master — that follow-up is now low priority versus building the loop.
