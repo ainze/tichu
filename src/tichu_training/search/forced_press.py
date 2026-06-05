@@ -16,9 +16,12 @@ The detection mirrors `tichu_eval.play_full` exactly (callers read from the Publ
 runner injects), so "force a beat here" lines up with "what the telemetry counts as a pass".
 """
 
+from tichu_engine.combinations import FourOfAKindBomb, StraightFlushBomb
 from tichu_engine.legality import Pass, legal_actions_for
 from tichu_ml.agent import Agent
 from tichu_ml.registry import register_agent
+
+_BOMB_TYPES = (FourOfAKindBomb, StraightFlushBomb)
 
 
 @register_agent("forced_press")
@@ -79,5 +82,69 @@ class ForcedPressAgent(Agent):
         ranked = self._policy.rank_actions(pv) or list(legal_actions_for(pv))
         for a in ranked:
             if not isinstance(a, Pass):
+                return a
+        return None
+
+
+@register_agent("forced_bomb")
+class ForcedBombAgent(Agent):
+    """Premise test, sharpened (ADR-0031): forced_press forces the master's *best non-Pass*,
+    which for a bomb-undervaluing master is usually NOT the bomb — so it never tested the
+    actual diagnosis (bomb undervaluation). This agent plays the master everywhere EXCEPT
+    where the master would **Pass while a bomb is legal**, where it **deploys the bomb** (its
+    highest-ranked bomb). Intervening only on cedes avoids the over-deployment confound — we
+    never spend a bomb on a trick the master wanted to contest, only convert cedes to deploys.
+    EV vs master then measures whether the master under-deploys bombs:
+      forced_bomb EV > master  -> bombs are under-deployed (real, policy-side pathology);
+      forced_bomb EV <= master -> the master holds/deploys bombs about right.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path,
+        *,
+        skill_decile: int = 9,
+        schupfen_path=None,
+        tichu_call_path=None,
+        grand_call_path=None,
+    ) -> None:
+        from tichu_inference.ml_agent import MLAgent
+
+        self._policy = MLAgent(
+            checkpoint_path,
+            skill_decile=skill_decile,
+            schupfen_path=schupfen_path,
+            tichu_call_path=tichu_call_path,
+            grand_call_path=grand_call_path,
+        )
+
+    @classmethod
+    def from_policy(cls, policy) -> "ForcedBombAgent":
+        self = cls.__new__(cls)
+        self._policy = policy
+        return self
+
+    def act(self, private_state):
+        action = self._policy.act(private_state)
+        if isinstance(action, Pass):
+            bomb = self._best_bomb(private_state)
+            if bomb is not None:
+                return bomb
+        return action
+
+    def should_call(self, private_state, kind: str) -> bool:
+        return self._policy.should_call(private_state, kind)
+
+    def rank_actions(self, private_state):
+        return self._policy.rank_actions(private_state)
+
+    def _best_bomb(self, pv):
+        ranked = self._policy.rank_actions(pv)
+        if ranked:
+            for a in ranked:
+                if isinstance(a, _BOMB_TYPES):
+                    return a
+        for a in legal_actions_for(pv):  # fallback: any legal bomb
+            if isinstance(a, _BOMB_TYPES):
                 return a
         return None

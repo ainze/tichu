@@ -41,7 +41,7 @@ import tichu_inference.ml_agent  # noqa: F401,E402
 # ADR-0030) in the registry so configs can reference `factory: search` and spawned
 # workers resolve it. Torch-free at import (SearchAgent lazy-loads MLAgent).
 import tichu_training.search.agent  # noqa: F401,E402
-# Registers `forced_press` (ADR-0031 premise test: master that never cedes a caller lead).
+# Registers `forced_press` + `forced_bomb` (ADR-0031 premise tests).
 import tichu_training.search.forced_press  # noqa: F401,E402
 
 

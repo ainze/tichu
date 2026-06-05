@@ -403,6 +403,87 @@ if so, locate the real EV gap (a decision-tape / EV-delta audit over many decisi
 not just the caller-press one) **before** any further search/learning compute. Do not run the
 decoupled-value loop — its premise is gone.
 
+#### Premise sanity-check — scope correction + the gap is under-measured (2026-06-04)
+
+A review of the strength evidence sharpened two things:
+
+1. **The forced-press result is narrower than "the pathology is mis-measured."** Forced-press
+   forces the master's *best non-Pass*; but the real diagnosis
+   (`docs/notes/2026-06-03-caller-passivity-bomb-undervaluation.md`) is **bomb
+   *undervaluation***, and a bomb-undervaluing master ranks the bomb low — so its best non-Pass
+   is usually a non-bomb beat, **not the bomb**. So what is falsified is specifically *"ceding
+   a beatable trick as a caller (the `caller_passivity_rate` dial) is an EV loss"*; the
+   load-bearing claim *"deploying the bomb at the decisive moment is +EV"* — including the
+   hand-verified egregious cases (leading a single that breaks its own four-of-a-kind) — is
+   **still untested**. The sharper probe is a **forced-bomb-deploy** EV test (force the *bomb*
+   when legal in a ceding spot, measure EV vs master), the natural complement to forced-press.
+
+   **Forced-bomb-deploy result (2026-06-04):** `ForcedBombAgent` (registered `forced_bomb`)
+   deploys the master's bomb whenever the master would Pass with a legal bomb (cedes→deploys,
+   never wasting a bomb on a contested trick), vs master over the full pool (n=4000,
+   `configs/eval_tournament_forced_bomb.yaml`):
+
+   > **mean delta = −17.4 (call-bonus −9.1), 95% CI [−24.2, −10.1].**
+
+   **Forcing bomb deployment is decisively WORSE than master (~5σ below zero).** The master's
+   bomb conservation is *correct* — spending bombs to win cedeable tricks loses ~17 pts/round
+   and even hurts the call bonus. **The bomb-undervaluation diagnosis is refuted**, not just
+   unsupported. Combined with forced-press (−1.4, neutral), *both* pillars of the pathology
+   that drove PPO Refine and all of Phase-2 search are empirically dead. (Caveat: forced_bomb
+   deploys in *all* pass-with-bomb states, so this refutes "deploy more broadly"; a perfectly
+   *selective* deploy could still be +EV, but that is plausibly what the master already
+   approximates and there is no evidence it fails.) The remaining basis for "master is
+   sub-master" is the single anecdotal owner play-test — so the priority is a real strength
+   yardstick, not more search/learning on a refuted diagnosis.
+
+2. **There is no rigorous strength yardstick.** "Master-level goal" is defined as *superhuman*
+   while "master" is the decile-9 BC baseline, so "below goal" is partly definitional. The only
+   exceeds-human signal is the owner's anecdotal play-test (no metrics); tournaments are
+   self-relative; `tichu_eval/move_prediction.py` exists but was never run on the v5 master.
+   Before committing to any strength program, the project needs *some* absolute measurement
+   (move-prediction on held-out decile-9 as a cheap start, caveat: imitation fidelity ≠
+   strength). The strongest existing "dials aren't the lever" evidence remains the PPO-Refine
+   flat tournament result.
+
+### EV-targeted re-run — search+learning degrades EV even with a good value (2026-06-04)
+
+A free EV check first tournamented the *starved* run's generations vs master: a monotonic
+**collapse** — gen1 −52, gen5 −162, gen10 −241 pts/round. So the loop is a *powerful* lever
+(PPO Refine was flat at ±2), just aimed at garbage by the R²≈0 leaf. That motivated a fixed
+re-run: leaf held FIXED at the materialised R²≈0.46 value, metric = EV-vs-master (not the
+refuted passivity dial), with a collapse gate.
+
+| gen | EV vs master | play KL |
+|---|---|---|
+| 1 | −15.8 | 0.52→0.25 |
+| 2 | −99.4 (gate halt) | 0.21→0.12 |
+
+**Even with a good value the loop degrades EV** — the play head moved hard toward the visit
+targets (KL fell) and got weaker. Fixing the value (R²≈0→0.46) only *slowed* the collapse
+(−241 by gen10 → −99 by gen2); it did not reverse it. **The bottleneck is the policy *target*,
+not the value:** PIMC's per-decision visit distribution is a poor policy-*improvement* target
+in an imperfect-information game (**strategy fusion** — it implicitly assumes the hidden cards
+will be known), so training a policy toward it teaches incoherent play. AlphaZero's
+"MCTS-visits = improvement" guarantee holds in *perfect*-info games and does not transfer to
+single-rooted determinized PIMC. (This also downgrades the cheating-value idea *for the loop*:
+a better leaf cannot fix a flawed target.)
+
+## Final synthesis (2026-06-04)
+
+Every self-play / search lever is now tried and falsified: search-only on frozen nets
+(amplifies the non-pathology), value-only (exploration-critic; no effect), search+learning
+(starved *and* with a good value; both degrade EV), and PPO Refine (flat). The forced-press
+(−1.4, neutral) and forced-bomb (−17.4, harmful) probes show the master plays the diagnosed
+spots **correctly**. Consistent conclusion: **the BC master is a strong baseline at/near the
+ceiling these methods reach, and the caller-passivity / bomb-undervaluation diagnosis behind
+the whole Phase-2 effort was not real.** The only remaining evidence of *any* strength gap is
+the anecdotal owner play-test. Genuine options: (1) build a real strength yardstick (logged
+owner-vs-master games) — the only way to know a gap exists to chase; (2) a fundamentally
+different imperfect-info method (CFR / DouZero-style Deep Monte-Carlo, *not* search-bootstrapped
+— but PPO, its close cousin, was already flat); or (3) accept the BC+PIMC agent as the product
+and re-scope away from "superhuman". The PIMC and search+learning machinery is built, correct,
+and reusable should a real, located gap ever justify it.
+
 ## Risks
 
 1. **Throughput (existential).** Even S2 + multiprocessing on one CPU box may be too slow.

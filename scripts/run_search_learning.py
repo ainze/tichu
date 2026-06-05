@@ -33,6 +33,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
 from tichu_eval.behavioral import run_behavioral_profiles
 from tichu_eval.full_position_pool import generate_full_position_pool
+from tichu_eval.play_full import play_full_round
 from tichu_export.torchscript import export_torchscript
 from tichu_inference.ml_agent import MLAgent
 from tichu_training.action_space import ACTION_SPACE_VERSION
@@ -55,6 +56,10 @@ GRAND = EXPORT + r"\grand_tichu_call.pt"
 POLICY0_CKPT = (r"C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled"
                 r"\checkpoints\step_000001.bin")
 CRITIC0 = r"C:\workbench\tichu\data\export\search_critic_master_selfplay_v5\critic.bin"
+# The fix: a real-signal value (held-out R^2~0.46) pre-trained on the materialised decile-9
+# corpus. Held FIXED across generations by default so the leaf never re-starves (the
+# starved per-gen value, R^2~0, caused the gen1->gen10 collapse to -241 vs master).
+PRETRAINED_CRITIC = r"C:\workbench\tichu\data\export\search_critic_materialised_d9_v5\critic.bin"
 
 
 def _load_value_baseline(path) -> ValueBaseline:
@@ -106,15 +111,34 @@ def _eval_passivity(policy_pt, positions) -> dict:
     return run_behavioral_profiles({"p": builder}, positions)["p"].as_row()
 
 
+def _eval_ev(policy_pt, positions) -> float:
+    """Head-to-head EV of the gen policy vs master, raw (no search), seat-swapped.
+    Positive => the generation is stronger than master. This is the right loop metric
+    (self-play strength), replacing the refuted passivity dial as the gate."""
+    gen = MLAgent(policy_pt, skill_decile=9, schupfen_path=SCHUPFEN,
+                  tichu_call_path=TICHU, grand_call_path=GRAND)
+    master = MLAgent(EXPORT + r"\policy.pt", skill_decile=9, schupfen_path=SCHUPFEN,
+                     tichu_call_path=TICHU, grand_call_path=GRAND)
+    total, n = 0.0, 0
+    for pos in positions:
+        for gen_team in (0, 1):
+            seats = ([gen, master, gen, master] if gen_team == 0
+                     else [master, gen, master, gen])
+            r = play_full_round(seats, pos.state, pos.grand_prefixes)
+            total += r.total[gen_team] - r.total[1 - gen_team]
+            n += 1
+    return total / n
+
+
 def _train_and_export(samples, in_ckpt, out_dir, *, play_epochs, play_lr,
-                      value_epochs, value_lr):
+                      value_epochs, value_lr, fixed_value=True):
     out_dir.mkdir(parents=True, exist_ok=True)
     # --- play head: warm-start from the previous generation, KL toward visit π ---
     model = BCModel(**ARCH)
     load_checkpoint(in_ckpt, model)
     hist = train_play_head(model, samples, epochs=play_epochs, lr=play_lr)
-    ckpt_out = out_dir / "trainable.bin"
-    save_checkpoint(model, torch.optim.Adam(model.parameters()), step=0, path=ckpt_out)
+    save_checkpoint(model, torch.optim.Adam(model.parameters()), step=0,
+                    path=out_dir / "trainable.bin")
     model.eval()
     export_torchscript(
         model, example_inputs=(torch.randn(1, FEATURIZER_OUTPUT_DIM),
@@ -122,6 +146,8 @@ def _train_and_export(samples, in_ckpt, out_dir, *, play_epochs, play_lr,
         featurizer_version=FEATURIZER_VERSION, action_space_version=ACTION_SPACE_VERSION,
         output_path=out_dir / "policy.pt",
     )
+    if fixed_value:
+        return hist, float("nan")  # leaf value held fixed at the pretrained critic
     # --- value: warm-start from the previous critic, MSE toward MC outcome z ---
     feats = np.stack([s.features for s in samples]).astype(np.float32)
     z = np.array([s.z for s in samples], dtype=np.float32)
@@ -135,8 +161,8 @@ def _train_and_export(samples, in_ckpt, out_dir, *, play_epochs, play_lr,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--generations", type=int, default=3)
-    ap.add_argument("--rounds", type=int, default=50)
+    ap.add_argument("--generations", type=int, default=5)
+    ap.add_argument("--rounds", type=int, default=60)
     ap.add_argument("--worlds", type=int, default=4)
     ap.add_argument("--sims", type=int, default=50)
     ap.add_argument("--c-puct", type=float, default=1.4)
@@ -147,31 +173,36 @@ def main() -> None:
     ap.add_argument("--play-lr", type=float, default=1e-4)
     ap.add_argument("--value-epochs", type=int, default=8)
     ap.add_argument("--value-lr", type=float, default=1e-3)
+    ap.add_argument("--fixed-value", action=argparse.BooleanOptionalAction, default=True,
+                    help="hold the leaf value fixed at --critic0 (default); --no-fixed-value "
+                         "retrains it per generation (the starved mode that collapsed)")
+    ap.add_argument("--critic0", default=PRETRAINED_CRITIC,
+                    help="initial/fixed leaf value (default: materialised decile-9 R^2~0.46)")
     ap.add_argument("--workers", type=int, default=6)
-    ap.add_argument("--eval-rounds", type=int, default=120,
-                    help="fixed raw-policy passivity eval set, disjoint from training")
+    ap.add_argument("--eval-rounds", type=int, default=200,
+                    help="held-out eval set (EV vs master + passivity), disjoint from training")
+    ap.add_argument("--stop-drop", type=float, default=30.0,
+                    help="stop if a generation's EV-vs-master falls this far below the best")
     ap.add_argument("--pos-seed", type=int, default=0)
-    ap.add_argument("--out-dir", default=r"C:\workbench\tichu\data\runs\search_learning_v1")
+    ap.add_argument("--out-dir", default=r"C:\workbench\tichu\data\runs\search_learning_ev")
     args = ap.parse_args()
 
     hp = dict(worlds=args.worlds, sims=args.sims, c_puct=args.c_puct,
               root_alpha=args.root_alpha, root_eps=args.root_eps,
               temperature=args.temperature)
-    # Fixed eval set, seeded far from any training seed (pos_seed + g*rounds) so the
-    # passivity dial is measured on deals the loop never trained on.
+    # Held-out eval set, seeded far from any training seed so EV/passivity are off-train.
     eval_positions = generate_full_position_pool(seed=900_000, n=args.eval_rounds)
 
     out_root = pathlib.Path(args.out_dir)
     gen0 = out_root / "gen0"
     gen0.mkdir(parents=True, exist_ok=True)
     shutil.copy(EXPORT + r"\policy.pt", gen0 / "policy.pt")
-    shutil.copy(CRITIC0, gen0 / "critic.bin")
+    shutil.copy(args.critic0, gen0 / "critic.bin")
     shutil.copy(POLICY0_CKPT, gen0 / "trainable.bin")
 
     metrics_csv = out_root / "metrics.csv"
-    fields = ["gen", "n_samples", "train_rounds", "play_kl_first", "play_kl_last",
-              "value_mse", "mean_z", "caller_passivity_rate", "caller_pass_opportunities",
-              "caller_bomb_passivity_rate", "bomb_when_legal_rate", "seconds"]
+    fields = ["gen", "n_samples", "ev_vs_master", "play_kl_first", "play_kl_last",
+              "mean_z", "caller_passivity_rate", "value_mode", "seconds"]
     with metrics_csv.open("w", encoding="utf-8", newline="") as fh:
         csv.DictWriter(fh, fieldnames=fields).writeheader()
 
@@ -179,18 +210,19 @@ def main() -> None:
         with metrics_csv.open("a", encoding="utf-8", newline="") as fh:
             csv.DictWriter(fh, fieldnames=fields).writerow({k: row.get(k, "") for k in fields})
 
-    # Generation 0 = the master itself: record its passivity baseline for the curve.
-    base = _eval_passivity(str(gen0 / "policy.pt"), eval_positions)
-    print(f"[gen 0 master] caller_passivity={base['caller_passivity_rate']:.3f} "
-          f"(opp {base['caller_pass_opportunities']})")
-    _log({"gen": 0, "caller_passivity_rate": base["caller_passivity_rate"],
-          "caller_pass_opportunities": base["caller_pass_opportunities"],
-          "caller_bomb_passivity_rate": base.get("caller_bomb_passivity_rate", ""),
-          "bomb_when_legal_rate": base.get("bomb_when_legal_rate", "")})
+    value_mode = "fixed-pretrained" if args.fixed_value else "per-gen-retrain"
+    print(f"value leaf: {value_mode} ({args.critic0})")
+    _log({"gen": 0, "ev_vs_master": 0.0, "value_mode": value_mode,
+          "caller_passivity_rate": _eval_passivity(str(gen0 / "policy.pt"),
+                                                   eval_positions)["caller_passivity_rate"]})
+    print("[gen 0 master] EV vs master = 0.0 (baseline)")
 
+    # The leaf value is held fixed at critic0 across generations (the fix). With
+    # --no-fixed-value each gen writes its own critic and the loop follows it (starved mode).
     policy_pt = str(gen0 / "policy.pt")
     critic_bin = str(gen0 / "critic.bin")
     trainable = str(gen0 / "trainable.bin")
+    best_ev = 0.0
 
     for g in range(1, args.generations + 1):
         t0 = time.perf_counter()
@@ -198,30 +230,32 @@ def main() -> None:
                                                  n=args.rounds)
         samples = _collect(policy_pt, critic_bin, positions, hp, args.workers)
         gen_dir = out_root / f"gen{g}"
-        hist, mse = _train_and_export(
+        hist, _ = _train_and_export(
             samples, trainable, gen_dir,
             play_epochs=args.play_epochs, play_lr=args.play_lr,
-            value_epochs=args.value_epochs, value_lr=args.value_lr)
+            value_epochs=args.value_epochs, value_lr=args.value_lr,
+            fixed_value=args.fixed_value)
         policy_pt = str(gen_dir / "policy.pt")
-        critic_bin = str(gen_dir / "critic.bin")
         trainable = str(gen_dir / "trainable.bin")
+        if not args.fixed_value:
+            critic_bin = str(gen_dir / "critic.bin")
 
-        prof = _eval_passivity(policy_pt, eval_positions)
+        ev = _eval_ev(policy_pt, eval_positions)
+        passiv = _eval_passivity(policy_pt, eval_positions)["caller_passivity_rate"]
         dt = time.perf_counter() - t0
-        row = {"gen": g, "n_samples": len(samples), "train_rounds": args.rounds,
-               "play_kl_first": round(hist[0], 4), "play_kl_last": round(hist[-1], 4),
-               "value_mse": round(mse, 4),
-               "mean_z": round(float(np.mean([s.z for s in samples])), 4),
-               "caller_passivity_rate": prof["caller_passivity_rate"],
-               "caller_pass_opportunities": prof["caller_pass_opportunities"],
-               "caller_bomb_passivity_rate": prof.get("caller_bomb_passivity_rate", ""),
-               "bomb_when_legal_rate": prof.get("bomb_when_legal_rate", ""),
-               "seconds": round(dt)}
-        _log(row)
+        _log({"gen": g, "n_samples": len(samples), "ev_vs_master": round(ev, 2),
+              "play_kl_first": round(hist[0], 4), "play_kl_last": round(hist[-1], 4),
+              "mean_z": round(float(np.mean([s.z for s in samples])), 4),
+              "caller_passivity_rate": round(passiv, 4), "value_mode": value_mode,
+              "seconds": round(dt)})
         print(f"[gen {g}] {len(samples):,} samples | play KL {hist[0]:.3f}->{hist[-1]:.3f} | "
-              f"value mse {mse:.4f} | mean z {row['mean_z']:+.3f} | "
-              f"caller_passivity {prof['caller_passivity_rate']:.3f} "
-              f"(opp {prof['caller_pass_opportunities']}) | {dt:.0f}s")
+              f"EV vs master {ev:+.1f} | passivity {passiv:.3f} | {dt:.0f}s")
+
+        best_ev = max(best_ev, ev)
+        if ev < best_ev - args.stop_drop:
+            print(f"[stop] gen {g} EV {ev:+.1f} fell >{args.stop_drop} below best "
+                  f"{best_ev:+.1f} — halting to avoid a collapse chain.")
+            break
 
     print(f"done. metrics -> {metrics_csv}")
 
