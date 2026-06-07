@@ -42,10 +42,21 @@ def _init_worker(arch_cfg: dict, critic_hidden: int, perfect_info: bool) -> None
     torch.set_num_threads(1)
     critic_dim = PERFECT_INFO_DIM if perfect_info else FEATURIZER_OUTPUT_DIM
     _WORKER.update(
+        arch_cfg=arch_cfg,
         models=_build_models(arch_cfg),
         critic=ValueBaseline(critic_dim, hidden=int(critic_hidden)),
         perfect_info=bool(perfect_info),
+        opp_models=None,  # built lazily on the first league task
     )
+
+
+def _opponent_models():
+    """Lazily build (once per worker) a second net set for a league opponent, so the
+    learner and the frozen opponent can hold different weights simultaneously."""
+    from tichu_training.cli.train_cotrain import _build_models
+    if _WORKER.get("opp_models") is None:
+        _WORKER["opp_models"] = _build_models(_WORKER["arch_cfg"])
+    return _WORKER["opp_models"]
 
 
 def _rollout_chunk(task):
@@ -64,9 +75,20 @@ def _rollout_chunk(task):
         models["play"], models["schupfen"], models["tichu"], models["grand"], critic,
         skill_decile=skill_decile, perfect_info=_WORKER["perfect_info"], generator=gen,
     )
-    # Self-play: opponents share the learner's weights. (A league would load
-    # `opp_weights_path` into a second policy here — the hook is reserved.)
-    opponent = learner
+    if opp_weights_path is None:
+        opponent = learner  # pure self-play: opponents share the learner's weights
+    else:
+        # League: opponent seats play a separate frozen weight file. Its critic is
+        # unused (opponent choices aren't recorded), so reuse the learner's critic.
+        opp = _opponent_models()
+        opp_state = torch.load(opp_weights_path, map_location="cpu", weights_only=False)
+        for key, module in opp.items():
+            module.load_state_dict(opp_state["models"][key])
+        opponent = BatchedCoTrainPolicy(
+            opp["play"], opp["schupfen"], opp["tichu"], opp["grand"], critic,
+            skill_decile=skill_decile, perfect_info=_WORKER["perfect_info"],
+            generator=torch.Generator().manual_seed(int(seed) + 7919),
+        )
     return collect_rollout(
         positions, learner, opponent_policy=opponent, learner_team=learner_team
     )
@@ -88,16 +110,18 @@ class ParallelRollout:
         self._workers = int(workers)
         self._skill_decile = int(skill_decile)
 
-    def collect(self, positions, weights_path: str, *, learner_team: int, base_seed: int):
+    def collect(self, positions, weights_path: str, *, learner_team: int, base_seed: int,
+                opp_weights_path: str | None = None):
         """Split the positions across workers (round-robin for balance), roll each
         chunk out, and concatenate the trajectories. Each chunk gets its own RNG seed
         so the workers don't sample identically (statistically equivalent to serial,
-        not bit-identical)."""
+        not bit-identical). `opp_weights_path` (a league member) makes the opponent
+        seats play those frozen weights; `None` is pure self-play."""
         positions = list(positions)
         w = max(1, min(self._workers, len(positions)))
         chunks = [positions[i::w] for i in range(w)]
         tasks = [
-            (chunk, weights_path, None, learner_team, self._skill_decile, base_seed + i)
+            (chunk, weights_path, opp_weights_path, learner_team, self._skill_decile, base_seed + i)
             for i, chunk in enumerate(chunks) if chunk
         ]
         results = self._pool.map(_rollout_chunk, tasks)

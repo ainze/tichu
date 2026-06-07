@@ -94,3 +94,26 @@ def test_cotrain_cli_restart_ignores_the_bundle(tmp_path):
     # --restart starts fresh even though a bundle exists.
     result = run_cotrain_training(config, restart=True, progress=False)
     assert result["start_iter"] == 0 and result["final_iter"] == 2
+
+
+def test_cotrain_cli_league_seeds_base_snapshots_and_resumes(tmp_path):
+    # League path end-to-end (parallel-only): a frozen-BC base is seeded, learner
+    # snapshots accrue, and the league round-trips through the Resume Bundle.
+    import torch as _torch
+
+    _torch.manual_seed(0)
+    config = _config(tmp_path)
+    config["rollout_workers"] = 2
+    config["league"] = {"enabled": True, "snapshot_every": 1, "max_snapshots": 3}
+
+    r1 = run_cotrain_training(config, progress=False)
+    assert r1["final_iter"] == 2
+    league_dir = Path(config["run_dir"]) / "league"
+    assert (league_dir / "base_bc.pt").exists()              # frozen-BC base opponent
+    assert (league_dir / "snap_iter_00001.pt").exists()      # learner snapshots (every iter)
+    assert (league_dir / "snap_iter_00002.pt").exists()
+
+    # Resume with league enabled: continues and restores the league from the bundle.
+    config["ppo"]["iterations"] = 3
+    r2 = run_cotrain_training(config, progress=False)
+    assert r2["start_iter"] == 2 and r2["final_iter"] == 3

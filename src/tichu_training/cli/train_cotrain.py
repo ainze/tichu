@@ -141,6 +141,14 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             print(f"  update_device={update_device} requested but CUDA unavailable -> CPU", flush=True)
         update_device = "cpu"
     rollout_workers = int(config.get("rollout_workers", 1))
+    # Opt-in opponent league (default off = pure self-play). Parallel-only: opponents
+    # run in rollout workers that load frozen weight files (ADR-0034 league lever).
+    league_cfg = config.get("league", {})
+    league_enabled = bool(league_cfg.get("enabled", False))
+    if league_enabled and rollout_workers <= 1:
+        if progress:
+            print("  league requires rollout_workers>1 -> disabled (pure self-play)", flush=True)
+        league_enabled = False
     gamma = float(ppo.get("gamma", 1.0))
     lam = float(ppo.get("lam", 0.95))
     pool_seed = int(ppo.get("pool_seed", 0))
@@ -182,14 +190,38 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     # absent (or --restart) -> fresh from the BC warm-starts (ADR-0034).
     start_iter = 0
     resumed = False
+    resume_payload = None
     if Path(bundle_path).exists() and not restart:
-        payload = load_resume_bundle(bundle_path, models=models, critic=critic, optimizer=optimizer)
+        resume_payload = load_resume_bundle(bundle_path, models=models, critic=critic, optimizer=optimizer)
         for dt in _NET_TYPES:
-            if dt in payload["kl_coefs"]:
-                kl_controllers[dt].coef = float(payload["kl_coefs"][dt])
-        start_iter = int(payload["iteration"])
-        restore_rng(payload["rng"])
+            if dt in resume_payload["kl_coefs"]:
+                kl_controllers[dt].coef = float(resume_payload["kl_coefs"][dt])
+        start_iter = int(resume_payload["iteration"])
+        restore_rng(resume_payload["rng"])
         resumed = True
+
+    # Opponent league setup (opt-in). Restored from the bundle on resume; otherwise
+    # seeded with a frozen-BC base opponent. Snapshot files live under run_dir/league.
+    league = None
+    league_snapshot_every = int(league_cfg.get("snapshot_every", 25))
+    if league_enabled:
+        import random as _random
+
+        from tichu_training.ppo.cotrain_league import CoTrainLeague
+        from tichu_training.ppo.rollout_parallel import save_rollout_weights as _save_weights
+        league_dir = run_dir / "league"
+        league_dir.mkdir(parents=True, exist_ok=True)
+        league_rng = _random.Random(pool_seed)
+        if resume_payload is not None and resume_payload.get("league"):
+            league = CoTrainLeague.from_state(
+                resume_payload["league"], league_dir=league_dir, rng=league_rng)
+        else:
+            base_path = str(league_dir / "base_bc.pt")
+            if not Path(base_path).exists():
+                _save_weights(base_path, bc_models, critic)  # frozen-BC base opponent
+            league = CoTrainLeague(
+                league_dir, base_path,
+                max_snapshots=int(league_cfg.get("max_snapshots", 3)), rng=league_rng)
 
     warmup_iters = int(config.get("critic", {}).get("warmup_iters", 0))
     if warmup_iters > 0 and not resumed:
@@ -221,11 +253,17 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         log_state["writer"].writerow(row)
         log_state["fh"].flush()
 
+        # Freeze the current learner into the league before checkpointing, so the
+        # Resume Bundle's league state matches the files on disk.
+        if league is not None and (iteration + 1) % league_snapshot_every == 0:
+            league.snapshot(models, critic, iteration + 1)
+
         # Resume Bundle every iteration (atomic, keep-2): a kill loses <=1 iter.
         save_resume_bundle(
             bundle_path, models=models, critic=critic, optimizer=optimizer,
             kl_coefs={dt: kl_controllers[dt].coef for dt in _NET_TYPES},
             iteration=iteration + 1, rng_state=capture_rng(),
+            league=(league.state() if league is not None else None),
         )
         # Serving snapshots every snapshot_every (for the offline `check` command).
         if (iteration + 1) % snapshot_every == 0:
@@ -249,7 +287,9 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             f"Co-training: target {total_iters} iters x M={positions_per_iter} "
             f"({'resumed at ' + str(start_iter) if resumed else 'fresh'}; running {remaining})\n"
             f"  run_dir: {run_dir}  (perfect_info={perfect_info}, "
-            f"update_device={update_device}, rollout_workers={rollout_workers})", flush=True,
+            f"update_device={update_device}, rollout_workers={rollout_workers}, "
+            f"league={'on/' + str(len(league.members())) + ' members' if league is not None else 'off'})",
+            flush=True,
         )
 
     # Optional process-parallel rollout (ADR-0034 #1): the rollout is CPU-engine-bound,
@@ -269,9 +309,11 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
 
         def rollout_collect(iteration: int, positions):
             save_rollout_weights(weights_path, models, critic)
+            opp = league.sample() if league is not None else None
             return parallel.collect(
                 positions, weights_path, learner_team=learner_team,
                 base_seed=pool_seed + iteration * positions_per_iter,
+                opp_weights_path=opp,
             )
 
     try:

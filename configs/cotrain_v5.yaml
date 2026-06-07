@@ -41,6 +41,16 @@ update_device: cuda
 # 1 = the single-process path. Each worker is single-threaded (no BLAS oversubscribe).
 rollout_workers: 10    # 12-core box: 10 rollout workers + room for main proc & GPU update
 
+# Opponent league (ADR-0034 league lever) — OFF by default = pure self-play. Flip
+# `enabled: true` and resume to put a frozen-BC (master-level) opponent + rotating
+# learner snapshots in the training distribution: direct pressure to beat master and
+# a guard against self-play RPS cycling. Parallel-only (needs rollout_workers>1).
+# Snapshot files live under {run_dir}/league and persist in the Resume Bundle.
+league:
+  enabled:        false
+  snapshot_every: 50     # freeze a learner snapshot into the league every N iters
+  max_snapshots:  3      # rotating learner snapshots kept (+ the never-evicted BC base)
+
 # Per-net adaptive KL-anchor to frozen BC. Schupfen anchored TIGHTEST (it is the
 # most sensitive net; cratering it is the demonstrated big downside). Loosen
 # schupfen's target on a later resume once the stack is stable (Q5/ADR-0034).
