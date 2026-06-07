@@ -99,6 +99,45 @@ def test_play_mask_non_current_player_returns_only_bomb_interrupts():
     assert not mask.any(), "no bombs in hand → empty mask for the non-current player"
 
 
+def test_play_mask_flags_dragon_single_when_legal():
+    """The Dragon card is a representable play Intent (`PlaySingle(special="dragon")`),
+    so a leading player holding it gets that slot flagged — the play net can always
+    emit a Dragon play. Regression guard: if the Dragon were not enumerated, or
+    `play_intent_index(Single(DRAGON))` raised, it would be silently dropped from the
+    mask and the net could never play it. (Audit: dragon-from-net, 2026-06-07.)"""
+    hand = [DRAGON, Card(Suit.JADE, 3)]
+    public = _public(current_player=0, hand_sizes=(2, 0, 0, 0))
+    state = _game([hand, [], [], []], public)
+
+    mask = legal_mask("play", state, player=0)
+
+    dragon_idx = encode(PlaySingle(special="dragon"))
+    assert play_intent_index(Single(DRAGON)) == dragon_idx
+    assert mask[dragon_idx], "Single(DRAGON) is legal but not flagged in the play mask"
+
+
+def test_play_mask_under_fulfillable_wish_restricts_to_fulfilling_and_forbids_pass():
+    """An active Mahjong wish for a rank the player can satisfy must restrict the
+    play mask to ONLY wish-fulfilling Intents and forbid Pass — exactly the engine's
+    `_apply_wish`. The net's legal mask is built from `legal_actions`, so it can never
+    emit a wish-violating action. Following a Single-3 with a 5 and a 9 while wishing
+    rank 5: only Single(5) is legal; Single(9) and Pass are masked out.
+    (Audit: mahjong-wish-respected, 2026-06-07.)"""
+    hand = [Card(Suit.JADE, 5), Card(Suit.JADE, 9)]
+    top = Single(Card(Suit.STAR, 3))
+    from tichu_engine.state import Play
+    trick = Trick(plays=(Play(player=1, combination=top),), leader=1)
+    public = _public(current_player=0, hand_sizes=(2, 0, 0, 0), trick=trick, mahjong_wish=5)
+    state = _game([hand, [], [], []], public)
+
+    mask = legal_mask("play", state, player=0)
+
+    assert mask[encode(PlaySingle(suit="jade", rank=5))], "the wish-fulfilling 5 must be legal"
+    assert not mask[encode(PlaySingle(suit="jade", rank=9))], "non-fulfilling 9 must be masked out"
+    assert not mask[encode(IntentPass())], "Pass must be forbidden under a fulfillable wish"
+    assert mask.sum() == 1, "exactly one Intent (the fulfilling 5) should be legal"
+
+
 # --- wish head -----------------------------------------------------------
 
 def test_wish_mask_all_14_legal_when_pending():

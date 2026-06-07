@@ -63,7 +63,8 @@ def _rollout_chunk(task):
     from tichu_training.ppo.cotrain import BatchedCoTrainPolicy
     from tichu_training.ppo.rollout import collect_rollout
 
-    positions, weights_path, opp_weights_path, learner_team, skill_decile, seed = task
+    (positions, weights_path, opp_weights_path, learner_team, skill_decile, seed,
+     train_wish) = task
     state = torch.load(weights_path, map_location="cpu", weights_only=False)
     models, critic = _WORKER["models"], _WORKER["critic"]
     for key, module in models.items():
@@ -74,6 +75,7 @@ def _rollout_chunk(task):
     learner = BatchedCoTrainPolicy(
         models["play"], models["schupfen"], models["tichu"], models["grand"], critic,
         skill_decile=skill_decile, perfect_info=_WORKER["perfect_info"], generator=gen,
+        train_wish=bool(train_wish),
     )
     if opp_weights_path is None:
         opponent = learner  # pure self-play: opponents share the learner's weights
@@ -101,7 +103,7 @@ class ParallelRollout:
     path to the freshly-saved weights. `close` at the end."""
 
     def __init__(self, arch_cfg: dict, *, critic_hidden: int, skill_decile: int,
-                 perfect_info: bool, workers: int) -> None:
+                 perfect_info: bool, workers: int, train_wish: bool = False) -> None:
         ctx = mp.get_context("spawn")
         self._pool = ctx.Pool(
             int(workers), initializer=_init_worker,
@@ -109,6 +111,7 @@ class ParallelRollout:
         )
         self._workers = int(workers)
         self._skill_decile = int(skill_decile)
+        self._train_wish = bool(train_wish)
 
     def collect(self, positions, weights_path: str, *, learner_team: int, base_seed: int,
                 opp_weights_path: str | None = None):
@@ -121,7 +124,8 @@ class ParallelRollout:
         w = max(1, min(self._workers, len(positions)))
         chunks = [positions[i::w] for i in range(w)]
         tasks = [
-            (chunk, weights_path, opp_weights_path, learner_team, self._skill_decile, base_seed + i)
+            (chunk, weights_path, opp_weights_path, learner_team, self._skill_decile,
+             base_seed + i, self._train_wish)
             for i, chunk in enumerate(chunks) if chunk
         ]
         results = self._pool.map(_rollout_chunk, tasks)

@@ -13,12 +13,12 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from tichu_engine.legality import SchupfenPass
+from tichu_engine.legality import MahjongWish, SchupfenPass
 from tichu_training.card_slots import CARD_SLOTS, card_slot, slot_to_card
 from tichu_training.featurizer import featurize
 from tichu_training.perfect_info import featurize_perfect_info
 from tichu_training.ppo.policy import BatchedPolicy
-from tichu_training.ppo.rollout import CallChoice, SchupfenChoice
+from tichu_training.ppo.rollout import CallChoice, SchupfenChoice, WishChoice
 from tichu_training.ppo.update import (
     _masked_logp_at,
     clipped_policy_loss,
@@ -29,6 +29,23 @@ from tichu_training.ppo.update import (
 )
 
 _NUM_DIRECTIONS = 3  # to_next, to_partner, to_previous
+
+# Decision types whose policy head lives on ANOTHER net's trunk, mapped to that net
+# (option (a), ADR-0034 addendum): the wish is a 14-way head on the play BCModel, not
+# a standalone net. `models`/`bc_models` are keyed by NET type (play/schupfen/tichu/
+# grand); this resolves a decision type to the net carrying its head.
+_HEAD_ON_NET = {"wish": "play"}
+
+
+def _net_for(models: dict, decision_type: str):
+    """The net module carrying `decision_type`'s head (identity unless it is a head
+    on another net's trunk, e.g. wish -> play)."""
+    return models[_HEAD_ON_NET.get(decision_type, decision_type)]
+
+
+def _wish_rank_for_index(idx: int) -> int | None:
+    """Inverse of `action_space.wish_intent_index`: 0 -> decline, k -> rank k+1."""
+    return None if idx == 0 else idx + 1
 
 
 def sample_schupfen(
@@ -171,6 +188,8 @@ def _net_logits(model, features: torch.Tensor, skill: torch.Tensor, decision_typ
     play -> (B, PLAY_DIM); schupfen -> (B, 3, CARD_SLOTS); call -> (B, 2)."""
     if decision_type == "play":
         return model(features, skill)["play"]
+    if decision_type == "wish":
+        return model(features, skill)["wish"]  # head on the play BCModel (option a)
     if decision_type == "schupfen":
         return torch.stack(model(features, skill), dim=1)
     return model(features, skill)  # tichu / grand Call Network
@@ -277,7 +296,7 @@ def _cotrain_update_body(
 ) -> dict:
     with torch.no_grad():
         bc_logits = {
-            dt: _net_logits(bc_models[dt], nb.features, nb.skill, dt)
+            dt: _net_logits(_net_for(bc_models, dt), nb.features, nb.skill, dt)
             for dt, nb in batch.nets.items()
         }
     advs: dict[str, torch.Tensor] = {}
@@ -293,7 +312,7 @@ def _cotrain_update_body(
         vloss = value_loss(values, batch.returns)
         total = vf_coef * vloss
         for dt, nb in batch.nets.items():
-            logits = _net_logits(models[dt], nb.features, nb.skill, dt)
+            logits = _net_logits(_net_for(models, dt), nb.features, nb.skill, dt)
             new_logp, kl, ent = _policy_kl_entropy(dt, logits, bc_logits[dt], nb)
             ploss = clipped_policy_loss(new_logp, nb.old_logp, advs[dt], clip_eps=clip_eps)
             total = total + ploss - ent_coefs.get(dt, 0.0) * ent + kl_coefs.get(dt, 0.0) * kl
@@ -321,6 +340,7 @@ class BatchedCoTrainPolicy:
     def __init__(
         self, play_model, schupfen_model, tichu_model, grand_model, critic,
         *, skill_decile: int = 9, perfect_info: bool = True, generator=None,
+        train_wish: bool = False,
     ) -> None:
         self._play = BatchedPolicy(
             play_model, critic, skill_decile=skill_decile,
@@ -333,6 +353,12 @@ class BatchedCoTrainPolicy:
         self._skill = int(skill_decile)
         self._perfect_info = bool(perfect_info)
         self._gen = generator
+        # Wish co-training is opt-in (ADR-0034 addendum). When off, disabling the
+        # method makes `rollout._supports_wish()` False, so the collector leaves the
+        # Mahjong-wish on the frozen inline seat agent — the unchanged ADR-0034
+        # behavior. The 14-way `wish` head still rides the play trunk regardless.
+        if not train_wish:
+            self.act_wish_batch = None
 
     def act_play_batch(self, decisions):
         return self._play.act_play_batch(decisions)
@@ -373,6 +399,34 @@ class BatchedCoTrainPolicy:
                 value=float(values[row]),
                 features=features[row],
                 legal_masks=hand_masks[row],
+                critic_features=(crit_in[row] if self._perfect_info else None),
+            ))
+        return choices
+
+    def act_wish_batch(self, decisions):
+        """Decide a batch of Mahjong-Wish Decisions from the play net's 14-way `wish`
+        head (option (a), ADR-0034 addendum): every slot is legal during the pending
+        wish, so we sample the unmasked categorical. Index 0 = decline; 1..13 = ranks
+        2..14. Records the PPO bookkeeping for a learner seat and values the state with
+        the shared critic — same one-shot shape as a Call."""
+        features, crit_in, skill = self._stack_features(decisions)
+        with torch.no_grad():
+            logits = self.play_model(features, skill)["wish"]
+            logp_all = torch.log_softmax(logits, dim=-1)
+            actions = torch.multinomial(
+                logp_all.exp(), num_samples=1, generator=self._gen
+            ).squeeze(-1)
+            chosen_logp = logp_all.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
+            values = self.critic(crit_in)
+        choices = []
+        for row in range(len(decisions)):
+            idx = int(actions[row].item())
+            choices.append(WishChoice(
+                concrete_action=MahjongWish(rank=_wish_rank_for_index(idx)),
+                intent_index=idx,
+                logprob=float(chosen_logp[row]),
+                value=float(values[row]),
+                features=features[row],
                 critic_features=(crit_in[row] if self._perfect_info else None),
             ))
         return choices
@@ -423,6 +477,7 @@ def train_cotrain(
     start_iter: int = 0,
     update_device: str = "cpu",
     rollout_collect=None,
+    train_wish: bool = False,
 ) -> list[dict]:
     """Run `iterations` of full-stack co-training self-play (ADR-0034).
 
@@ -445,22 +500,33 @@ def train_cotrain(
         else:
             policy = BatchedCoTrainPolicy(
                 models["play"], models["schupfen"], models["tichu"], models["grand"],
-                critic, skill_decile=skill_decile, perfect_info=perfect_info, generator=generator,
+                critic, skill_decile=skill_decile, perfect_info=perfect_info,
+                generator=generator, train_wish=train_wish,
             )
             opponent = opponent_policy_provider(it) if opponent_policy_provider is not None else policy
             trajs = collect_rollout(
                 positions, policy, opponent_policy=opponent, learner_team=learner_team
             )
         batch = build_cotrain_batch(trajs, skill_decile=skill_decile, gamma=gamma, lam=lam)
-        kl_coefs = {dt: kl_controllers[dt].coef for dt in models}
+        # Advance each controller's annealed KL target to this global iteration before
+        # the update reads its coef / re-checks the band (resume-safe; ADR-0034 follow-up,
+        # loosening the Schupfen leash). No-op for controllers without a target schedule.
+        for c in kl_controllers.values():
+            c.set_iteration(it)
+        # Controllers are keyed by DECISION type (a superset of the net types: the
+        # wish head rides the play net, option (a)). A decision type can be absent in
+        # an iteration (e.g. no Mahjong played -> no wish steps), so steer its
+        # controller only when this iteration produced its KL (below).
+        kl_coefs = {dt: c.coef for dt, c in kl_controllers.items()}
         stats = cotrain_update(
             models, bc_models, critic, optimizer, batch,
             clip_eps=clip_eps, vf_coef=vf_coef, ent_coefs=ent_coefs,
             kl_coefs=kl_coefs, epochs=ppo_epochs, device=update_device,
         )
-        for dt in models:
-            stats[f"{dt}_kl_coef"] = kl_controllers[dt].coef
-            kl_controllers[dt].update(stats[f"{dt}_kl"])
+        for dt, c in kl_controllers.items():
+            stats[f"{dt}_kl_coef"] = c.coef
+            if f"{dt}_kl" in stats:
+                c.update(stats[f"{dt}_kl"])
         stats["iter"] = it
         history.append(stats)
         if on_iteration is not None:

@@ -1,15 +1,21 @@
-# Full-stack co-training PPO (ADR-0034) — the multi-day, all-in run.
+# Full-stack co-training PPO + WISH head (ADR-0034 + addendum) — fresh all-in run.
 #
-# Sharpens play + Schupfen + Tichu/Grand calls together, warm-started from the v5
-# BC nets and KL-anchored to each frozen BC. Goal: beat `master` on the seat-swap
-# Tournament with 95% CI excluding 0 (any positive). Run it, stop it any time
-# (Ctrl-C), and re-run the SAME command to continue from the last atomic bundle:
+# Identical to cotrain_v5.yaml but with the Mahjong-wish ALSO co-trained (option (a):
+# the wish is a 14-way head on the play net's trunk; it rides the play weights). The
+# wish lever is high-leverage and was 100% UNUSED before (RuleAgent always declined):
+# a probe showed even a naive fixed wish heuristic gains ~+10 team-rel pts/round vs
+# decline, and the head can always relearn "decline" (index 0), so it strictly
+# dominates the frozen behavior. See the ADR-0034 addendum.
 #
-#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v5.yaml
+# This is a SEPARATE run from cotrain_v5 (different run_dir) — start it FRESH so the
+# wish head is sharpened from BC alongside play/schupfen/calls from iter 0. Do NOT
+# resume a cotrain_v5 bundle into this config.
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_wish_v5.yaml
 #       --restart   # only to throw away progress and start fresh
 #
 # Strength reads are OUT OF LOOP (OOM safety): run `check_cotrain` on a snapshot.
-# Poll progress via {run_dir}/ppo_log.csv (per-net dials, flushed each iter).
+# Poll progress via {run_dir}/ppo_log.csv (per-net dials incl. wish_*, flushed each iter).
 # `iterations` is a target ceiling — bump it to extend; resume continues toward it.
 
 warm_start:
@@ -18,7 +24,7 @@ warm_start:
   tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\tichu_final.bin
   grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\grand_final.bin
 
-run_dir: C:\workbench\tichu\data\runs\cotrain_v5
+run_dir: C:\workbench\tichu\data\runs\cotrain_wish_v5
 
 model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
 schupfen_model: { skill_dim: 64, hidden: 256 }
@@ -41,48 +47,30 @@ update_device: cuda
 # 1 = the single-process path. Each worker is single-threaded (no BLAS oversubscribe).
 rollout_workers: 10    # 12-core box: 10 rollout workers + room for main proc & GPU update
 
-# Opponent league (ADR-0034 league lever) — OFF by default = pure self-play. Flip
-# `enabled: true` and resume to put a frozen-BC (master-level) opponent + rotating
-# learner snapshots in the training distribution: direct pressure to beat master and
-# a guard against self-play RPS cycling. Parallel-only (needs rollout_workers>1).
-# Snapshot files live under {run_dir}/league and persist in the Resume Bundle.
-league:
-  enabled:        false
-  snapshot_every: 50     # freeze a learner snapshot into the league every N iters
-  max_snapshots:  3      # rotating learner snapshots kept (+ the never-evicted BC base)
+# Wish co-training ON (ADR-0034 addendum, option (a)): the Mahjong-wish is decided by
+# the play net's 14-way `wish` head (0 == decline, 1..13 == ranks 2..14) and sharpened
+# in-loop. The wish head co-adapts with play through the shared trunk.
+cotrain_wish: true
 
-# Wish co-training (ADR-0034 addendum, option (a)): route the Mahjong-wish to the
-# play net's 14-way `wish` head instead of the frozen always-decline RuleAgent. The
-# wish is a high-leverage, currently-100%-unused lever (~+10 pts/round headroom even
-# naively). OFF here to keep this run unchanged; flip to `true` + add kl.wish /
-# entropy.wish (anchor tight, like schupfen) for a fresh run that learns it.
-cotrain_wish: false
-
-# Per-net adaptive KL-anchor to frozen BC. Schupfen anchored TIGHTEST (it is the
-# most sensitive net; cratering it is the demonstrated big downside). Loosen
-# schupfen's target on a later resume once the stack is stable (Q5/ADR-0034).
-#
-# Schupfen leash ANNEAL (cotrain_v5 learning-dynamics diagnosis, 2026-06-07): the
-# diagnosis measured schupfen pinned at BC (KL ~0.0074 at the 0.008 target, entropy
-# dead-flat over 430 iters) — the lever the run exists to move can't move. Raise its
-# target LINEARLY 0.008 -> 0.025 over iters [750, 2750] (a pure function of the global
-# iteration, so resume-safe). Gentle on purpose: the shallow slope (~8.5e-6/iter) lets
-# schupfen drift off BC without the immediate crater of unleashing it (random schupfen
-# -142.9, rule -51.8 vs master). target_final/anneal_* are retunable on any resume.
+# Per-net adaptive KL-anchor to frozen BC. Schupfen AND wish anchored TIGHTEST: both
+# are sharp, high-variance levers with comparatively thin BC data — keep them close to
+# BC and let the policy gradient earn departures. Loosen on a later resume if stable.
 kl:
   play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
-  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
   tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
   grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
 
 # Modest entropy everywhere — the ADR-0029 escalation showed MORE play entropy hurt.
-entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
 
-# Serving snapshots (all four nets) for the offline `check` strength read.
+# Serving snapshots (all four nets; the wish head ships inside the play net) for the
+# offline `check` strength read.
 snapshot_every: 25
 
 # Offline strength read (the separate `check_cotrain` command — NOT run in-loop):
-#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v5.yaml
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_wish_v5.yaml
 # Exports the latest snapshot and tournaments it vs `master`; ship bar = CI 95% > 0.
 eval:
   starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet

@@ -15,12 +15,24 @@ from tichu_training.ppo.update import build_batch, ppo_update
 
 
 class AdaptiveKLController:
-    """Schulman-style adaptive KL coefficient.
+    """Schulman-style adaptive KL coefficient with an optional annealed target.
 
     Holds the current `beta_KL`. After each update, `update(measured_kl)` nudges
-    it toward keeping KL-to-BC near `target`: above the band it multiplies by
-    `factor`, below it divides, otherwise holds. Clamped to `[min_coef,
-    max_coef]`.
+    it toward keeping KL-to-BC near the current `target`: above the band it
+    multiplies by `factor`, below it divides, otherwise holds. Clamped to
+    `[min_coef, max_coef]`.
+
+    **Target annealing (ADR-0034 follow-up).** The cotrain_v5 diagnosis found the
+    Schupfen net pinned at BC because its KL target (0.008) is anchored tightest —
+    it can't drift to a better joint optimum. When `target_final` is set, the
+    effective target is raised **linearly** from `target` to `target_final` across
+    `[anneal_start, anneal_start + anneal_iters]` (held flat outside), loosening
+    the leash gradually so the net can move without the immediate crater of
+    unleashing it. The schedule is a pure function of the **global iteration**
+    (`set_iteration(it)` / `target_at(it)`), so it is **resume-safe**: only `coef`
+    persists in the Resume Bundle; the target is reconstructed from config + the
+    restored iteration counter. With `target_final=None` the behaviour is
+    identical to the fixed-target controller (the play-only `train_ppo` path).
     """
 
     def __init__(
@@ -31,12 +43,32 @@ class AdaptiveKLController:
         factor: float = 2.0,
         min_coef: float = 1e-4,
         max_coef: float = 1e4,
+        target_final: float | None = None,
+        anneal_start: int = 0,
+        anneal_iters: int = 0,
     ) -> None:
         self.coef = float(coef)
-        self.target = float(target)
+        self.target_initial = float(target)
+        self.target = float(target)  # current effective target (annealed in place)
         self.factor = float(factor)
         self.min_coef = float(min_coef)
         self.max_coef = float(max_coef)
+        self.target_final = None if target_final is None else float(target_final)
+        self.anneal_start = int(anneal_start)
+        self.anneal_iters = int(anneal_iters)
+
+    def target_at(self, iteration: int) -> float:
+        """The effective KL target at global `iteration` (linear anneal, clamped)."""
+        if self.target_final is None or self.anneal_iters <= 0:
+            return self.target_initial
+        frac = (iteration - self.anneal_start) / self.anneal_iters
+        frac = min(1.0, max(0.0, frac))
+        return self.target_initial + frac * (self.target_final - self.target_initial)
+
+    def set_iteration(self, iteration: int) -> float:
+        """Advance the annealed target to global `iteration`; returns the new target."""
+        self.target = self.target_at(iteration)
+        return self.target
 
     def update(self, measured_kl: float) -> float:
         if measured_kl > self.target * 1.5:
