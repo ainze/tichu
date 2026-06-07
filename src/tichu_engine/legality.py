@@ -10,6 +10,7 @@ straight-flush bombs beat any four-of-a-kind bomb; straight-flushes compare to
 each other by length then rank.
 """
 
+import functools
 from dataclasses import dataclass
 from typing import Union
 
@@ -95,8 +96,22 @@ Combination = Union[
 ConcreteAction = Union[Combination, Pass, DragonGive, MahjongWish, BombInterrupt, SchupfenPass]
 
 
+@functools.lru_cache(maxsize=4096)
 def _enumerate_all(hand) -> frozenset[Combination]:
-    """Every combination playable from `hand`, across all combination types."""
+    """Every combination playable from `hand`, across all combination types.
+
+    Memoised on `hand` (a hashable `frozenset`). Enumeration is a pure function
+    of the hand, so the cache never needs invalidation. This collapses the
+    dominant redundancy on the hot path: every Play Decision enumerates the same
+    hand twice — once to build the policy/BC legal mask (`legal_actions_for`) and
+    again inside `step`'s `action not in legal_actions(state)` validation — plus
+    re-enumerating an unchanged hand on every Pass. On RuleAgent self-play ~50% of
+    calls are the immediate policy→step repeat and ~69% are cache hits overall
+    (only ~31% of hands are distinct), yielding ~1.8x on the engine-bound rollout.
+    The returned frozenset is immutable and every caller copies it, so sharing the
+    cached value across callers is safe. The cache is per-process (the cotrain
+    rollout fans across spawn workers); maxsize bounds it to the live-game working
+    set with headroom. See docs/notes/2026-06-07-legal-actions-memo.md."""
     return frozenset[Combination](
         set(enumerate_singles(hand))
         | set(enumerate_pairs(hand))
