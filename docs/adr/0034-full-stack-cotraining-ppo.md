@@ -198,6 +198,10 @@ program closes.
 
 ## Addendum (2026-06-07): Wish-declaration & Dragon-give — learn or leave frozen?
 
+> **RESOLVED & IMPLEMENTED:** wire the WISH head, leave Dragon-give frozen. The WISH head
+> is co-training and working (`cotrain_wish_v5`); see *Implementation status* at the end of
+> this addendum. The analysis below is the original decision artifact, kept for the record.
+
 The collector routes Play, Schupfen, and Calls to the nets; **Mahjong-wish-declaration**
 and **Dragon-give** stay on the frozen seat agent (RuleAgent declines every wish; gives the
 Dragon trick to the shorter-handed opponent). The BC `wish` (14-way: None + ranks 2–14) and
@@ -244,4 +248,26 @@ winner-relative left/right side encoding (`dragon_intent_index(winner_seat)`).
   optimal, mostly "predict last-in". Not worth a near-zero-gradient head competing for capacity and
   KL budget. Revisit only if a measured plateau traces to dragon-give specifically.
 
-Not implemented pending sign-off (this addendum is the decision artifact, not a behavior change).
+### Implementation status (updated 2026-06-07) — WISH head IMPLEMENTED and working
+
+The recommendation above was signed off and **shipped**: the WISH head is wired and
+co-training in the loop; **Dragon-give remains FROZEN** as recommended.
+
+- **What was built (option (a)):** the Mahjong-wish is a **14-way head on the play net's
+  trunk** (`0` = decline, `1..13` = ranks 2–14), sharpened in-loop alongside play/schupfen/calls
+  and co-adapting with play through the shared trunk. Enabled via `cotrain_wish: true`.
+  Code landed across PR #45 (foundation) and PR #48 (reconciled league vs the wish head);
+  PR #49 added the `wi kl …` console line. All merged to `main`.
+- **KL anchor:** tight anchor-to-BC as recommended — `kl.wish = {target: 0.008, factor: 2.0}`,
+  matching Schupfen (sharp lever, thin BC data; policy gradient earns departures).
+- **Live run:** `configs/cotrain_wish_v5.yaml` → `data/runs/cotrain_wish_v5` (fresh, not a
+  `cotrain_v5` resume). Healthy: `wish_kl_coef` settled flat at 4.0 (1→2→4 early, then never
+  crept toward the clamp — the head is anchored, **not pinned-to-decline**); `wish_entropy`
+  steady ~1.56 (14-way max ≈ 2.64), so the head holds a real spread, not a collapse to decline.
+- **Strength read (not yet 20k-confirmed):** vs `master` on the seat-swap Tournament,
+  iter 200 `+5.60` CI [+0.87, +10.36] → iter 800 `+7.57` CI [+2.92, +12.32] (n=8000 each).
+  This **exceeds the shipped no-wish `cotrain_v5` (+6.29)** — consistent with the wish lever
+  adding value. Confirm a positive snapshot at `--n-deals 20000` + seeds before treating the
+  delta as final.
+- **Dragon-give:** left frozen on RuleAgent (shorter-handed opponent) per the recommendation;
+  revisit only if a measured plateau traces to it specifically.
