@@ -37,6 +37,8 @@ class MatrixResult:
     _ci: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
     _n: dict[tuple[str, str], int] = field(default_factory=dict)
     _call_bonus_mean: dict[tuple[str, str], float] = field(default_factory=dict)
+    _win_rate: dict[tuple[str, str], float] = field(default_factory=dict)
+    _tie_rate: dict[tuple[str, str], float] = field(default_factory=dict)
 
     def mean(self, a: str, b: str) -> float:
         return self._mean[(a, b)]
@@ -46,6 +48,19 @@ class MatrixResult:
 
     def n(self, a: str, b: str) -> int:
         return self._n[(a, b)]
+
+    def win_rate(self, a: str, b: str) -> float:
+        """Fraction of paired observations (Rounds, seat-swap) where A out-scored
+        B — i.e. A-minus-B delta > 0. This is a PER-ROUND win-rate over the Pool,
+        NOT a games-to-1000 win-rate. `win_rate(a,b) + tie_rate(a,b) +
+        win_rate(b,a) == 1`."""
+        return self._win_rate[(a, b)]
+
+    def tie_rate(self, a: str, b: str) -> float:
+        """Fraction of paired observations that tied exactly (delta == 0, i.e. a
+        50-50 card-point split with no net Call-bonus). Symmetric: equal for
+        (a,b) and (b,a)."""
+        return self._tie_rate[(a, b)]
 
     def call_bonus_mean(self, a: str, b: str) -> float:
         """Mean A-minus-B Call-bonus delta per Round (Full-strength only; 0.0
@@ -261,6 +276,12 @@ def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -
         deltas, cb_deltas = pair_fn(a, b)
         mean_ab, lo, hi = _bootstrap_ci(deltas, bootstrap_iters, rng)
         n_obs = len(deltas)
+        # Per-Round win-rate from the SAME deltas the mean uses (no extra RNG draw,
+        # so serial/parallel and the existing mean-CIs are untouched). A wins when
+        # its delta > 0; ties are an exact 50-50 split; B's win-rate is the rest.
+        a_win = float((deltas > 0).mean()) if n_obs else 0.0
+        tie = float((deltas == 0).mean()) if n_obs else 0.0
+        b_win = float((deltas < 0).mean()) if n_obs else 0.0
         cb_mean = float(cb_deltas.mean()) if cb_deltas is not None and len(cb_deltas) else 0.0
         log.info(
             "  done: %s vs %s mean delta=%+.1f (call-bonus %+.1f, n=%d)",
@@ -272,17 +293,23 @@ def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -
         result._ci[(b, a)] = (-hi, -lo)
         result._n[(a, b)] = n_obs
         result._n[(b, a)] = n_obs
+        result._win_rate[(a, b)] = a_win
+        result._win_rate[(b, a)] = b_win
+        result._tie_rate[(a, b)] = tie
+        result._tie_rate[(b, a)] = tie
         if cb_deltas is not None:
             result._call_bonus_mean[(a, b)] = cb_mean
             result._call_bonus_mean[(b, a)] = -cb_mean
         result.rows.append({
             "agent_a": a, "agent_b": b,
             "mean": mean_ab, "ci_lower": lo, "ci_upper": hi, "n": n_obs,
+            "win_rate": a_win, "tie_rate": tie,
             "call_bonus_mean": cb_mean,
         })
         result.rows.append({
             "agent_a": b, "agent_b": a,
             "mean": -mean_ab, "ci_lower": -hi, "ci_upper": -lo, "n": n_obs,
+            "win_rate": b_win, "tie_rate": tie,
             "call_bonus_mean": -cb_mean,
         })
 
@@ -291,9 +318,13 @@ def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -
         result._ci[(name, name)] = (0.0, 0.0)
         result._n[(name, name)] = 0
         result._call_bonus_mean[(name, name)] = 0.0
+        # An agent vs itself ties every Round (identical deltas of 0).
+        result._win_rate[(name, name)] = 0.0
+        result._tie_rate[(name, name)] = 1.0
         result.rows.append({
             "agent_a": name, "agent_b": name,
             "mean": 0.0, "ci_lower": 0.0, "ci_upper": 0.0, "n": 0,
+            "win_rate": 0.0, "tie_rate": 1.0,
             "call_bonus_mean": 0.0,
         })
     return result

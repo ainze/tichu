@@ -58,5 +58,32 @@ def test_rows_have_expected_columns():
     deals = generate_starting_position_pool(seed=0, n=4)
     result = run_tournament(_make_agents(), deals, bootstrap_iters=20, seed=0)
     assert result.rows, "expected at least one row"
-    expected = {"agent_a", "agent_b", "mean", "ci_lower", "ci_upper", "n"}
+    expected = {"agent_a", "agent_b", "mean", "ci_lower", "ci_upper", "n",
+                "win_rate", "tie_rate"}
     assert expected <= set(result.rows[0].keys())
+
+
+def test_rule_out_wins_random_per_round():
+    deals = generate_starting_position_pool(seed=0, n=100)
+    result = run_tournament(_make_agents(), deals, bootstrap_iters=200, seed=0)
+    # The stronger agent should win the majority of Rounds, not just on average margin.
+    assert result.win_rate("rule", "random") > result.win_rate("random", "rule")
+    assert result.win_rate("rule", "random") > 0.5
+
+
+def test_win_tie_loss_rates_sum_to_one():
+    deals = generate_starting_position_pool(seed=0, n=20)
+    result = run_tournament(_make_agents(), deals, bootstrap_iters=50, seed=0)
+    total = (result.win_rate("rule", "random")
+             + result.tie_rate("rule", "random")
+             + result.win_rate("random", "rule"))
+    assert abs(total - 1.0) < 1e-9
+
+
+def test_tie_rate_is_symmetric_and_diagonal_is_self_tie():
+    deals = generate_starting_position_pool(seed=0, n=8)
+    result = run_tournament(_make_agents(), deals, bootstrap_iters=50, seed=0)
+    assert result.tie_rate("rule", "random") == result.tie_rate("random", "rule")
+    # An agent vs itself ties every Round.
+    assert result.tie_rate("rule", "rule") == 1.0
+    assert result.win_rate("rule", "rule") == 0.0
