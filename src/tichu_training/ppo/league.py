@@ -17,11 +17,18 @@ class League:
     up to `max_snapshots` frozen learner snapshots (oldest dropped — the league
     stays small). `sample` draws one opponent uniformly for an iteration."""
 
-    def __init__(self, base, *, max_snapshots: int = 5, rng: random.Random | None = None) -> None:
+    def __init__(
+        self, base, *, max_snapshots: int = 5, rng: random.Random | None = None,
+        perfect_info: bool = False,
+    ) -> None:
         self._base = list(base)
         self._snapshots: list = []
         self._max_snapshots = int(max_snapshots)
         self._rng = rng or random.Random(0)
+        # Snapshot opponents must match the learner's critic arity so their inline
+        # value forward does not shape-clash on a 392-dim Perfect-Info Critic
+        # (ADR-0033); their values are discarded, but the forward still runs.
+        self._perfect_info = bool(perfect_info)
 
     def snapshot(self, model, critic, *, skill_decile: int = 9) -> None:
         """Freeze a deep copy of the current learner into the league."""
@@ -32,7 +39,10 @@ class League:
         for param in frozen_critic.parameters():
             param.requires_grad_(False)
         self._snapshots.append(
-            BatchedPolicy(frozen_model, frozen_critic, skill_decile=skill_decile)
+            BatchedPolicy(
+                frozen_model, frozen_critic, skill_decile=skill_decile,
+                perfect_info=self._perfect_info,
+            )
         )
         if len(self._snapshots) > self._max_snapshots:
             self._snapshots.pop(0)  # drop the oldest snapshot — keep the league small

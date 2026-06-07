@@ -26,6 +26,7 @@ from tichu_training.awr.value_baseline import ValueBaseline
 from tichu_training.bc.heads import BCModel
 from tichu_training.bc.training import load_checkpoint, save_checkpoint
 from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+from tichu_training.perfect_info import PERFECT_INFO_DIM
 from tichu_training.ppo.league import League
 from tichu_training.ppo.policy import BatchedPolicy
 from tichu_training.ppo.rollout import collect_rollout
@@ -57,22 +58,26 @@ def _critic_warmup(
     bc_model, critic, sample_positions, *,
     iters: int, epochs: int, critic_lr: float,
     skill_decile: int, learner_team: int, gamma: float, lam: float,
-    progress: bool,
+    progress: bool, perfect_info: bool = False,
 ) -> None:
     """Fit the critic under the FROZEN BC policy before the policy moves, so the
     first PPO advantages aren't computed against an ignorant value baseline
     (ADR-0029 §value). Pure BC self-play; only the critic learns. Also a clean
     test of the value floor: if `value_loss` keeps falling here the critic was
-    under-fit; if it plateaus immediately, ~that floor is irreducible variance."""
+    under-fit; if it plateaus immediately, ~that floor is irreducible variance.
+
+    With `perfect_info`, the critic is fit on the 392-dim Perfect-Info features
+    (ADR-0033); `batch.critic_features` carries them (and falls back to the
+    observable features in the symmetric case, so this call works for both)."""
     warm_opt = torch.optim.Adam(critic.parameters(), lr=critic_lr)
-    actor = BatchedPolicy(bc_model, critic, skill_decile=skill_decile)
+    actor = BatchedPolicy(bc_model, critic, skill_decile=skill_decile, perfect_info=perfect_info)
     for it in range(iters):
         positions = sample_positions(it)
         traj = collect_rollout(positions, actor, opponent_policy=actor, learner_team=learner_team)
         batch = build_batch(traj, skill_decile=skill_decile, gamma=gamma, lam=lam)
         last = 0.0
         for _ in range(epochs):
-            loss = value_loss(critic(batch.features), batch.returns)
+            loss = value_loss(critic(batch.critic_features), batch.returns)
             warm_opt.zero_grad()
             loss.backward()
             warm_opt.step()
@@ -91,13 +96,18 @@ def run_ppo_training(config, *, on_iteration=None, progress: bool = True) -> dic
     ppo = config["ppo"]
     skill_decile = int(ppo.get("skill_decile", 9))
     learner_team = int(ppo.get("learner_team", 0))
+    # Asymmetric Perfect-Info Critic (ADR-0033): the critic sees all four hands
+    # (392-dim) at training time; the policy stays observable (224). Default off
+    # reproduces the ADR-0029 symmetric run byte-for-byte.
+    perfect_info = bool(config.get("perfect_info", False))
+    critic_dim = PERFECT_INFO_DIM if perfect_info else FEATURIZER_OUTPUT_DIM
 
     # Warm-start the learner from the BC Checkpoint; keep a frozen copy as the
     # KL-anchor reference and the league's initial (frozen-BC) opponent.
     model = _build_model(config)
     load_checkpoint(config["warm_start"], model)
     bc_model = _freeze(copy.deepcopy(model))
-    critic = ValueBaseline(FEATURIZER_OUTPUT_DIM, hidden=int(config.get("critic", {}).get("hidden", 512)))
+    critic = ValueBaseline(critic_dim, hidden=int(config.get("critic", {}).get("hidden", 512)))
 
     optimizer = torch.optim.Adam([
         {"params": model.parameters(), "lr": float(ppo.get("policy_lr", 1e-4))},
@@ -113,8 +123,14 @@ def run_ppo_training(config, *, on_iteration=None, progress: bool = True) -> dic
 
     league_cfg = config.get("league", {})
     snapshot_every = int(league_cfg.get("snapshot_every", 5))
-    bc_opponent = BatchedPolicy(bc_model, _freeze(copy.deepcopy(critic)), skill_decile=skill_decile)
-    league = League([bc_opponent], max_snapshots=int(league_cfg.get("max_snapshots", 5)))
+    bc_opponent = BatchedPolicy(
+        bc_model, _freeze(copy.deepcopy(critic)),
+        skill_decile=skill_decile, perfect_info=perfect_info,
+    )
+    league = League(
+        [bc_opponent], max_snapshots=int(league_cfg.get("max_snapshots", 5)),
+        perfect_info=perfect_info,
+    )
 
     pool_seed = int(ppo.get("pool_seed", 0))
     positions_per_iter = int(ppo["positions_per_iter"])
@@ -195,7 +211,7 @@ def run_ppo_training(config, *, on_iteration=None, progress: bool = True) -> dic
             critic_lr=float(ppo.get("critic_lr", 1e-3)),
             skill_decile=skill_decile, learner_team=learner_team,
             gamma=float(ppo.get("gamma", 1.0)), lam=float(ppo.get("lam", 0.95)),
-            progress=progress,
+            progress=progress, perfect_info=perfect_info,
         )
 
     history = train_ppo(
@@ -213,6 +229,7 @@ def run_ppo_training(config, *, on_iteration=None, progress: bool = True) -> dic
         learner_team=learner_team,
         opponent_policy_provider=league.sample,
         on_iteration=_on_iteration,
+        perfect_info=perfect_info,
     )
 
     if log_state["fh"] is not None:

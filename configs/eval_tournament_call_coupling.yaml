@@ -1,0 +1,66 @@
+# Call-coupling EV-probe (ADR-0033 follow-up): is master's Tichu-call CALIBRATION
+# leaving EV on the table given master's play? All agents are the SAME master play
+# policy (decile 9); they differ ONLY in `tichu_threshold` (call iff P(call) >=
+# threshold; lower => call MORE). So master-vs-variant isolates the EV gradient
+# w.r.t. Tichu call rate, with play held identical.
+#
+#   * a lower threshold beats master  -> master UNDER-calls; the call net leaves EV
+#     on the table given its play -> play<->call coupling is a real lever (co-train).
+#   * flat / worse                    -> master's call calibration is ~optimal for
+#     its play -> calls are not the lever.
+#
+# grand_threshold held at 0.5 throughout to isolate the (more common) Tichu call.
+# NOTE: the Claim Solver is NOT usable here — calls are decided at round start with
+# full 14-card hands, where no Guaranteed Out is detectable (an endgame phenomenon).
+#
+# Run:
+#   py -3.14 -m tichu_training.cli.eval_matrix --config configs/eval_tournament_call_coupling.yaml -v
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 2000
+bootstrap_iters: 1000
+seed: 0
+workers: 10
+
+agents:
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: call_more_035
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      tichu_threshold: 0.35
+
+  - name: call_max_020
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      tichu_threshold: 0.20
+
+  - name: call_less_070
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      tichu_threshold: 0.70
+
+output: C:\workbench\tichu\data\runs\call_coupling\tournament.parquet

@@ -70,11 +70,17 @@ def play_full_round(
     *,
     collect_telemetry: bool = False,
     observer=None,
+    state_observer=None,
 ) -> FullRoundResult:
     """`observer`, if given, is called `observer(seat, private_state, action)` at
     every Play Decision (pending_decision is None) right after the agent chooses,
     before the engine steps — the hook decision-tape tooling uses to record the
-    agent's ranked alternatives. Pure side-channel; does not affect play."""
+    agent's ranked alternatives. Pure side-channel; does not affect play.
+
+    `state_observer`, if given, is called `state_observer(seat, game_state, action)`
+    at the same point with the full **GameState** (all four hands) — the
+    perfect-information hook the Perfect-Info Critic collector needs (ADR-0033).
+    `game_state.private_view(seat)` reproduces what `observer` sees."""
     if len(agents) != 4:
         raise ValueError(f"expected 4 agents (one per seat), got {len(agents)}")
     initial_scores = start_state.public.scores
@@ -138,6 +144,8 @@ def play_full_round(
                     caller_pass_bomb_events[current] += 1
         if observer is not None and state.public.pending_decision is None:
             observer(current, private, action)
+        if state_observer is not None and state.public.pending_decision is None:
+            state_observer(current, state, action)
         # Tichu Call: asked once per seat, at its first non-Pass Play state
         # (ADR-0018). Skipped for Grand-Tichu callers (grand supersedes tichu).
         if (

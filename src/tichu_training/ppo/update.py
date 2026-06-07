@@ -19,13 +19,15 @@ class PPOBatch(NamedTuple):
     `advantages` / `returns` come from `compute_gae`.
     """
 
-    features: torch.Tensor    # (N, F)
+    features: torch.Tensor    # (N, F) observable — the policy re-forward
     skill: torch.Tensor       # (N,) long
     legal_masks: torch.Tensor  # (N, action_dim) bool
     actions: torch.Tensor     # (N,) long
     old_logp: torch.Tensor    # (N,)
     advantages: torch.Tensor  # (N,)
     returns: torch.Tensor     # (N,)
+    critic_features: torch.Tensor | None = None  # (N, F') perfect-info for the
+    #   asymmetric critic; falls back to `features` per row when symmetric (ADR-0033)
 
 
 def build_batch(
@@ -43,7 +45,7 @@ def build_batch(
     outcome never leaks into another's advantages. `skill_decile` fills the
     (constant) skill column — self-play conditions on decile-9 (ADR-0029).
     """
-    feats, masks, actions, old_logp = [], [], [], []
+    feats, crit_feats, masks, actions, old_logp = [], [], [], [], []
     advantages, returns = [], []
     for traj in trajectories:
         horizon = len(traj.steps)
@@ -57,6 +59,10 @@ def build_batch(
         returns.append(ret)
         for s in traj.steps:
             feats.append(torch.as_tensor(s.features, dtype=torch.float32))
+            # Asymmetric critic input; per-row fallback to observable when None,
+            # so the update can uniformly value `batch.critic_features` (ADR-0033).
+            cf = s.critic_features if s.critic_features is not None else s.features
+            crit_feats.append(torch.as_tensor(cf, dtype=torch.float32))
             masks.append(torch.as_tensor(s.legal_mask, dtype=torch.bool))
             actions.append(s.intent_index)
             old_logp.append(s.logprob)
@@ -70,6 +76,7 @@ def build_batch(
         old_logp=torch.tensor(old_logp, dtype=torch.float32),
         advantages=torch.cat(advantages),
         returns=torch.cat(returns),
+        critic_features=torch.stack(crit_feats),
     )
 
 
@@ -184,11 +191,18 @@ def ppo_update(
     if normalize_advantages:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+    # The critic values the perfect-info features when present; else the same
+    # observable features as the policy (symmetric, ADR-0029). The policy always
+    # re-forwards on the observable `features` (ADR-0033).
+    critic_features = (
+        batch.critic_features if batch.critic_features is not None else batch.features
+    )
+
     stats: dict[str, float] = {}
     for _ in range(epochs):
         play_logits = model(batch.features, batch.skill)["play"]
         new_logp = _masked_logp_at(play_logits, batch.legal_masks, batch.actions)
-        values = critic(batch.features)
+        values = critic(critic_features)
 
         policy = clipped_policy_loss(new_logp, batch.old_logp, advantages, clip_eps=clip_eps)
         value = value_loss(values, batch.returns)

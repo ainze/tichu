@@ -65,6 +65,7 @@ def train_ppo(
     learner_team: int = 0,
     opponent_policy_provider: Callable[[int], object] | None = None,
     on_iteration: Callable[[int, dict], None] | None = None,
+    perfect_info: bool = False,
 ) -> list[dict[str, float]]:
     """Run `iterations` of PPO Refine self-play.
 
@@ -78,7 +79,9 @@ def train_ppo(
     """
     history: list[dict[str, float]] = []
     for it in range(iterations):
-        policy = BatchedPolicy(model, critic, skill_decile=skill_decile)
+        policy = BatchedPolicy(
+            model, critic, skill_decile=skill_decile, perfect_info=perfect_info
+        )
         opponent = (
             opponent_policy_provider(it) if opponent_policy_provider is not None
             else policy

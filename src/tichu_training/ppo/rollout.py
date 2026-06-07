@@ -40,21 +40,25 @@ class PlayChoice(NamedTuple):
     intent_index: int | None = None
     logprob: float | None = None
     value: float | None = None
-    features: object | None = None    # featurized state (for the PPO re-forward)
+    features: object | None = None    # observable featurized state (policy re-forward)
     legal_mask: object | None = None  # legal-Intent mask at this decision
+    critic_features: object | None = None  # perfect-info features (asymmetric critic;
+    #                                        None => symmetric, value uses `features`)
 
 
 class RolloutPolicy(Protocol):
     """The play-policy injected into the driver.
 
     `act_play_batch` receives all Play Decisions live across the concurrent
-    games at one tick — a list of `(seat, private_state)` — and returns one
-    `PlayChoice` per decision, in the same order. Batching the forward over many
-    games at once is the throughput design of ADR-0029.
+    games at one tick — a list of `(seat, private_state, game_state)` — and
+    returns one `PlayChoice` per decision, in the same order. The `game_state`
+    carries all four hands for an asymmetric Perfect-Info Critic (ADR-0033);
+    symmetric policies ignore it. Batching the forward over many games at once
+    is the throughput design of ADR-0029.
     """
 
     def act_play_batch(
-        self, decisions: list[tuple[int, object]]
+        self, decisions: list[tuple[int, object, object]]
     ) -> list[PlayChoice]: ...
 
 
@@ -64,6 +68,7 @@ class TrajectoryStep(NamedTuple):
     value: float | None
     features: object | None = None
     legal_mask: object | None = None
+    critic_features: object | None = None
 
 
 @dataclass
@@ -80,8 +85,8 @@ class Trajectory:
 class _PlayGroup:
     """One serving model's batched Play Decisions for a single tick."""
 
-    batch: list[tuple[int, object]] = field(default_factory=list)  # (seat, private_state)
-    meta: list = field(default_factory=list)                       # (run, seat) parallel to batch
+    batch: list[tuple[int, object, object]] = field(default_factory=list)  # (seat, private, game_state)
+    meta: list = field(default_factory=list)                               # (run, seat) parallel to batch
 
 
 @dataclass
@@ -174,7 +179,10 @@ def _drive(
                 model = policy if current % 2 == learner_team else opponent_policy
                 group = groups[model]
                 group.meta.append((run, current))
-                group.batch.append((current, private))
+                # (seat, private_state, game_state): the GameState carries all four
+                # hands for an asymmetric Perfect-Info Critic (ADR-0033); symmetric
+                # policies ignore it.
+                group.batch.append((current, private, run.state))
             else:  # Schupfen / Wish / Dragon — frozen per-seat agent, inline
                 _advance(run, run.seat_agents[current].act(private))
         for model, group in groups.items():
@@ -186,7 +194,7 @@ def _drive(
                     run.trajs[seat].steps.append(
                         TrajectoryStep(
                             choice.intent_index, choice.logprob, choice.value,
-                            choice.features, choice.legal_mask,
+                            choice.features, choice.legal_mask, choice.critic_features,
                         )
                     )
                 _advance(run, choice.concrete_action)
