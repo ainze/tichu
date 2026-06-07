@@ -43,3 +43,29 @@ def test_parallel_rollout_returns_two_trajectories_per_game(tmp_path):
     # The full stack was driven in the workers (schupfen + a call recorded somewhere).
     types = {s.decision_type for t in trajs for s in t.steps}
     assert {"play", "schupfen"} <= types
+
+
+def test_parallel_rollout_uses_a_distinct_league_opponent(tmp_path):
+    # League path: opponent seats play a SEPARATE frozen weight file; learner seats
+    # still play the live weights and are the only ones recorded.
+    torch.manual_seed(0)
+    learner_models = _build_models(_ARCH)
+    opp_models = _build_models(_ARCH)  # different init -> a genuinely distinct opponent
+    critic = ValueBaseline(PERFECT_INFO_DIM, hidden=16)
+    learner_w = tmp_path / "learner.pt"
+    opp_w = tmp_path / "opp.pt"
+    save_rollout_weights(str(learner_w), learner_models, critic)
+    save_rollout_weights(str(opp_w), opp_models, critic)
+
+    positions = generate_full_position_pool(seed=0, n=4)
+    pr = ParallelRollout(_ARCH, critic_hidden=16, skill_decile=9, perfect_info=True, workers=2)
+    try:
+        trajs = pr.collect(positions, str(learner_w), learner_team=0, base_seed=0,
+                           opp_weights_path=str(opp_w))
+    finally:
+        pr.close()
+
+    # Same recording invariant holds with a league opponent in play.
+    assert len(trajs) == 8
+    assert {t.seat for t in trajs} == {0, 2}
+    assert all(len(t.steps) > 0 and t.reward is not None for t in trajs)

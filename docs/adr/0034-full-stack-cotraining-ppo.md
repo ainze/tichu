@@ -149,12 +149,20 @@ Built additively, every slice green before the next. **67 touched-area tests gre
   Separate from training (OOM safety). Configs carry an `eval:` block (master `.pt` paths + pool).
   **Validated end-to-end on the real master** (export → MLAgent load → tournament → CI verdict).
 
-**Still open (not blocking the run):** the loop runs **pure self-play** (opponent = current
-policy) — the league/snapshot-opponent path is wired as an extension point
-(`train_cotrain(opponent_policy_provider=...)`) but not populated. Serving snapshots currently
-embed the shared optimizer (disk-heavy over days) — trim to weights-only. Move-Prediction-Eval
-reporting in `check_cotrain` is stubbed for a held-out dir but not yet wired (the CI>0 tournament
-is the decider per Q9).
+**Opponent league (built, opt-in, default off — 2026-06-07).** Pure self-play optimizes "beat my
+current self," which can plateau or RPS-cycle; a league pins a frozen-BC (master-level) opponent +
+rotating learner snapshots in the training distribution (direct pressure to beat master; ADR-0029's
+non-transitivity guard). Built file-based (`ppo/cotrain_league.py` `CoTrainLeague`) because
+co-training opponents run in spawned rollout workers: a never-evicted frozen-BC `base` weight file
+plus up to `max_snapshots` learner snapshot files (oldest dropped), sampled one-per-iteration; the
+worker loads the sampled file into a second net set (`ParallelRollout` opponent path). Round-trips
+through the Resume Bundle (`league` field). Config `league: {enabled, snapshot_every, max_snapshots}`
+— **parallel-only** (needs `rollout_workers > 1`); off = pure self-play. The plan: run pure self-play
+first, and if `check_cotrain` reads flat, flip `enabled: true` and resume into the league.
+
+**Still open (not blocking the run):** serving snapshots embed the shared optimizer (disk-heavy over
+days) — trim to weights-only. Critic warm-up isn't parallelized (one-time). Move-Prediction-Eval
+reporting in `check_cotrain` is stubbed but not wired (the CI>0 tournament is the decider per Q9).
 
 ### Performance — profiled, then GPU-update + process-parallel rollout (2026-06-07)
 
