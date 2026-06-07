@@ -685,6 +685,62 @@ def test_step_reports_done_on_slam():
     assert next_state.public.scores == (200, 0)  # slam bonus; finalised exactly once
 
 
+def test_slam_undoes_nonzero_midround_card_points_and_pays_only_200():
+    # Doppelsieg must NOT double-count card points: any card points credited to
+    # scores mid-round are undone, and the team gets exactly +200. Existing slam
+    # tests only exercise the trivial zero-points case, so the undo arithmetic
+    # (scores - round_team_points) was never actually tested against a non-zero
+    # accumulation. Here team 0 collected 40 and team 1 collected 30 mid-round
+    # (mirrored in round_points_by_player, as the engine always keeps them); the
+    # partner pair (0, 2) then goes out 1-2. Net result: exactly (200, 0).
+    state = GameState(
+        hands=(
+            frozenset(),
+            frozenset({_c(Suit.STAR, 9)}),
+            frozenset({_c(Suit.STAR, 9)}),  # seat 2's 0-point last card
+            frozenset({_c(Suit.SWORD, 4)}),
+        ),
+        public=PublicState(
+            current_player=2,
+            hand_sizes=(0, 1, 1, 1),
+            scores=(40, 30),                         # mid-round card points credited
+            trick=Trick.empty(),
+            out_order=(0,),
+            round_points_by_player=(40, 0, 0, 30),   # team0=40, team1=30 (mirror)
+        ),
+    )
+    next_state, _, done, _ = step(state, Single(_c(Suit.STAR, 9)))
+    assert done is True
+    assert next_state.public.scores == (200, 0)
+
+
+def test_slam_preserves_prior_baseline_and_stacks_tichu_bust():
+    # A slam on top of a prior-round baseline (300, 150), with a busted Tichu by
+    # the losing team. Mid-round team 0 collected 40 (undone by the slam). The
+    # +200 slam and the -100 Tichu bust (seat 1 is not first-out) must both land
+    # on top of the preserved baseline: team0 = 300 + 200 = 500, team1 = 150 - 100 = 50.
+    state = GameState(
+        hands=(
+            frozenset(),
+            frozenset({_c(Suit.STAR, 9)}),
+            frozenset({_c(Suit.STAR, 9)}),
+            frozenset({_c(Suit.SWORD, 4)}),
+        ),
+        public=PublicState(
+            current_player=2,
+            hand_sizes=(0, 1, 1, 1),
+            scores=(340, 150),                       # 300 baseline + 40 mid-round (team0)
+            trick=Trick.empty(),
+            out_order=(0,),
+            round_points_by_player=(40, 0, 0, 0),
+            tichu_callers=frozenset({1}),            # seat 1 (team 1) busts: not first out
+        ),
+    )
+    next_state, _, done, _ = step(state, Single(_c(Suit.STAR, 9)))
+    assert done is True
+    assert next_state.public.scores == (500, 50)
+
+
 def test_bomb_interrupt_legal_on_empty_trick():
     # When the previous trick has just resolved and the winner (current_player)
     # hasn't led yet, a non-current player holding a bomb can preempt-bomb to
