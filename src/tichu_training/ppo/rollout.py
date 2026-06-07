@@ -19,8 +19,8 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple, Protocol, Sequence
 
 from tichu_engine.engine import step
-from tichu_engine.legality import ConcreteAction
-from tichu_engine.state import GameState, PublicState, Trick
+from tichu_engine.legality import ConcreteAction, Pass
+from tichu_engine.state import GameState, PublicState, SchupfenPending, Trick
 from tichu_ml.agent import Agent
 from tichu_ml.rule_agent import RuleAgent
 
@@ -46,8 +46,43 @@ class PlayChoice(NamedTuple):
     #                                        None => symmetric, value uses `features`)
 
 
+class SchupfenChoice(NamedTuple):
+    """A schupfen-policy's decision at one Schupfen Decision (ADR-0034).
+
+    `concrete_action` is the `SchupfenPass` the engine steps. The rest is the PPO
+    bookkeeping recorded for a learner seat: `card_indices` is the sampled
+    `(to_next, to_partner, to_previous)` card-slot triple (the without-replacement
+    action encoding), `legal_masks` the per-head hand masks. A non-learning policy
+    leaves the bookkeeping `None`.
+    """
+
+    concrete_action: ConcreteAction
+    card_indices: tuple[int, int, int] | None = None
+    logprob: float | None = None
+    value: float | None = None
+    features: object | None = None
+    legal_masks: object | None = None
+    critic_features: object | None = None
+
+
+class CallChoice(NamedTuple):
+    """A call-policy's decision at one Tichu / Grand-Tichu Call Decision (ADR-0034).
+
+    Calls are injected into the state (the engine does not step them — it reads
+    `tichu_callers` / `grand_tichu_callers` at `_finalise_round`), so there is no
+    `concrete_action`: `called` is the binary action. The rest is the PPO
+    bookkeeping recorded for a learner seat (`called` doubles as the action index:
+    1 == call, 0 == skip)."""
+
+    called: bool
+    logprob: float | None = None
+    value: float | None = None
+    features: object | None = None
+    critic_features: object | None = None
+
+
 class RolloutPolicy(Protocol):
-    """The play-policy injected into the driver.
+    """The policy bundle injected into the driver.
 
     `act_play_batch` receives all Play Decisions live across the concurrent
     games at one tick — a list of `(seat, private_state, game_state)` — and
@@ -55,6 +90,11 @@ class RolloutPolicy(Protocol):
     carries all four hands for an asymmetric Perfect-Info Critic (ADR-0033);
     symmetric policies ignore it. Batching the forward over many games at once
     is the throughput design of ADR-0029.
+
+    A full-stack co-training policy (ADR-0034) MAY additionally implement
+    `act_schupfen_batch` (same `(seat, private, game_state)` batch shape,
+    returning `SchupfenChoice`s) so its Schupfen Network is driven + recorded;
+    a play-only policy omits it and Schupfen falls back to the frozen seat agent.
     """
 
     def act_play_batch(
@@ -63,12 +103,17 @@ class RolloutPolicy(Protocol):
 
 
 class TrajectoryStep(NamedTuple):
-    intent_index: int | None
+    # `intent_index` is an int for Play / Call decisions, or the
+    # `(to_next, to_partner, to_previous)` card-slot triple for Schupfen.
+    # `decision_type` routes the step to its net + frozen-BC anchor in the update
+    # (ADR-0034); it defaults to "play" so existing play records are unchanged.
+    intent_index: object | None
     logprob: float | None
     value: float | None
     features: object | None = None
     legal_mask: object | None = None
     critic_features: object | None = None
+    decision_type: str = "play"
 
 
 @dataclass
@@ -99,6 +144,7 @@ class _GameRun:
     initial_scores: tuple[int, int]
     trajs: dict[int, Trajectory]
     done: bool = False
+    asked_tichu: set[int] = field(default_factory=set)  # seats already solicited for Tichu
 
 
 def collect_rollout(
@@ -130,11 +176,11 @@ def collect_rollout(
     learner_seats = [s for s in range(_NUM_PLAYERS) if s % 2 == learner_team]
 
     runs: list[_GameRun] = []
+    grand_prefixes: list = []
     for pos in positions:
-        grand_callers = _ask_grand(seat_agents, pos.grand_prefixes)
         runs.append(
             _GameRun(
-                state=_inject_callers(pos.state, grand=grand_callers),
+                state=pos.state,
                 seat_agents=seat_agents,
                 learner_team=learner_team,
                 initial_scores=pos.state.public.scores,
@@ -144,6 +190,12 @@ def collect_rollout(
                 },
             )
         )
+        grand_prefixes.append(pos.grand_prefixes)
+
+    # Grand-Tichu is decided at deal time on the synthetic (8,8,8,8) prefix state.
+    # A call-capable model decides + records it through `act_call_batch`; a play-only
+    # model falls back to the frozen seat agent's `should_call` (ADR-0029 behavior).
+    _solicit_grand(runs, grand_prefixes, policy, opponent_policy, learner_team)
 
     _drive(runs, policy, opponent_policy, learner_team)
 
@@ -170,20 +222,31 @@ def _drive(
         groups: dict[RolloutPolicy, _PlayGroup] = {
             policy: _PlayGroup(), opponent_policy: _PlayGroup(),
         }
+        # Schupfen Decisions are batched per serving model too (ADR-0034). A model
+        # without `act_schupfen_batch` (a play-only policy) leaves Schupfen on the
+        # frozen inline seat agent — the ADR-0029 behavior.
+        schupfen_groups: dict[RolloutPolicy, _PlayGroup] = {
+            policy: _PlayGroup(), opponent_policy: _PlayGroup(),
+        }
         for run in runs:
             if run.done:
                 continue
             current = run.state.public.current_player
             private = run.state.private_view(current)
-            if run.state.public.pending_decision is None:  # a Play Decision
-                model = policy if current % 2 == learner_team else opponent_policy
+            model = policy if current % 2 == learner_team else opponent_policy
+            pending = run.state.public.pending_decision
+            if pending is None:  # a Play Decision
                 group = groups[model]
                 group.meta.append((run, current))
                 # (seat, private_state, game_state): the GameState carries all four
                 # hands for an asymmetric Perfect-Info Critic (ADR-0033); symmetric
                 # policies ignore it.
                 group.batch.append((current, private, run.state))
-            else:  # Schupfen / Wish / Dragon — frozen per-seat agent, inline
+            elif isinstance(pending, SchupfenPending) and _supports_schupfen(model):
+                group = schupfen_groups[model]
+                group.meta.append((run, current))
+                group.batch.append((current, private, run.state))
+            else:  # Wish / Dragon, or Schupfen for a play-only model — inline
                 _advance(run, run.seat_agents[current].act(private))
         for model, group in groups.items():
             if not group.batch:
@@ -195,6 +258,25 @@ def _drive(
                         TrajectoryStep(
                             choice.intent_index, choice.logprob, choice.value,
                             choice.features, choice.legal_mask, choice.critic_features,
+                        )
+                    )
+                # Tichu Call: solicited once per seat at its first non-Pass Play
+                # (ADR-0018). A call-capable model decides + records it via
+                # `act_call_batch`; a play-only model falls back to `should_call`. The
+                # +/-100 bonus lands in `round_outcome` either way.
+                _maybe_solicit_tichu(run, seat, choice.concrete_action, model)
+                _advance(run, choice.concrete_action)
+        for model, group in schupfen_groups.items():
+            if not group.batch:
+                continue
+            choices = model.act_schupfen_batch(group.batch)
+            for (run, seat), choice in zip(group.meta, choices):
+                if seat in run.trajs:
+                    run.trajs[seat].steps.append(
+                        TrajectoryStep(
+                            choice.card_indices, choice.logprob, choice.value,
+                            choice.features, choice.legal_masks, choice.critic_features,
+                            decision_type="schupfen",
                         )
                     )
                 _advance(run, choice.concrete_action)
@@ -215,18 +297,105 @@ def _drive(
             traj.reward = reward
 
 
+def _supports_schupfen(model: RolloutPolicy) -> bool:
+    return callable(getattr(model, "act_schupfen_batch", None))
+
+
+def _supports_calls(model: RolloutPolicy) -> bool:
+    return callable(getattr(model, "act_call_batch", None))
+
+
+def _solicit_grand(
+    runs: list[_GameRun],
+    grand_prefixes: list,
+    policy: RolloutPolicy,
+    opponent_policy: RolloutPolicy,
+    learner_team: int,
+) -> None:
+    """Decide every seat's Grand-Tichu Call on its synthetic deal-time state and
+    inject the callers. Call-capable models decide (and learner seats record) via a
+    per-model batched `act_call_batch("grand", ...)`; the rest fall back to the
+    seat agent's `should_call`. Mirrors `play_full_round`'s independent per-seat ask."""
+    groups: dict[RolloutPolicy, list] = {policy: [], opponent_policy: []}
+    fallback: list[tuple[_GameRun, int, object]] = []
+    callers: dict[int, set[int]] = {id(run): set() for run in runs}
+    for run, prefixes in zip(runs, grand_prefixes):
+        grand_state = _grand_state(prefixes)
+        for seat in range(_NUM_PLAYERS):
+            private = grand_state.private_view(seat)
+            model = policy if seat % 2 == learner_team else opponent_policy
+            if _supports_calls(model):
+                groups[model].append((run, seat, private, grand_state))
+            else:
+                fallback.append((run, seat, private))
+    for model, items in groups.items():
+        if not items:
+            continue
+        decisions = [(seat, private, gs) for _run, seat, private, gs in items]
+        choices = model.act_call_batch("grand", decisions)
+        for (run, seat, _private, _gs), choice in zip(items, choices):
+            _record_call(run, seat, choice, "grand")
+            if choice.called:
+                callers[id(run)].add(seat)
+    for run, seat, private in fallback:
+        if _calls(run.seat_agents[seat], private, "grand"):
+            callers[id(run)].add(seat)
+    for run in runs:
+        run.state = _inject_callers(run.state, grand=frozenset(callers[id(run)]))
+
+
+def _record_call(run: _GameRun, seat: int, choice, kind: str) -> None:
+    """Record a learner seat's binary Call decision as a 1-step trajectory entry
+    (the `called` flag is the action index: 1 == call, 0 == skip)."""
+    if seat in run.trajs:
+        run.trajs[seat].steps.append(
+            TrajectoryStep(
+                int(choice.called), choice.logprob, choice.value,
+                choice.features, None, choice.critic_features, decision_type=kind,
+            )
+        )
+
+
 def _advance(run: _GameRun, action: ConcreteAction) -> None:
     run.state, _, done, _ = step(run.state, action)
     if done:
         run.done = True
 
 
-def _ask_grand(seat_agents: Sequence[Agent], grand_prefixes: Sequence) -> frozenset[int]:
-    """Ask each seat for a Grand-Tichu Call on its synthetic (8,8,8,8) deal-time
-    state, independently — matching how the Grand-Tichu networks were trained
-    (no prior callers visible). Mirrors `tichu_eval.play_full._ask_grand`."""
+def _maybe_solicit_tichu(
+    run: _GameRun, seat: int, action: ConcreteAction, model: RolloutPolicy
+) -> None:
+    """Ask `seat` for a regular Tichu Call at its first non-Pass Play (ADR-0018) and
+    inject the caller into the state (preserving any Grand-Tichu callers). A
+    call-capable `model` decides (and a learner seat records) via `act_call_batch`;
+    otherwise the seat's frozen agent `should_call` decides. Grand-Tichu callers are
+    never asked Tichu (grand supersedes). A no-op on Pass and already-asked seats —
+    mirrors `tichu_eval.play_full.play_full_round`."""
+    if isinstance(action, Pass) or seat in run.asked_tichu:
+        return
+    run.asked_tichu.add(seat)
+    if seat in run.state.public.grand_tichu_callers:
+        return
+    private = run.state.private_view(seat)
+    if _supports_calls(model):
+        choice = model.act_call_batch("tichu", [(seat, private, run.state)])[0]
+        _record_call(run, seat, choice, "tichu")
+        called = bool(choice.called)
+    else:
+        called = _calls(run.seat_agents[seat], private, "tichu")
+    if called:
+        callers = frozenset(run.state.public.tichu_callers | {seat})
+        run.state = GameState(
+            hands=run.state.hands,
+            public=replace(run.state.public, tichu_callers=callers),
+        )
+
+
+def _grand_state(grand_prefixes: Sequence) -> GameState:
+    """The synthetic (8,8,8,8) deal-time state the Grand-Tichu Call is decided on —
+    no prior callers visible, matching how the Grand-Tichu Network was trained."""
     hands = tuple(frozenset(p) for p in grand_prefixes)
-    grand_state = GameState(
+    return GameState(
         hands=hands,
         public=PublicState(
             current_player=0,
@@ -235,12 +404,6 @@ def _ask_grand(seat_agents: Sequence[Agent], grand_prefixes: Sequence) -> frozen
             trick=Trick.empty(),
         ),
     )
-    callers = {
-        seat
-        for seat in range(_NUM_PLAYERS)
-        if _calls(seat_agents[seat], grand_state.private_view(seat), "grand")
-    }
-    return frozenset(callers)
 
 
 def _calls(agent: Agent, private_state, kind: str) -> bool:

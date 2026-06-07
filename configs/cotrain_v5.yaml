@@ -1,0 +1,86 @@
+# Full-stack co-training PPO (ADR-0034) — the multi-day, all-in run.
+#
+# Sharpens play + Schupfen + Tichu/Grand calls together, warm-started from the v5
+# BC nets and KL-anchored to each frozen BC. Goal: beat `master` on the seat-swap
+# Tournament with 95% CI excluding 0 (any positive). Run it, stop it any time
+# (Ctrl-C), and re-run the SAME command to continue from the last atomic bundle:
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v5.yaml
+#       --restart   # only to throw away progress and start fresh
+#
+# Strength reads are OUT OF LOOP (OOM safety): run `check_cotrain` on a snapshot.
+# Poll progress via {run_dir}/ppo_log.csv (per-net dials, flushed each iter).
+# `iterations` is a target ceiling — bump it to extend; resume continues toward it.
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v5\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v5
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+# Perfect-Info Critic ON (train-time only; the shipped policy stays observable).
+# Warm the critic under the frozen BC stack before the policy moves (ADR-0034).
+critic: { hidden: 512, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+# GPU the heavy batched update step only (the rollout is CPU-engine-bound — profiling
+# showed ~60% of an iter is rules-engine legal-action enumeration, which the GPU can't
+# touch; the update is ~30% and is a clean batched forward+backward). Falls back to CPU
+# if no CUDA. The rollout, snapshots, and Resume Bundle stay on CPU. (ADR-0034)
+update_device: cuda
+
+# Process-parallel rollout (ADR-0034 #1): the rollout (~70% of an iter) is CPU-engine-
+# bound and the M games are independent, so fan them across worker processes. Set to
+# ~(physical cores - 1 or 2) to leave room for the main process + the GPU update.
+# 1 = the single-process path. Each worker is single-threaded (no BLAS oversubscribe).
+rollout_workers: 10    # 12-core box: 10 rollout workers + room for main proc & GPU update
+
+# Per-net adaptive KL-anchor to frozen BC. Schupfen anchored TIGHTEST (it is the
+# most sensitive net; cratering it is the demonstrated big downside). Loosen
+# schupfen's target on a later resume once the stack is stable (Q5/ADR-0034).
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+
+# Modest entropy everywhere — the ADR-0029 escalation showed MORE play entropy hurt.
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+# Serving snapshots (all four nets) for the offline `check` strength read.
+snapshot_every: 25
+
+# Offline strength read (the separate `check_cotrain` command — NOT run in-loop):
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v5.yaml
+# Exports the latest snapshot and tournaments it vs `master`; ship bar = CI 95% > 0.
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # a ceiling, not a plan — run for days; resume continues
+  positions_per_iter: 512      # raised from 128: memory headroom confirmed (~1.7GB @128, CPU ~55%)
+  pool_seed:          0
+  gamma:              1.0       # short episodes, terminal round_outcome
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

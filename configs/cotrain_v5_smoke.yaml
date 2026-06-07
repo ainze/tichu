@@ -1,0 +1,67 @@
+# Full-stack co-training SMOKE (ADR-0034) — pipeline shakeout, NOT a training run.
+#
+# Proves the wired-up command completes end-to-end on the REAL BC warm-starts before
+# the multi-day job: all four nets load with matching dims, one full iteration runs
+# (full-stack rollout -> build -> per-net masked PPO update with the Perfect-Info
+# Critic), the Resume Bundle round-trips, and a re-run resumes losslessly.
+#
+# Run:
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v5_smoke.yaml
+#   (run twice: the second invocation must resume, not redo iter 0)
+# Expect: 2 iterations, finishes in well under a minute.
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v5\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v5_smoke
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 512, warmup_iters: 0 }
+perfect_info: true
+update_device: cuda    # exercise the GPU-update path in the smoke (CPU fallback if none)
+rollout_workers: 2     # exercise the process-parallel rollout path in the smoke
+
+# Schupfen anchored TIGHTEST (Q5/ADR-0034) — it is the highest-instability net.
+kl:
+  play:     { coef: 1.0, target: 0.02, factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
+  tichu:    { coef: 1.0, target: 0.02, factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 1
+
+# Tiny strength-read smoke (validates check_cotrain end-to-end on real nets):
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v5_smoke.yaml
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:         20
+  bootstrap_iters: 50
+  seed:            0
+  workers:         1
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+ppo:
+  iterations:         2
+  positions_per_iter: 8
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         2
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
