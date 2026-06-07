@@ -133,6 +133,13 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     skill_decile = int(ppo.get("skill_decile", 9))
     learner_team = int(ppo.get("learner_team", 0))
     perfect_info = bool(config.get("perfect_info", True))
+    # GPU the heavy update step only (profiling showed the rollout is CPU-engine-bound,
+    # ADR-0034). Falls back to CPU with a notice if CUDA is unavailable.
+    update_device = str(config.get("update_device", "cpu"))
+    if update_device != "cpu" and not torch.cuda.is_available():
+        if progress:
+            print(f"  update_device={update_device} requested but CUDA unavailable -> CPU", flush=True)
+        update_device = "cpu"
     gamma = float(ppo.get("gamma", 1.0))
     lam = float(ppo.get("lam", 0.95))
     pool_seed = int(ppo.get("pool_seed", 0))
@@ -240,7 +247,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         print(
             f"Co-training: target {total_iters} iters x M={positions_per_iter} "
             f"({'resumed at ' + str(start_iter) if resumed else 'fresh'}; running {remaining})\n"
-            f"  run_dir: {run_dir}  (perfect_info={perfect_info})", flush=True,
+            f"  run_dir: {run_dir}  (perfect_info={perfect_info}, update_device={update_device})", flush=True,
         )
 
     history = train_cotrain(
@@ -251,6 +258,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         ppo_epochs=int(ppo.get("ppo_epochs", 3)), skill_decile=skill_decile,
         learner_team=learner_team, perfect_info=perfect_info,
         on_iteration=_on_iteration, start_iter=start_iter,
+        update_device=update_device,
     )
     if log_state["fh"] is not None:
         log_state["fh"].close()

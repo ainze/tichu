@@ -9,6 +9,7 @@ matching log-prob re-evaluator the PPO update re-forwards with.
 import copy
 import math
 
+import pytest
 import torch
 
 from tichu_eval.full_position_pool import generate_full_position_pool
@@ -290,3 +291,42 @@ def test_train_cotrain_runs_iterations_and_logs_per_net_stats():
             assert math.isfinite(st[f"{dt}_policy_loss"])
             assert f"{dt}_kl_coef" in st
         assert math.isfinite(st["value_loss"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_cotrain_update_on_cuda_runs_and_restores_models_to_cpu():
+    # GPU the update only (the heavy batched forward+backward), keeping the nets on
+    # CPU for the engine-bound rollout. After the call the nets MUST be back on CPU
+    # so the next rollout works, and a SECOND update must still run (the optimizer
+    # moment state survived the device round-trip).
+    torch.manual_seed(0)
+    models = {
+        "play": BCModel(_F, skill_dim=8, trunk_hidden=32, trunk_depth=1, trunk_out_dim=16, head_hidden=16),
+        "schupfen": SchupfenNetwork(_F, skill_dim=8, hidden=16),
+        "tichu": TichuCallNetwork(_F, skill_dim=8, hidden=16),
+        "grand": GrandTichuCallNetwork(_F, skill_dim=8, hidden=16),
+    }
+    bc_models = {k: copy.deepcopy(m) for k, m in models.items()}
+    critic = ValueBaseline(_FC, hidden=16)
+    params = list(critic.parameters())
+    for m in models.values():
+        params += list(m.parameters())
+    optimizer = torch.optim.Adam(params, lr=1e-2)
+
+    before = copy.deepcopy(models["play"].state_dict())
+    common = dict(
+        clip_eps=0.1, vf_coef=0.5,
+        ent_coefs={dt: 0.01 for dt in models}, kl_coefs={dt: 0.5 for dt in models},
+    )
+    stats = cotrain_update(models, bc_models, critic, optimizer,
+                           _cotrain_batch_with_all_nets(), epochs=2, device="cuda", **common)
+    assert math.isfinite(stats["loss"]) and math.isfinite(stats["value_loss"])
+    # Nets restored to CPU for the (CPU, engine-bound) rollout.
+    for dt, m in models.items():
+        assert next(m.parameters()).device.type == "cpu", f"{dt} not back on cpu"
+    # Second update still works -> optimizer state round-tripped cleanly.
+    stats2 = cotrain_update(models, bc_models, critic, optimizer,
+                            _cotrain_batch_with_all_nets(), epochs=1, device="cuda", **common)
+    assert math.isfinite(stats2["loss"])
+    # The play net actually moved.
+    assert any(not torch.equal(before[k], v) for k, v in models["play"].state_dict().items())

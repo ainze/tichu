@@ -49,8 +49,8 @@ def sample_schupfen(
     """
     rows = head_logits.shape[0]
     avail = hand_mask.clone()  # True == still selectable
-    indices = torch.empty(rows, _NUM_DIRECTIONS, dtype=torch.long)
-    total_logp = torch.zeros(rows, dtype=head_logits.dtype)
+    indices = torch.empty(rows, _NUM_DIRECTIONS, dtype=torch.long, device=head_logits.device)
+    total_logp = torch.zeros(rows, dtype=head_logits.dtype, device=head_logits.device)
     for d in range(_NUM_DIRECTIONS):
         logits_d = head_logits[:, d, :].masked_fill(~avail, float("-inf"))
         logp = torch.log_softmax(logits_d, dim=-1)
@@ -156,7 +156,7 @@ def schupfen_logp(
     re-forward. Mirrors `sample_schupfen`'s factorization exactly."""
     rows = head_logits.shape[0]
     avail = hand_mask.clone()
-    total_logp = torch.zeros(rows, dtype=head_logits.dtype)
+    total_logp = torch.zeros(rows, dtype=head_logits.dtype, device=head_logits.device)
     for d in range(_NUM_DIRECTIONS):
         logits_d = head_logits[:, d, :].masked_fill(~avail, float("-inf"))
         logp = torch.log_softmax(logits_d, dim=-1)
@@ -206,12 +206,75 @@ def cotrain_update(
     kl_coefs: dict,
     epochs: int = 1,
     normalize_advantages: bool = True,
+    device: str = "cpu",
 ) -> dict:
     """One co-training PPO update (ADR-0034). Combines the SHARED critic's value
     loss with a per-net clipped surrogate + KL-anchor-to-its-frozen-BC + entropy,
     each net using its own `kl_coefs[dt]` / `ent_coefs[dt]`. Updates every present
     net + the critic in place via the single `optimizer`. Advantages are normalized
-    per net. Returns per-net + critic loss components for logging."""
+    per net. Returns per-net + critic loss components for logging.
+
+    With `device != "cpu"` the heavy batched forward+backward runs on that device:
+    the nets, the frozen BC anchors, the critic, the optimizer moment state, and the
+    batch are moved there for the update and the nets/critic/optimizer are restored
+    to CPU afterwards (in a `finally`) — so the engine-bound CPU rollout, and the
+    CPU-only Resume Bundle, are unaffected. Profiling showed only this step is worth
+    offloading; the rollout is CPU-engine-bound (ADR-0034)."""
+    dev = torch.device(device)
+    if dev.type != "cpu":
+        for m in models.values():
+            m.to(dev)
+        for m in bc_models.values():
+            m.to(dev)
+        critic.to(dev)
+        _move_optimizer_state(optimizer, dev)
+        batch = _batch_to(batch, dev)
+    try:
+        return _cotrain_update_body(
+            models, bc_models, critic, optimizer, batch,
+            clip_eps=clip_eps, vf_coef=vf_coef, ent_coefs=ent_coefs,
+            kl_coefs=kl_coefs, epochs=epochs, normalize_advantages=normalize_advantages,
+        )
+    finally:
+        if dev.type != "cpu":
+            cpu = torch.device("cpu")
+            for m in models.values():
+                m.to(cpu)
+            for m in bc_models.values():
+                m.to(cpu)
+            critic.to(cpu)
+            _move_optimizer_state(optimizer, cpu)
+
+
+def _move_optimizer_state(optimizer, dev) -> None:
+    """Move an optimizer's per-parameter state tensors (Adam's exp_avg/exp_avg_sq …)
+    to `dev`, so moving the params between devices doesn't desync the moments."""
+    for state in optimizer.state.values():
+        for key, val in state.items():
+            if torch.is_tensor(val):
+                state[key] = val.to(dev)
+
+
+def _batch_to(batch: CoTrainBatch, dev) -> CoTrainBatch:
+    return CoTrainBatch(
+        nets={
+            dt: NetBatch(
+                features=nb.features.to(dev), skill=nb.skill.to(dev),
+                actions=nb.actions.to(dev),
+                masks=None if nb.masks is None else nb.masks.to(dev),
+                old_logp=nb.old_logp.to(dev), advantages=nb.advantages.to(dev),
+            )
+            for dt, nb in batch.nets.items()
+        },
+        critic_features=batch.critic_features.to(dev),
+        returns=batch.returns.to(dev),
+    )
+
+
+def _cotrain_update_body(
+    models, bc_models, critic, optimizer, batch, *,
+    clip_eps, vf_coef, ent_coefs, kl_coefs, epochs, normalize_advantages,
+) -> dict:
     with torch.no_grad():
         bc_logits = {
             dt: _net_logits(bc_models[dt], nb.features, nb.skill, dt)
@@ -358,6 +421,7 @@ def train_cotrain(
     generator=None,
     on_iteration=None,
     start_iter: int = 0,
+    update_device: str = "cpu",
 ) -> list[dict]:
     """Run `iterations` of full-stack co-training self-play (ADR-0034).
 
@@ -386,7 +450,7 @@ def train_cotrain(
         stats = cotrain_update(
             models, bc_models, critic, optimizer, batch,
             clip_eps=clip_eps, vf_coef=vf_coef, ent_coefs=ent_coefs,
-            kl_coefs=kl_coefs, epochs=ppo_epochs,
+            kl_coefs=kl_coefs, epochs=ppo_epochs, device=update_device,
         )
         for dt in models:
             stats[f"{dt}_kl_coef"] = kl_controllers[dt].coef
