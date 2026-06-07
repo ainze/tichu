@@ -432,3 +432,48 @@ def test_bomb_interrupts_excludes_bombs_that_dont_beat_top():
 def test_pass_singletons_are_equal():
     assert PASS == Pass()
     assert hash(PASS) == hash(Pass())
+
+
+# ---- Enumeration memoisation (perf; must be correctness-neutral) ----
+#
+# `_enumerate_all` is `@lru_cache`-memoised on the hand. The hot path enumerates
+# the same hand twice per Play Decision — once in `legal_actions_for` to build the
+# policy/BC mask, again inside `step`'s validation — via value-equal but
+# DISTINCT-IDENTITY frozensets. These tests pin that the cache keys on value (so
+# the second, distinct-identity call hits) and never corrupts the result.
+
+def test_enumerate_all_hits_cache_on_distinct_identity_equal_hands():
+    from tichu_engine.legality import _enumerate_all
+
+    cards = [_c(Suit.JADE, r) for r in range(5, 11)] + [_c(Suit.SWORD, 7)]
+    hand_a = frozenset(cards)
+    hand_b = frozenset(list(cards))  # equal value, fresh object
+    assert hand_a is not hand_b and hand_a == hand_b
+
+    _enumerate_all.cache_clear()
+    first = _enumerate_all(hand_a)
+    info_after_first = _enumerate_all.cache_info()
+    second = _enumerate_all(hand_b)
+    info_after_second = _enumerate_all.cache_info()
+
+    # The value-equal second call must be served from cache (a real hot-path hit),
+    # and return the identical, unchanged result.
+    assert info_after_first.hits == 0 and info_after_first.misses == 1
+    assert info_after_second.hits == 1 and info_after_second.misses == 1
+    assert first == second
+
+
+def test_legal_actions_repeated_calls_are_stable_under_memo():
+    # The real bug pattern: the engine re-enumerates the same hand many times
+    # across a decision (policy mask + step validation + Passes). Memoisation must
+    # leave `legal_actions` byte-identical across repeated and distinct-identity
+    # equal states.
+    cards = frozenset(
+        {_c(Suit.JADE, r) for r in range(2, 11)} | {PHOENIX, _c(Suit.SWORD, 5)}
+    )
+    state_a = _state(cards)
+    state_b = _state(frozenset(set(cards)))  # equal hand, fresh frozenset object
+    first = legal_actions(state_a)
+    again = legal_actions(state_a)
+    distinct = legal_actions(state_b)
+    assert first == again == distinct
