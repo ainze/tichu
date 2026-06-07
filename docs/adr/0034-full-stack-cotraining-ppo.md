@@ -187,3 +187,53 @@ play-only). It is run anyway as a deliberate, owner-directed all-in on the one s
 untested lever, with the bar relaxed to *any* CI>0. If it lands flat, ACCEPT
 ([ADR-0033](0033-perfect-info-critic-escape.md)) becomes unconditional and the strength
 program closes.
+
+## Addendum (2026-06-07): Wish-declaration & Dragon-give — learn or leave frozen?
+
+The collector routes Play, Schupfen, and Calls to the nets; **Mahjong-wish-declaration**
+and **Dragon-give** stay on the frozen seat agent (RuleAgent declines every wish; gives the
+Dragon trick to the shorter-handed opponent). The BC `wish` (14-way: None + ranks 2–14) and
+`dragon_assignment` (2-way) heads exist and are BC-trained, but are not sharpened in the loop.
+A light engine-only probe (RuleAgent self-play, deterministic 1-ply oracle + fixed-heuristic
+tournaments, 400-seed blocks × 2) quantified each lever:
+
+**Wish-declaration — HIGH value, currently 100% unused.** Frequency ≈ 1.0 decisions/round.
+RuleAgent *always declines*, so the entire lever is dead today. Even a **dumb fixed** wish
+heuristic beats decline by **+9 to +13 team-relative pts/round** (WishHighestHeld +12.65 / +9.68,
+WishAce +10.88 / +10.43, WishMostHeld +5.58 across two independent seed blocks; decline-vs-decline
+control ≈ 0). A perfect 1-ply hindsight oracle beats decline in 72.7% of rounds (upside inflated
+by hindsight, but confirms the decision is high-leverage). Crucially, the 14-way head **includes
+the decline (None) action**, so a learned wish head **strictly dominates** the frozen
+always-decline — worst case it relearns "decline", best case it captures a large untapped gain.
+Strong synergy with the joint-sharpening thesis: the wish should be chosen *for* the wisher's
+follow-up play, exactly what co-training the wish + play heads together optimizes.
+
+**Dragon-give — LOW value, narrow.** Frequency ≈ 1.0/round (the Dragon wins a trick most rounds),
+avg 23 pts at stake. The immediate team credit is **identical for either opponent** (both are on
+the opposing team — `_team_of(target)` is the same), so the decision is first-order EV-neutral;
+it matters *only* through the second-order last-in transfer rule (`round_points_by_player[last_in]`
+moves to first-out's team). RuleAgent's "give to the shorter-handed opponent" is already a sound
+proxy for "less likely to be last-in": it is suboptimal in only **9.5%** of decisions, and a
+perfect 1-ply oracle gains just **~5.5 pts/round** (optimistic ceiling; a learned head captures a
+fraction of that). The decision carries little learnable structure beyond "who will be last-in".
+
+**Cost to wire** (mirror the Calls path, commit 2458759): a routing branch in `rollout.py` `_drive`
+for the pending decision → `model.act_wish_batch` / `act_dragon_batch` (one-shot, like
+`act_call_batch`), recording a `TrajectoryStep(decision_type="wish"|"dragon")`; `BatchedCoTrainPolicy`
+gains the two `act_*_batch` methods; `models`/`bc_models`/`kl_controllers`/`ent_coefs` gain the two
+nets; `_net_logits` gains a wish/dragon branch (both are plain masked categoricals — the
+`_policy_kl_entropy` single-categorical path already handles them); the BC nets must be exported
+into / loaded from the Resume Bundle as frozen anchors. `build_cotrain_batch` and the GAE/critic
+integration already handle one-shot decision types generically (proven for calls), so no new
+learning machinery is needed. Wish is ~the same effort as a Call head. Dragon adds the
+winner-relative left/right side encoding (`dragon_intent_index(winner_seat)`).
+
+**Recommendation: wire the WISH head; leave Dragon-give FROZEN.**
+- Wish: large (~+10 pts/round naive headroom), strictly-dominant (head subsumes decline),
+  high-synergy, Call-sized effort. Add it (suggest a *tight* KL-anchor-to-BC like Schupfen, since
+  BC wish data is thin and the lever is sharp — let the policy gradient earn departures from BC).
+- Dragon-give: ~5.5 pts/round oracle ceiling, first-order EV-neutral, RuleAgent already 90.5%
+  optimal, mostly "predict last-in". Not worth a near-zero-gradient head competing for capacity and
+  KL budget. Revisit only if a measured plateau traces to dragon-give specifically.
+
+Not implemented pending sign-off (this addendum is the decision artifact, not a behavior change).

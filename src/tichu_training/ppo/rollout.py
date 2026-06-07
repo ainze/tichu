@@ -20,7 +20,9 @@ from typing import NamedTuple, Protocol, Sequence
 
 from tichu_engine.engine import step
 from tichu_engine.legality import ConcreteAction, Pass
-from tichu_engine.state import GameState, PublicState, SchupfenPending, Trick
+from tichu_engine.state import (
+    GameState, MahjongWishPending, PublicState, SchupfenPending, Trick,
+)
 from tichu_ml.agent import Agent
 from tichu_ml.rule_agent import RuleAgent
 
@@ -62,6 +64,24 @@ class SchupfenChoice(NamedTuple):
     value: float | None = None
     features: object | None = None
     legal_masks: object | None = None
+    critic_features: object | None = None
+
+
+class WishChoice(NamedTuple):
+    """A wish-policy's decision at one Mahjong-Wish Decision (ADR-0034 addendum).
+
+    `concrete_action` is the `MahjongWish` the engine steps. The rest is the PPO
+    bookkeeping recorded for a learner seat: `intent_index` is the wish-head index
+    (0 == decline, 1..13 == ranks 2..14), the action the 14-way wish head emits.
+    There is no legal mask — every wish slot is legal during `MahjongWishPending`.
+    A non-learning policy leaves the bookkeeping `None`. The wish head lives on the
+    play net's trunk (option (a)); the collector treats it as its own decision type."""
+
+    concrete_action: ConcreteAction
+    intent_index: int | None = None
+    logprob: float | None = None
+    value: float | None = None
+    features: object | None = None
     critic_features: object | None = None
 
 
@@ -228,6 +248,12 @@ def _drive(
         schupfen_groups: dict[RolloutPolicy, _PlayGroup] = {
             policy: _PlayGroup(), opponent_policy: _PlayGroup(),
         }
+        # Mahjong-Wish Decisions are batched per serving model too (ADR-0034 addendum).
+        # A model without `act_wish_batch` leaves the wish on the frozen inline seat
+        # agent (which declines) — the ADR-0029 behavior.
+        wish_groups: dict[RolloutPolicy, _PlayGroup] = {
+            policy: _PlayGroup(), opponent_policy: _PlayGroup(),
+        }
         for run in runs:
             if run.done:
                 continue
@@ -246,7 +272,11 @@ def _drive(
                 group = schupfen_groups[model]
                 group.meta.append((run, current))
                 group.batch.append((current, private, run.state))
-            else:  # Wish / Dragon, or Schupfen for a play-only model — inline
+            elif isinstance(pending, MahjongWishPending) and _supports_wish(model):
+                group = wish_groups[model]
+                group.meta.append((run, current))
+                group.batch.append((current, private, run.state))
+            else:  # Dragon, or Wish/Schupfen for a model without that head — inline
                 _advance(run, run.seat_agents[current].act(private))
         for model, group in groups.items():
             if not group.batch:
@@ -280,6 +310,20 @@ def _drive(
                         )
                     )
                 _advance(run, choice.concrete_action)
+        for model, group in wish_groups.items():
+            if not group.batch:
+                continue
+            choices = model.act_wish_batch(group.batch)
+            for (run, seat), choice in zip(group.meta, choices):
+                if seat in run.trajs:
+                    run.trajs[seat].steps.append(
+                        TrajectoryStep(
+                            choice.intent_index, choice.logprob, choice.value,
+                            choice.features, None, choice.critic_features,
+                            decision_type="wish",
+                        )
+                    )
+                _advance(run, choice.concrete_action)
     else:
         raise RuntimeError(
             f"rollout exceeded {_MAX_STEPS} ticks without resolving — "
@@ -299,6 +343,10 @@ def _drive(
 
 def _supports_schupfen(model: RolloutPolicy) -> bool:
     return callable(getattr(model, "act_schupfen_batch", None))
+
+
+def _supports_wish(model: RolloutPolicy) -> bool:
+    return callable(getattr(model, "act_wish_batch", None))
 
 
 def _supports_calls(model: RolloutPolicy) -> bool:
