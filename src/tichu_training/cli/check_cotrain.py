@@ -94,13 +94,16 @@ def export_nets(config, *, snapshot_prefix: str, out_dir: str, progress: bool = 
     }
 
 
-def run_check(config, *, iteration: int | None = None, positions=None, progress: bool = True) -> dict:
+def run_check(config, *, iteration: int | None = None, positions=None, progress: bool = True,
+              seed: int | None = None, n_deals: int | None = None) -> dict:
     """Export the chosen (default: latest) snapshot and tournament it vs `master`.
-    Returns `{iter, mean, ci, n, ship, matrix_path}` — `ship` is True iff the 95%
-    CI lower bound clears 0 (the ADR-0034 ship bar)."""
+    Returns `{iter, mean, ci, n, ship, matrix_path, seed}` — `ship` is True iff the
+    95% CI lower bound clears 0 (the ADR-0034 ship bar). `seed` / `n_deals` override
+    the config for robustness sweeps (a marginal CI should hold across eval seeds)."""
     run_dir = Path(config["run_dir"])
     eval_cfg = config["eval"]
     skill_decile = int(config.get("ppo", {}).get("skill_decile", 9))
+    eval_seed = int(eval_cfg.get("seed", 0) if seed is None else seed)
 
     it = iteration if iteration is not None else _latest_snapshot(run_dir / "snapshots")
     if it is None:
@@ -133,14 +136,14 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
 
     if positions is None:
         positions = load_full_position_pool(Path(eval_cfg["starting_position_pool"]))
-        n_deals = eval_cfg.get("n_deals")
-        if n_deals is not None:
-            positions = positions[: int(n_deals)]
+        cap = eval_cfg.get("n_deals") if n_deals is None else n_deals
+        if cap is not None:
+            positions = positions[: int(cap)]
 
     result = run_full_tournament(
         agent_builders, positions,
         bootstrap_iters=int(eval_cfg.get("bootstrap_iters", 1000)),
-        seed=int(eval_cfg.get("seed", 0)),
+        seed=eval_seed,
         workers=int(eval_cfg.get("workers", 1)),
         progress=None,
     )
@@ -158,14 +161,14 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
     if progress:
         verdict = "*** SHIP: CI clears 0 ***" if ship else "not yet (CI spans 0)"
         print(
-            f"check iter {it}: {name} vs master  mean={mean:+.2f}  "
+            f"check iter {it} (seed {eval_seed}): {name} vs master  mean={mean:+.2f}  "
             f"CI=[{lo:+.2f}, {hi:+.2f}]  n={result.n(name, 'master')}  -> {verdict}",
             flush=True,
         )
     return {
         "iter": it, "mean": mean, "ci": (lo, hi),
         "n": int(result.n(name, "master")), "ship": ship,
-        "matrix_path": str(matrix_path),
+        "matrix_path": str(matrix_path), "seed": eval_seed,
     }
 
 
@@ -175,12 +178,14 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Offline strength read for co-training (ADR-0034)")
     parser.add_argument("--config", required=True, help="The co-training config YAML (run_dir + arch + eval).")
     parser.add_argument("--iter", type=int, default=None, help="Snapshot iteration to check (default: latest).")
+    parser.add_argument("--seed", type=int, default=None, help="Override eval seed (for a robustness sweep of a marginal CI).")
+    parser.add_argument("--n-deals", type=int, default=None, help="Override eval n_deals (tighten a marginal CI).")
     args = parser.parse_args(argv)
 
     with open(args.config, encoding="utf-8") as fh:
         config = yaml.safe_load(fh)
 
-    result = run_check(config, iteration=args.iter)
+    result = run_check(config, iteration=args.iter, seed=args.seed, n_deals=args.n_deals)
     return 0 if result["ship"] else 1
 
 
