@@ -35,6 +35,12 @@ perfect_info: true
 # if no CUDA. The rollout, snapshots, and Resume Bundle stay on CPU. (ADR-0034)
 update_device: cuda
 
+# Process-parallel rollout (ADR-0034 #1): the rollout (~70% of an iter) is CPU-engine-
+# bound and the M games are independent, so fan them across worker processes. Set to
+# ~(physical cores - 1 or 2) to leave room for the main process + the GPU update.
+# 1 = the single-process path. Each worker is single-threaded (no BLAS oversubscribe).
+rollout_workers: 6
+
 # Per-net adaptive KL-anchor to frozen BC. Schupfen anchored TIGHTEST (it is the
 # most sensitive net; cratering it is the demonstrated big downside). Loosen
 # schupfen's target on a later resume once the stack is stable (Q5/ADR-0034).

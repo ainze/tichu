@@ -422,6 +422,7 @@ def train_cotrain(
     on_iteration=None,
     start_iter: int = 0,
     update_device: str = "cpu",
+    rollout_collect=None,
 ) -> list[dict]:
     """Run `iterations` of full-stack co-training self-play (ADR-0034).
 
@@ -436,15 +437,20 @@ def train_cotrain(
 
     history: list[dict] = []
     for it in range(start_iter, start_iter + iterations):
-        policy = BatchedCoTrainPolicy(
-            models["play"], models["schupfen"], models["tichu"], models["grand"],
-            critic, skill_decile=skill_decile, perfect_info=perfect_info, generator=generator,
-        )
-        opponent = opponent_policy_provider(it) if opponent_policy_provider is not None else policy
         positions = sample_positions(it)
-        trajs = collect_rollout(
-            positions, policy, opponent_policy=opponent, learner_team=learner_team
-        )
+        if rollout_collect is not None:
+            # Injected collector (e.g. process-parallel, ADR-0034 #1): reads the
+            # live weights itself and returns the iteration's trajectories.
+            trajs = rollout_collect(it, positions)
+        else:
+            policy = BatchedCoTrainPolicy(
+                models["play"], models["schupfen"], models["tichu"], models["grand"],
+                critic, skill_decile=skill_decile, perfect_info=perfect_info, generator=generator,
+            )
+            opponent = opponent_policy_provider(it) if opponent_policy_provider is not None else policy
+            trajs = collect_rollout(
+                positions, policy, opponent_policy=opponent, learner_team=learner_team
+            )
         batch = build_cotrain_batch(trajs, skill_decile=skill_decile, gamma=gamma, lam=lam)
         kl_coefs = {dt: kl_controllers[dt].coef for dt in models}
         stats = cotrain_update(

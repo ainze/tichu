@@ -156,6 +156,29 @@ embed the shared optimizer (disk-heavy over days) — trim to weights-only. Move
 reporting in `check_cotrain` is stubbed for a held-out dir but not yet wired (the CI>0 tournament
 is the decider per Q9).
 
+### Performance — profiled, then GPU-update + process-parallel rollout (2026-06-07)
+
+Profiling one iteration (`scripts/profile_cotrain.py`, M=512) showed it is **CPU-engine-bound**:
+the rollout is ~70% of the iter and its self-time is dominated by the rules engine
+enumerating legal actions (straights/pairs/bombs, card hashing) — pure Python, GIL-held;
+the batched forward+backward update is ~30%. Two additive, opt-in levers were built test-first:
+
+- **GPU the update only** (`cotrain_update(device=...)`, config `update_device: cuda`): moves the
+  nets/anchors/critic/optimizer-state/batch to the GPU for the update and restores them to CPU in
+  a `finally` — rollout, snapshots, and the Resume Bundle stay CPU. Measured **16× on the update**
+  (22.5s→1.4s incl. transfer), ~25% off the iteration. The rollout's small per-tick forwards were
+  left on CPU (not worth the transfer).
+- **Process-parallel rollout** (`ppo/rollout_parallel.py`, config `rollout_workers: N`): the M games
+  are independent and the bottleneck is GIL-held, so threads can't help — a persistent spawn pool
+  fans chunks across worker processes (skeletons built once per worker, weights reloaded from a
+  small file each iter, single-threaded per worker to avoid BLAS oversubscribe), each running the
+  unchanged `collect_rollout` and returning whole trajectories (coarse IPC). `workers=1` keeps the
+  validated single-process path. Self-play opponents share the learner's weights; the league hook
+  (`opp_weights_path`) is reserved.
+
+The two compose: GPU update + CPU-parallel rollout don't contend for the device. Critic warm-up is
+not yet parallelized (one-time cost; lower `warmup_iters` or accept it).
+
 ## Heavy prior
 
 This is the **~7th** self-play/RL attempt against a long string of flat results (BC at

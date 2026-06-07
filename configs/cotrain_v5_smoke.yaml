@@ -24,6 +24,8 @@ call_model:     { skill_dim: 64, hidden: 256 }
 
 critic: { hidden: 512, warmup_iters: 0 }
 perfect_info: true
+update_device: cuda    # exercise the GPU-update path in the smoke (CPU fallback if none)
+rollout_workers: 2     # exercise the process-parallel rollout path in the smoke
 
 # Schupfen anchored TIGHTEST (Q5/ADR-0034) — it is the highest-instability net.
 kl:

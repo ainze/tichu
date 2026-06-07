@@ -140,6 +140,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         if progress:
             print(f"  update_device={update_device} requested but CUDA unavailable -> CPU", flush=True)
         update_device = "cpu"
+    rollout_workers = int(config.get("rollout_workers", 1))
     gamma = float(ppo.get("gamma", 1.0))
     lam = float(ppo.get("lam", 0.95))
     pool_seed = int(ppo.get("pool_seed", 0))
@@ -247,19 +248,46 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         print(
             f"Co-training: target {total_iters} iters x M={positions_per_iter} "
             f"({'resumed at ' + str(start_iter) if resumed else 'fresh'}; running {remaining})\n"
-            f"  run_dir: {run_dir}  (perfect_info={perfect_info}, update_device={update_device})", flush=True,
+            f"  run_dir: {run_dir}  (perfect_info={perfect_info}, "
+            f"update_device={update_device}, rollout_workers={rollout_workers})", flush=True,
         )
 
-    history = train_cotrain(
-        models, bc_models, critic, _sample_positions,
-        optimizer=optimizer, kl_controllers=kl_controllers, ent_coefs=ent_coefs,
-        iterations=remaining, gamma=gamma, lam=lam,
-        clip_eps=float(ppo.get("clip_eps", 0.1)), vf_coef=float(ppo.get("vf_coef", 0.5)),
-        ppo_epochs=int(ppo.get("ppo_epochs", 3)), skill_decile=skill_decile,
-        learner_team=learner_team, perfect_info=perfect_info,
-        on_iteration=_on_iteration, start_iter=start_iter,
-        update_device=update_device,
-    )
+    # Optional process-parallel rollout (ADR-0034 #1): the rollout is CPU-engine-bound,
+    # so fan the M games across worker processes. workers<=1 keeps the single-process
+    # path. The injected collector saves the live weights to a small file each iter and
+    # dispatches chunks to a persistent spawn pool.
+    parallel = None
+    rollout_collect = None
+    if rollout_workers > 1:
+        from tichu_training.ppo.rollout_parallel import ParallelRollout, save_rollout_weights
+        arch_cfg = {k: config.get(k, {}) for k in ("model", "schupfen_model", "call_model")}
+        parallel = ParallelRollout(
+            arch_cfg, critic_hidden=int(config.get("critic", {}).get("hidden", 512)),
+            skill_decile=skill_decile, perfect_info=perfect_info, workers=rollout_workers,
+        )
+        weights_path = str(run_dir / "_rollout_weights.pt")
+
+        def rollout_collect(iteration: int, positions):
+            save_rollout_weights(weights_path, models, critic)
+            return parallel.collect(
+                positions, weights_path, learner_team=learner_team,
+                base_seed=pool_seed + iteration * positions_per_iter,
+            )
+
+    try:
+        history = train_cotrain(
+            models, bc_models, critic, _sample_positions,
+            optimizer=optimizer, kl_controllers=kl_controllers, ent_coefs=ent_coefs,
+            iterations=remaining, gamma=gamma, lam=lam,
+            clip_eps=float(ppo.get("clip_eps", 0.1)), vf_coef=float(ppo.get("vf_coef", 0.5)),
+            ppo_epochs=int(ppo.get("ppo_epochs", 3)), skill_decile=skill_decile,
+            learner_team=learner_team, perfect_info=perfect_info,
+            on_iteration=_on_iteration, start_iter=start_iter,
+            update_device=update_device, rollout_collect=rollout_collect,
+        )
+    finally:
+        if parallel is not None:
+            parallel.close()
     if log_state["fh"] is not None:
         log_state["fh"].close()
 
