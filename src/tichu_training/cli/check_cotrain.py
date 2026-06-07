@@ -99,8 +99,10 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
               held_out: str | None = None, tournament: bool = True) -> dict:
     """Export the chosen (default: latest) snapshot, tournament it vs `master`, and
     (if `held_out` given) run Move-Prediction-Eval. Returns `{iter, mean, ci, n,
-    ship, matrix_path, seed, move_pred}` — `ship` is True iff the 95% CI lower bound
-    clears 0 (the ADR-0034 ship bar). `seed`/`n_deals` override the config for
+    win_rate, tie_rate, ship, matrix_path, seed, move_pred}` — `ship` is True iff the
+    95% CI lower bound clears 0 (the ADR-0034 ship bar); `win_rate`/`tie_rate` are the
+    snapshot's PER-ROUND win/tie fraction vs master (NOT games-to-1000).
+    `seed`/`n_deals` override the config for
     robustness sweeps. `move_pred` (when run) reports play top-1 for cotrain vs
     master and **flags** a crater (>~3pp drop) — reported, NOT gating (Q9).
     `tournament=False` skips the heavy tournament (quick plausibility check only)."""
@@ -142,6 +144,7 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
                   f"{int(eval_cfg.get('workers', 1))} workers)", flush=True)
 
     mean = lo = hi = n = None
+    win_rate = tie_rate = None
     ship = False
     matrix_path = None
     if tournament:
@@ -160,6 +163,8 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
         mean = float(result.mean(name, "master"))
         lo, hi = (float(x) for x in result.ci(name, "master"))
         n = int(result.n(name, "master"))
+        win_rate = float(result.win_rate(name, "master"))
+        tie_rate = float(result.tie_rate(name, "master"))
         ship = lo > 0.0
         check_dir = run_dir / "check"
         check_dir.mkdir(parents=True, exist_ok=True)
@@ -168,9 +173,16 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
         _write_matrix(result, matrix_path)
         if progress:
             verdict = "*** SHIP: CI clears 0 ***" if ship else "not yet (CI spans 0)"
+            loss_rate = 1.0 - win_rate - tie_rate
             print(
                 f"check iter {it} (seed {eval_seed}): {name} vs master  mean={mean:+.2f}  "
                 f"CI=[{lo:+.2f}, {hi:+.2f}]  n={n}  -> {verdict}", flush=True,
+            )
+            # Per-Round win-rate (NOT games-to-1000): fraction of seat-swapped Rounds
+            # the snapshot out-scored master. Ties are exact 50-50 card splits.
+            print(
+                f"  round win-rate: {name} {win_rate:.1%}  vs master {loss_rate:.1%}"
+                f"  (tie {tie_rate:.1%}, n={n})", flush=True,
             )
 
     move_pred = None
@@ -184,7 +196,8 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
 
     return {
         "iter": it, "mean": mean, "ci": (lo, hi) if mean is not None else None,
-        "n": n, "ship": ship, "matrix_path": str(matrix_path) if matrix_path else None,
+        "n": n, "win_rate": win_rate, "tie_rate": tie_rate,
+        "ship": ship, "matrix_path": str(matrix_path) if matrix_path else None,
         "seed": eval_seed, "move_pred": move_pred,
     }
 

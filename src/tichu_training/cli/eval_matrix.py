@@ -303,6 +303,8 @@ def _write_matrix(result: MatrixResult, path: Path) -> None:
         "ci_lower": pa.array([r["ci_lower"] for r in rows], type=pa.float64()),
         "ci_upper": pa.array([r["ci_upper"] for r in rows], type=pa.float64()),
         "n": pa.array([r["n"] for r in rows], type=pa.int32()),
+        "win_rate": pa.array([r.get("win_rate", 0.0) for r in rows], type=pa.float64()),
+        "tie_rate": pa.array([r.get("tie_rate", 0.0) for r in rows], type=pa.float64()),
         "call_bonus_mean": pa.array(
             [r.get("call_bonus_mean", 0.0) for r in rows], type=pa.float64()
         ),
