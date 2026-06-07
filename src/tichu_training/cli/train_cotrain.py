@@ -95,10 +95,14 @@ def _kl_controllers(config, decision_types) -> dict:
     out = {}
     for dt in decision_types:
         c = kl.get(dt, {})
+        tf = c.get("target_final")
         out[dt] = AdaptiveKLController(
             coef=float(c.get("coef", 1.0)),
             target=float(c.get("target", 0.02)),
             factor=float(c.get("factor", 2.0)),
+            target_final=None if tf is None else float(tf),
+            anneal_start=int(c.get("anneal_start", 0)),
+            anneal_iters=int(c.get("anneal_iters", 0)),
         )
     return out
 

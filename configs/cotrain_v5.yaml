@@ -51,9 +51,17 @@ cotrain_wish: false
 # Per-net adaptive KL-anchor to frozen BC. Schupfen anchored TIGHTEST (it is the
 # most sensitive net; cratering it is the demonstrated big downside). Loosen
 # schupfen's target on a later resume once the stack is stable (Q5/ADR-0034).
+#
+# Schupfen leash ANNEAL (cotrain_v5 learning-dynamics diagnosis, 2026-06-07): the
+# diagnosis measured schupfen pinned at BC (KL ~0.0074 at the 0.008 target, entropy
+# dead-flat over 430 iters) — the lever the run exists to move can't move. Raise its
+# target LINEARLY 0.008 -> 0.025 over iters [750, 2750] (a pure function of the global
+# iteration, so resume-safe). Gentle on purpose: the shallow slope (~8.5e-6/iter) lets
+# schupfen drift off BC without the immediate crater of unleashing it (random schupfen
+# -142.9, rule -51.8 vs master). target_final/anneal_* are retunable on any resume.
 kl:
   play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
-  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
   tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
   grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
 

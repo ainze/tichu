@@ -508,10 +508,15 @@ def train_cotrain(
                 positions, policy, opponent_policy=opponent, learner_team=learner_team
             )
         batch = build_cotrain_batch(trajs, skill_decile=skill_decile, gamma=gamma, lam=lam)
+        # Advance each controller's annealed KL target to this global iteration before
+        # the update reads its coef / re-checks the band (resume-safe; ADR-0034 follow-up,
+        # loosening the Schupfen leash). No-op for controllers without a target schedule.
+        for c in kl_controllers.values():
+            c.set_iteration(it)
         # Controllers are keyed by DECISION type (a superset of the net types: the
         # wish head rides the play net, option (a)). A decision type can be absent in
         # an iteration (e.g. no Mahjong played -> no wish steps), so steer its
-        # controller only when this iteration produced its KL.
+        # controller only when this iteration produced its KL (below).
         kl_coefs = {dt: c.coef for dt, c in kl_controllers.items()}
         stats = cotrain_update(
             models, bc_models, critic, optimizer, batch,
