@@ -176,7 +176,8 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
     if held_out:
         move_pred = _move_prediction(
             agent_builders, name, held_out,
-            max_decisions=eval_cfg.get("move_pred_max"), skill_decile=skill_decile,
+            max_decisions=eval_cfg.get("move_pred_max"),
+            max_games=int(eval_cfg.get("move_pred_games", 20)),
             progress=progress,
         )
 
@@ -193,17 +194,45 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
 _MOVE_PRED_CRATER_PP = 0.03  # > 3pp play top-1 drop vs master -> flagged
 
 
-def _move_prediction(agent_builders, name, held_out_dir, *, max_decisions, skill_decile, progress):
-    """Move-Prediction-Eval: top-1/top-5 play-prediction accuracy of the cotrain
-    snapshot vs `master` on held-out human games (.tch), and a crater flag on the
-    play head. Reuses the validated `evaluate_move_prediction` (ADR-0025)."""
+def _load_eval_games(held_out: str, max_games: int):
+    """Load games for Move-Prediction-Eval from EITHER a directory of `.tch` files
+    OR the zstd `.tch` archive (`data/archive.zst`, streamed via `iter_archive` — no
+    extraction). For the archive, take a deterministic strided sample of `max_games`
+    so the games spread across the corpus (NB: there is no game-level held-out — the
+    corpus held-out is a per-example hash; this measures cotrain's *drift vs master*
+    on identical decisions, which is valid even on training games)."""
     from tichu_training.bsw.parser import parse_tch
+
+    path = Path(held_out)
+    if path.suffix == ".zst":
+        from tichu_training.bsw.archive import iter_archive, list_game_ids
+        ids = list_game_ids(path)
+        if max_games and len(ids) > max_games:
+            step = max(1, len(ids) // max_games)
+            ids = ids[::step][:max_games]
+        wanted = set(ids)
+        return [parse_tch(text, game_id=gid) for gid, text in iter_archive(path, game_ids=wanted)]
+    games = sorted(path.glob("*.tch"))
+    if max_games:
+        games = games[:max_games]
+    return [parse_tch(p.read_text(encoding="utf-8"), game_id=p.stem) for p in games]
+
+
+def _move_prediction(agent_builders, name, held_out, *, max_decisions, max_games, progress):
+    """Move-Prediction-Eval: top-1/top-5 play-prediction accuracy of the cotrain
+    snapshot vs `master` on held-out human games, and a crater flag on the play
+    head. Reuses the validated `evaluate_move_prediction` (ADR-0025)."""
+    from tichu_engine.legality import legal_actions_for
     from tichu_eval.move_prediction import decisions_from_game, evaluate_move_prediction
 
-    games = []
-    for path in sorted(Path(held_out_dir).glob("*.tch")):
-        games.append(parse_tch(path.read_text(encoding="utf-8"), game_id=path.stem))
-    decisions = [d for g in games for d in decisions_from_game(g)]
+    games = _load_eval_games(held_out, max_games)
+    # Q9's human-plausibility metric is the PLAY head; restrict to play decisions
+    # that have a legal action (call/deal-time states fed to `act` hit the no-legal
+    # fallback, and calls aren't an `act` decision anyway).
+    decisions = [
+        d for g in games for d in decisions_from_game(g)
+        if d.decision_type == "play" and legal_actions_for(d.private_state)
+    ]
     cap = None if max_decisions is None else int(max_decisions)
 
     out = {}
