@@ -320,6 +320,66 @@ def test_outcome_matches_trusted_runner_with_a_tichu_caller():
     assert all(t.reward == expected_team0_relative for t in trajs)
 
 
+# --- Terminal-reward parity on scenarios RuleAgent self-play almost never reaches.
+# The collector has no slam/last-hand-specific code: it steps the engine and reads
+# the terminal score delta. These crafted near-end states drive the collector to a
+# slam / phoenix-in-last-hand finish and assert its reward equals the engine oracle
+# (a direct `step` of the same state), exercising the paths the seed-swept parity
+# tests above cannot hit. (Audit: co-train scoring, 2026-06-07.)
+
+from tichu_eval.full_position_pool import FullStartingPosition  # noqa: E402
+from tichu_engine.cards import Card, PHOENIX, Suit  # noqa: E402
+from tichu_engine.combinations import Single  # noqa: E402
+from tichu_engine.engine import step  # noqa: E402
+from tichu_engine.state import GameState, PublicState, Trick  # noqa: E402
+
+
+def _card(rank, suit=Suit.STAR):
+    return Card(suit=suit, rank=rank)
+
+
+def _collector_reward(state):
+    pos = FullStartingPosition(state=state, grand_prefixes=(frozenset(),) * 4)
+    trajs = collect_rollout([pos], RulePlayPolicy(), learner_team=0)
+    return next(t.reward for t in trajs if t.seat == 0)
+
+
+def _oracle_reward(state, action):
+    init = state.public.scores
+    ns, _, done, _ = step(state, action)
+    assert done
+    f = ns.public.scores
+    return (f[0] - init[0]) - (f[1] - init[1]), ns.public.scores
+
+
+def test_collector_terminal_reward_matches_engine_oracle_on_slam():
+    # Seat 0 (team 0) already out; partner seat 2 plays its last (0-point) card ->
+    # Doppelsieg. Collector's team-relative reward must equal the engine oracle and
+    # the absolute finalise must be exactly the +200 slam bonus, no card-point leak.
+    state = GameState(
+        hands=(frozenset(), frozenset({_card(9)}),
+               frozenset({_card(9, Suit.PAGODA)}), frozenset({_card(4, Suit.SWORD)})),
+        public=PublicState(current_player=2, hand_sizes=(0, 1, 1, 1),
+                           scores=(0, 0), trick=Trick.empty(), out_order=(0,)),
+    )
+    oracle, final = _oracle_reward(state, Single(_card(9, Suit.PAGODA)))
+    assert final == (200, 0)
+    assert _collector_reward(state) == oracle == 200
+
+
+def test_collector_terminal_reward_matches_engine_oracle_on_phoenix_last_hand():
+    # Non-slam finish: seats 0,1 out; seat 2 (team 0) plays its last card to go out
+    # third; seat 3 (team 1) is last-in holding the Phoenix. Phoenix's -25 transfers
+    # to the OPPOSING team (team 0). Collector reward must equal the engine oracle.
+    state = GameState(
+        hands=(frozenset(), frozenset(), frozenset({_card(9)}), frozenset({PHOENIX})),
+        public=PublicState(current_player=2, hand_sizes=(0, 0, 1, 1),
+                           scores=(0, 0), trick=Trick.empty(), out_order=(0, 1)),
+    )
+    oracle, _ = _oracle_reward(state, Single(_card(9)))
+    assert _collector_reward(state) == oracle
+
+
 def test_records_each_learner_play_decision_in_order_and_no_opponent_leak():
     pos = generate_full_position_pool(seed=0, n=1)[0]
     policy = TaggingPolicy()
