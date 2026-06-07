@@ -136,7 +136,8 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
                            ("tichu", "tichu_call_path"), ("grand", "grand_call_path")):
             print(f"  master {label:8s} {m[key]}", flush=True)
         if tournament:
-            n = len(positions) if positions is not None else eval_cfg.get("n_deals", "all")
+            cap = eval_cfg.get("n_deals") if n_deals is None else n_deals
+            n = len(positions) if positions is not None else (cap if cap is not None else "all")
             print(f"  tournament: {name} vs master ({n} deals, "
                   f"{int(eval_cfg.get('workers', 1))} workers)", flush=True)
 
