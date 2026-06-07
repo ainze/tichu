@@ -95,15 +95,20 @@ def export_nets(config, *, snapshot_prefix: str, out_dir: str, progress: bool = 
 
 
 def run_check(config, *, iteration: int | None = None, positions=None, progress: bool = True,
-              seed: int | None = None, n_deals: int | None = None) -> dict:
-    """Export the chosen (default: latest) snapshot and tournament it vs `master`.
-    Returns `{iter, mean, ci, n, ship, matrix_path, seed}` — `ship` is True iff the
-    95% CI lower bound clears 0 (the ADR-0034 ship bar). `seed` / `n_deals` override
-    the config for robustness sweeps (a marginal CI should hold across eval seeds)."""
+              seed: int | None = None, n_deals: int | None = None,
+              held_out: str | None = None, tournament: bool = True) -> dict:
+    """Export the chosen (default: latest) snapshot, tournament it vs `master`, and
+    (if `held_out` given) run Move-Prediction-Eval. Returns `{iter, mean, ci, n,
+    ship, matrix_path, seed, move_pred}` — `ship` is True iff the 95% CI lower bound
+    clears 0 (the ADR-0034 ship bar). `seed`/`n_deals` override the config for
+    robustness sweeps. `move_pred` (when run) reports play top-1 for cotrain vs
+    master and **flags** a crater (>~3pp drop) — reported, NOT gating (Q9).
+    `tournament=False` skips the heavy tournament (quick plausibility check only)."""
     run_dir = Path(config["run_dir"])
     eval_cfg = config["eval"]
     skill_decile = int(config.get("ppo", {}).get("skill_decile", 9))
     eval_seed = int(eval_cfg.get("seed", 0) if seed is None else seed)
+    held_out = held_out if held_out is not None else eval_cfg.get("held_out")
 
     it = iteration if iteration is not None else _latest_snapshot(run_dir / "snapshots")
     if it is None:
@@ -130,46 +135,98 @@ def run_check(config, *, iteration: int | None = None, positions=None, progress:
         for label, key in (("policy", "checkpoint_path"), ("schupfen", "schupfen_path"),
                            ("tichu", "tichu_call_path"), ("grand", "grand_call_path")):
             print(f"  master {label:8s} {m[key]}", flush=True)
-        n = len(positions) if positions is not None else eval_cfg.get("n_deals", "all")
-        print(f"  tournament: {name} vs master ({n} deals, "
-              f"{int(eval_cfg.get('workers', 1))} workers)", flush=True)
+        if tournament:
+            n = len(positions) if positions is not None else eval_cfg.get("n_deals", "all")
+            print(f"  tournament: {name} vs master ({n} deals, "
+                  f"{int(eval_cfg.get('workers', 1))} workers)", flush=True)
 
-    if positions is None:
-        positions = load_full_position_pool(Path(eval_cfg["starting_position_pool"]))
-        cap = eval_cfg.get("n_deals") if n_deals is None else n_deals
-        if cap is not None:
-            positions = positions[: int(cap)]
+    mean = lo = hi = n = None
+    ship = False
+    matrix_path = None
+    if tournament:
+        if positions is None:
+            positions = load_full_position_pool(Path(eval_cfg["starting_position_pool"]))
+            cap = eval_cfg.get("n_deals") if n_deals is None else n_deals
+            if cap is not None:
+                positions = positions[: int(cap)]
+        result = run_full_tournament(
+            agent_builders, positions,
+            bootstrap_iters=int(eval_cfg.get("bootstrap_iters", 1000)),
+            seed=eval_seed,
+            workers=int(eval_cfg.get("workers", 1)),
+            progress=None,
+        )
+        mean = float(result.mean(name, "master"))
+        lo, hi = (float(x) for x in result.ci(name, "master"))
+        n = int(result.n(name, "master"))
+        ship = lo > 0.0
+        check_dir = run_dir / "check"
+        check_dir.mkdir(parents=True, exist_ok=True)
+        matrix_path = check_dir / f"iter_{it:05d}_tournament.parquet"
+        from tichu_training.cli.eval_matrix import _write_matrix
+        _write_matrix(result, matrix_path)
+        if progress:
+            verdict = "*** SHIP: CI clears 0 ***" if ship else "not yet (CI spans 0)"
+            print(
+                f"check iter {it} (seed {eval_seed}): {name} vs master  mean={mean:+.2f}  "
+                f"CI=[{lo:+.2f}, {hi:+.2f}]  n={n}  -> {verdict}", flush=True,
+            )
 
-    result = run_full_tournament(
-        agent_builders, positions,
-        bootstrap_iters=int(eval_cfg.get("bootstrap_iters", 1000)),
-        seed=eval_seed,
-        workers=int(eval_cfg.get("workers", 1)),
-        progress=None,
-    )
+    move_pred = None
+    if held_out:
+        move_pred = _move_prediction(
+            agent_builders, name, held_out,
+            max_decisions=eval_cfg.get("move_pred_max"), skill_decile=skill_decile,
+            progress=progress,
+        )
 
-    mean = float(result.mean(name, "master"))
-    lo, hi = (float(x) for x in result.ci(name, "master"))
-    ship = lo > 0.0
+    return {
+        "iter": it, "mean": mean, "ci": (lo, hi) if mean is not None else None,
+        "n": n, "ship": ship, "matrix_path": str(matrix_path) if matrix_path else None,
+        "seed": eval_seed, "move_pred": move_pred,
+    }
 
-    check_dir = run_dir / "check"
-    check_dir.mkdir(parents=True, exist_ok=True)
-    matrix_path = check_dir / f"iter_{it:05d}_tournament.parquet"
-    from tichu_training.cli.eval_matrix import _write_matrix
-    _write_matrix(result, matrix_path)
+
+# Human-plausibility leash (Q9): a co-trained policy that beats master but has
+# drifted far from human play (cratered play top-1) is a degenerate winner. Flag,
+# don't gate.
+_MOVE_PRED_CRATER_PP = 0.03  # > 3pp play top-1 drop vs master -> flagged
+
+
+def _move_prediction(agent_builders, name, held_out_dir, *, max_decisions, skill_decile, progress):
+    """Move-Prediction-Eval: top-1/top-5 play-prediction accuracy of the cotrain
+    snapshot vs `master` on held-out human games (.tch), and a crater flag on the
+    play head. Reuses the validated `evaluate_move_prediction` (ADR-0025)."""
+    from tichu_training.bsw.parser import parse_tch
+    from tichu_eval.move_prediction import decisions_from_game, evaluate_move_prediction
+
+    games = []
+    for path in sorted(Path(held_out_dir).glob("*.tch")):
+        games.append(parse_tch(path.read_text(encoding="utf-8"), game_id=path.stem))
+    decisions = [d for g in games for d in decisions_from_game(g)]
+    cap = None if max_decisions is None else int(max_decisions)
+
+    out = {}
+    for agent_name in ("master", name):
+        agent = agent_builders[agent_name]()
+        out[agent_name] = evaluate_move_prediction(agent, decisions, max_decisions=cap)
+
+    master_play = out["master"].get("play", {}).get("top1")
+    cotrain_play = out[name].get("play", {}).get("top1")
+    drop = None if (master_play is None or cotrain_play is None) else master_play - cotrain_play
+    flagged = bool(drop is not None and drop > _MOVE_PRED_CRATER_PP)
 
     if progress:
-        verdict = "*** SHIP: CI clears 0 ***" if ship else "not yet (CI spans 0)"
-        print(
-            f"check iter {it} (seed {eval_seed}): {name} vs master  mean={mean:+.2f}  "
-            f"CI=[{lo:+.2f}, {hi:+.2f}]  n={result.n(name, 'master')}  -> {verdict}",
-            flush=True,
-        )
-    return {
-        "iter": it, "mean": mean, "ci": (lo, hi),
-        "n": int(result.n(name, "master")), "ship": ship,
-        "matrix_path": str(matrix_path), "seed": eval_seed,
-    }
+        print(f"  move-prediction ({len(games)} games, {len(decisions)} decisions):", flush=True)
+        for agent_name in ("master", name):
+            play = out[agent_name].get("play", {})
+            t5 = play.get("top5")
+            print(f"    {agent_name:>14s} play top1={play.get('top1', float('nan')):.3f}"
+                  f"  top5={'n/a' if t5 is None else f'{t5:.3f}'}  n={play.get('n', 0)}", flush=True)
+        if drop is not None:
+            tag = "  *** FLAG: play top-1 cratered (>3pp) ***" if flagged else "  (within 3pp — ok)"
+            print(f"    play top-1 drop vs master: {drop:+.3f}{tag}", flush=True)
+    return {"by_agent": out, "play_top1_drop": drop, "flagged": flagged}
 
 
 def main(argv=None) -> int:
@@ -180,12 +237,19 @@ def main(argv=None) -> int:
     parser.add_argument("--iter", type=int, default=None, help="Snapshot iteration to check (default: latest).")
     parser.add_argument("--seed", type=int, default=None, help="Override eval seed (for a robustness sweep of a marginal CI).")
     parser.add_argument("--n-deals", type=int, default=None, help="Override eval n_deals (tighten a marginal CI).")
+    parser.add_argument("--held-out", default=None,
+                        help="Dir of held-out .tch games -> run Move-Prediction-Eval (reported, not gating).")
+    parser.add_argument("--move-pred-only", action="store_true",
+                        help="Skip the tournament; only export + Move-Prediction-Eval (quick human-plausibility check).")
     args = parser.parse_args(argv)
 
     with open(args.config, encoding="utf-8") as fh:
         config = yaml.safe_load(fh)
 
-    result = run_check(config, iteration=args.iter, seed=args.seed, n_deals=args.n_deals)
+    result = run_check(
+        config, iteration=args.iter, seed=args.seed, n_deals=args.n_deals,
+        held_out=args.held_out, tournament=not args.move_pred_only,
+    )
     return 0 if result["ship"] else 1
 
 
