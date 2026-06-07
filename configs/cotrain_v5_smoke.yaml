@@ -26,15 +26,18 @@ critic: { hidden: 512, warmup_iters: 0 }
 perfect_info: true
 update_device: cuda    # exercise the GPU-update path in the smoke (CPU fallback if none)
 rollout_workers: 2     # exercise the process-parallel rollout path in the smoke
+cotrain_wish: true     # exercise the wish co-training head (ADR-0034 addendum)
 
-# Schupfen anchored TIGHTEST (Q5/ADR-0034) — it is the highest-instability net.
+# Schupfen anchored TIGHTEST (Q5/ADR-0034) — it is the highest-instability net. Wish
+# is anchored tight too (sharp lever, thin BC data — let the policy gradient earn it).
 kl:
   play:     { coef: 1.0, target: 0.02, factor: 2.0 }
   schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
   tichu:    { coef: 1.0, target: 0.02, factor: 2.0 }
   grand:    { coef: 1.0, target: 0.02, factor: 2.0 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
 
-entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
 
 snapshot_every: 1
 

@@ -50,11 +50,9 @@ from tichu_training.ppo.rollout import collect_rollout
 
 _NET_TYPES = ("play", "schupfen", "tichu", "grand")
 _BUNDLE_NAME = "train_state.bin"
-# Fixed CSV schema so the per-net dials (which vary by iteration — e.g. Tichu may
-# not fire some iters) always line up across a stop/resume (ADR-0034 attribution).
-_LOG_FIELDS = ["iter", "wall_s", "loss", "value_loss"] + [
-    f"{dt}_{k}" for dt in _NET_TYPES for k in ("policy_loss", "kl", "entropy", "kl_coef")
-]
+# The CSV schema (`log_fields`) is built per-run from the active decision types so the
+# per-net dials always line up across a stop/resume (ADR-0034 attribution); the wish
+# columns appear only when `cotrain_wish` is on, keeping existing run logs unchanged.
 
 
 def _build_models(config) -> dict:
@@ -92,10 +90,10 @@ def _freeze(module):
     return module
 
 
-def _kl_controllers(config) -> dict:
+def _kl_controllers(config, decision_types) -> dict:
     kl = config.get("kl", {})
     out = {}
-    for dt in _NET_TYPES:
+    for dt in decision_types:
         c = kl.get(dt, {})
         out[dt] = AdaptiveKLController(
             coef=float(c.get("coef", 1.0)),
@@ -141,6 +139,16 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             print(f"  update_device={update_device} requested but CUDA unavailable -> CPU", flush=True)
         update_device = "cpu"
     rollout_workers = int(config.get("rollout_workers", 1))
+    # Wish co-training is opt-in (ADR-0034 addendum). OFF -> the wish stays on the
+    # frozen inline seat agent and training is byte-identical to before (no wish data,
+    # so the wish controller/coef/log-columns stay inert). The wish head rides the
+    # play net's trunk either way.
+    cotrain_wish = bool(config.get("cotrain_wish", False))
+    decision_types = _NET_TYPES + (("wish",) if cotrain_wish else ())
+    log_fields = ["iter", "wall_s", "loss", "value_loss"] + [
+        f"{dt}_{k}" for dt in decision_types
+        for k in ("policy_loss", "kl", "entropy", "kl_coef")
+    ]
     gamma = float(ppo.get("gamma", 1.0))
     lam = float(ppo.get("lam", 0.95))
     pool_seed = int(ppo.get("pool_seed", 0))
@@ -169,9 +177,9 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         + [{"params": critic.parameters(), "lr": float(ppo.get("critic_lr", 1e-3))}]
     )
 
-    kl_controllers = _kl_controllers(config)
+    kl_controllers = _kl_controllers(config, decision_types)
     ent_cfg = config.get("entropy", {})
-    ent_coefs = {dt: float(ent_cfg.get(dt, 0.01)) for dt in _NET_TYPES}
+    ent_coefs = {dt: float(ent_cfg.get(dt, 0.01)) for dt in decision_types}
 
     def _sample_positions(iteration: int):
         return generate_full_position_pool(
@@ -184,7 +192,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     resumed = False
     if Path(bundle_path).exists() and not restart:
         payload = load_resume_bundle(bundle_path, models=models, critic=critic, optimizer=optimizer)
-        for dt in _NET_TYPES:
+        for dt in decision_types:
             if dt in payload["kl_coefs"]:
                 kl_controllers[dt].coef = float(payload["kl_coefs"][dt])
         start_iter = int(payload["iteration"])
@@ -195,7 +203,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     if warmup_iters > 0 and not resumed:
         bc_policy = BatchedCoTrainPolicy(
             *(bc_models[dt] for dt in _NET_TYPES), critic,
-            skill_decile=skill_decile, perfect_info=perfect_info,
+            skill_decile=skill_decile, perfect_info=perfect_info, train_wish=cotrain_wish,
         )
         _critic_warmup(
             bc_policy, critic, _sample_positions,
@@ -214,7 +222,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         log_state["last_t"] = now
         if log_state["writer"] is None:
             fh = open(log_path, "a", newline="", encoding="utf-8")
-            writer = csv.DictWriter(fh, fieldnames=_LOG_FIELDS, extrasaction="ignore", restval="")
+            writer = csv.DictWriter(fh, fieldnames=log_fields, extrasaction="ignore", restval="")
             if log_path.stat().st_size == 0:
                 writer.writeheader()
             log_state["fh"], log_state["writer"] = fh, writer
@@ -224,7 +232,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         # Resume Bundle every iteration (atomic, keep-2): a kill loses <=1 iter.
         save_resume_bundle(
             bundle_path, models=models, critic=critic, optimizer=optimizer,
-            kl_coefs={dt: kl_controllers[dt].coef for dt in _NET_TYPES},
+            kl_coefs={dt: kl_controllers[dt].coef for dt in decision_types},
             iteration=iteration + 1, rng_state=capture_rng(),
         )
         # Serving snapshots every snapshot_every (for the offline `check` command).
@@ -264,6 +272,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         parallel = ParallelRollout(
             arch_cfg, critic_hidden=int(config.get("critic", {}).get("hidden", 512)),
             skill_decile=skill_decile, perfect_info=perfect_info, workers=rollout_workers,
+            train_wish=cotrain_wish,
         )
         weights_path = str(run_dir / "_rollout_weights.pt")
 
@@ -284,6 +293,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             learner_team=learner_team, perfect_info=perfect_info,
             on_iteration=_on_iteration, start_iter=start_iter,
             update_device=update_device, rollout_collect=rollout_collect,
+            train_wish=cotrain_wish,
         )
     finally:
         if parallel is not None:
