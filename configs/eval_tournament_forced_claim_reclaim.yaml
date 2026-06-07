@@ -1,0 +1,34 @@
+# EV-probe (ADR-0032), regain-the-lead variant: forced_claim with the *probabilistic*
+# Reclaim Out detector (shed a beatable card while holding an Unbeatable-Lead re-entry —
+# bomb / high single / high pair — to win the lead back). Stage-2-only: not a worst-case
+# guarantee; the n=4000 tournament adjudicates actual EV. vs the bare master.
+#   forced_claim(reclaim) EV > master  -> the master fumbles regain-the-lead outs (a located gap)
+#   forced_claim(reclaim) EV <= master -> the master declines them correctly (like press/bomb/chain)
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 2000
+bootstrap_iters: 1000
+seed: 0
+workers: 6
+
+agents:
+  - name: forced_claim_reclaim
+    factory: forced_claim
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      reclaim: true
+
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\forced_claim\tournament_reclaim.parquet

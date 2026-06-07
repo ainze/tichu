@@ -427,6 +427,30 @@ _Avoid_: AlphaZero (bare — name the loop), RL fine-tune, online training.
 One cycle of the **Search + Learning loop** — self-play with the current `(policy, critic)`, retrain both on the produced targets, export, evaluate, and gate promotion to the next Generation on strength-non-regression vs `master`.
 _Avoid_: epoch, iteration, round (a Round is one deal — distinct).
 
+### Endgame / claim terms
+
+These are **deterministic, card-counted certainties**, categorically distinct from the Monte-Carlo **PIMC** vocabulary (**Determinized World**, **Leaf Rollout**) — never describe a claim-solver result as a "search" or a "rollout". Proposed in the grilling session of 2026-06-05 as the direction after the entire Phase-2 search / search+learning line was empirically falsified (see [ADR-0031](docs/adr/0031-search-and-learning-loop.md) "Final synthesis").
+
+**Slam** (Doppelsieg):
+A team taking **both** the 1st and 2nd out-positions of a Round before either opponent goes out. The Round ends immediately and the team scores **+200**, card points irrelevant. Tracked via `out_order` on PublicState; the engine ends the Round the moment a Slam completes (the doppelsieg double-finalise bug was fixed in [ADR-0030](docs/adr/0030-phase-2-search-design.md) Phase A). Surfaced as `slam_rate` in **Behavioral Telemetry**.
+_Avoid_: double victory, 1-2 finish, doppelsieg (use the English **Slam** in prose; Doppelsieg only as the BSW-log term).
+
+**Unseen Cards**:
+The cards neither in the acting Player's **Hand** nor yet played this Round — `fresh_deck − hand − public.played_cards_this_round`. **Exact common knowledge**: every seat computes it directly from **PublicState**, with no inference. Distinct from the **Belief Model**, which is a *probability distribution* over how the Unseen Cards split among opponents — the Unseen *set* is certain, its *partition* is not.
+_Avoid_: remaining cards, live cards, unknown cards, belief.
+
+**Unbeatable Lead**:
+A **Combination** that, led into an empty **Trick**, no opponent can legally beat — no higher same-type Combination and no **Bomb** is formable from the **Unseen Cards**. A card-counting certainty (worst-case over all opponents pooled into one adversary — exact for a single Trick), not a probability. The single-trick primitive an endgame claim-solver is built on.
+_Avoid_: safe play, sure winner, unbeatable card.
+
+**Guaranteed Out**:
+A line by which the acting Player empties their **Hand** against **worst-case adversarial play by all three other seats** — partner included; a guarantee that relies on the partner stepping aside is not a guarantee — quantified over every assignment of the **Unseen Cards** to the opponents consistent with their `hand_sizes`, the seen-card mask, and any Mahjong wish. Two cases: the **uninterrupted chain** (a sequence of **Unbeatable Leads** from the lead, so no opponent ever plays — the depth-0 case) and **regain-the-lead** (recursive: shed a beatable card, then *prove* a re-entry — e.g. holding the Dragon — forces the lead back against worst-case opponent leads; the Dragon is a guaranteed re-entry only when opponents are *forced* to lead into it, never by assumption). The *final* combo need not be unbeatable — playing your last card ends your round regardless. **Sound by construction — it never certifies a non-guaranteed out** (a false positive would corrupt any EV measurement built on it); recall is the negotiable axis, soundness is not. An endgame phenomenon: early, the large Unseen set leaves Bombs un-ruled-out.
+_Avoid_: forced win, sure out, claim (the bridge term — use Guaranteed Out).
+
+**Claim Solver**:
+The deterministic component that detects an **Unbeatable Lead** and a **Guaranteed Out** from a **PrivateState** by card-counting the **Unseen Cards** — categorically distinct from the Monte-Carlo **PIMC** (no sampling, no **Determinized World**, no **Leaf Rollout**, no learned value). Its first use is a diagnostic **EV-probe**, not a deployed Agent: it fires on two triggers — a **Tichu / Grand-Tichu** caller holding a Guaranteed Out (fulfil the call), and `out_order == (partner,)`, the partner being the sole player out so a Guaranteed Out secures the **Slam**.
+_Avoid_: endgame search, solver (bare), lookahead, claim search.
+
 ## Example dialogue
 
 > **Game designer:** "When the user picks `hard`, they get a stronger AI than `medium`, right?"
