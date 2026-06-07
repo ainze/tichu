@@ -39,7 +39,7 @@ update_device: cuda
 # bound and the M games are independent, so fan them across worker processes. Set to
 # ~(physical cores - 1 or 2) to leave room for the main process + the GPU update.
 # 1 = the single-process path. Each worker is single-threaded (no BLAS oversubscribe).
-rollout_workers: 6
+rollout_workers: 10    # 12-core box: 10 rollout workers + room for main proc & GPU update
 
 # Per-net adaptive KL-anchor to frozen BC. Schupfen anchored TIGHTEST (it is the
 # most sensitive net; cratering it is the demonstrated big downside). Loosen
