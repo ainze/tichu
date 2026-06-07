@@ -287,7 +287,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             print(
                 f"iter {iteration + 1:>4}/{total_iters} | loss {stats['loss']:.3e} "
                 f"v {stats['value_loss']:.3e} | "
-                + " ".join(f"{dt[:2]} kl {stats[f'{dt}_kl']:.3f}" for dt in _NET_TYPES)
+                + " ".join(f"{dt[:2]} kl {stats[f'{dt}_kl']:.3f}" for dt in decision_types)
                 + f" | {row['wall_s']:.1f}s", flush=True,
             )
         if on_iteration is not None:
