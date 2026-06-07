@@ -104,6 +104,33 @@ def test_grand_caller_is_not_also_charged_for_tichu():
     assert r.call_bonus[1] == 0
 
 
+def test_state_observer_exposes_full_gamestate_per_play_decision():
+    # ADR-0033: the Perfect-Info collector needs every seat's hand mid-round.
+    start = deal_for_schupfen(seed=2)
+    agents = tuple(RuleAgent() for _ in range(4))
+    obs_views: list = []
+    pi_states: list = []
+
+    def observer(seat, private_state, action):
+        obs_views.append((seat, private_state, action))
+
+    def state_observer(seat, game_state, action):
+        pi_states.append((seat, game_state, action))
+
+    play_full_round(
+        agents, start, _grand_prefixes(start),
+        observer=observer, state_observer=state_observer,
+    )
+
+    assert len(pi_states) == len(obs_views) > 0
+    for (seat, gs, act), (oseat, pv, oact) in zip(pi_states, obs_views):
+        assert seat == oseat and act == oact
+        # All four hands are visible in the GameState the hook receives.
+        assert len(gs.hands) == 4
+        # The observable view is reconstructible and matches the plain observer.
+        assert gs.private_view(seat) == pv
+
+
 def test_same_agents_and_position_produce_identical_result():
     start = deal_for_schupfen(seed=9)
     prefixes = _grand_prefixes(start)

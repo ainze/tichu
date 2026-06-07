@@ -1,0 +1,58 @@
+# Schupfen-coupling SENSITIVITY probe (ADR-0033 follow-up). This is NOT a +EV hunt:
+# forcing a fixed-(master)-play agent to schupfen differently breaks the BC
+# alignment (play was cloned co-adapted to master's schupfen), so deltas vs master
+# are expected <= 0. The signal is SENSITIVITY — how much play EV moves under a
+# different schupfen, holding play/calls fixed.
+#
+# Read (necessary-not-sufficient for the play<->schupfen coupling hypothesis):
+#   * schupfen_rule ~= master   -> play EV insensitive to a REASONABLE alt schupfen
+#     -> little co-adaptation headroom -> cheap evidence for ACCEPT.
+#   * schupfen_rule materially  != master -> coupled; hypothesis ALIVE but unsettled
+#     (a big drop proves coupling, NOT that a better joint optimum exists -> only
+#     co-training settles it).
+#   * schupfen_random           -> a FLOOR only: a catastrophic schupfen (gifting
+#     high cards to opponents) is trivially << master and is uninformative about the
+#     hypothesis; it just confirms the metric responds to schupfen at all.
+#
+# Run:
+#   py -3.14 -m tichu_training.cli.eval_matrix --config configs/eval_tournament_schupfen_coupling.yaml -v
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 2000
+bootstrap_iters: 1000
+seed: 0
+workers: 10
+
+agents:
+  - name: master
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: schupfen_rule
+    factory: forced_schupfen
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      mode: rule
+
+  - name: schupfen_random
+    factory: forced_schupfen
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+      skill_decile: 9
+      mode: random
+      seed: 0
+
+output: C:\workbench\tichu\data\runs\schupfen_coupling\tournament.parquet

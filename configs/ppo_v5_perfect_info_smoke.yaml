@@ -1,0 +1,51 @@
+# Perfect-Info Critic PPO SMOKE — pipeline shakeout, NOT a training run (ADR-0033).
+#
+# Same as ppo_v5_smoke.yaml but `perfect_info: true`: the critic is a 392-dim
+# ValueBaseline fed the perfect-info features (all four hands) while the policy
+# stays observable (224). Proves the asymmetric path closes end-to-end (rollout
+# threads the GameState, critic warm-up + PPO update value the 392 critic, the
+# Sharpened Checkpoint round-trips) before the long A/B run.
+#
+# Run:
+#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_perfect_info_smoke.yaml
+
+warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+out:        C:\workbench\tichu\data\runs\ppo_v5_perfect_info_smoke\sharpened_smoke.bin
+
+perfect_info: true   # asymmetric Perfect-Info Critic (ADR-0033)
+
+model:
+  skill_dim:     64
+  trunk_hidden:  1024
+  trunk_depth:   4
+  trunk_out_dim: 512
+  head_hidden:   256
+
+critic:
+  hidden:        512
+  warmup_iters:  2     # exercise the perfect-info critic warm-up path
+  warmup_epochs: 2
+
+kl:
+  coef:   1.0
+  target: 0.02
+  factor: 2.0
+
+league:
+  max_snapshots:  5
+  snapshot_every: 1    # snapshot every iteration so the league path is exercised
+
+ppo:
+  iterations:         2
+  positions_per_iter: 8
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ent_coef:           0.01
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

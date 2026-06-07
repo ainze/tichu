@@ -45,6 +45,8 @@ import tichu_training.search.agent  # noqa: F401,E402
 import tichu_training.search.forced_press  # noqa: F401,E402
 # Registers `forced_claim` (ADR-0032 Claim-Solver EV-probe).
 import tichu_training.search.forced_claim  # noqa: F401,E402
+# Registers `forced_schupfen` (ADR-0033 schupfen-coupling EV-probe).
+import tichu_training.search.forced_schupfen  # noqa: F401,E402
 
 
 log = logging.getLogger("eval_matrix")

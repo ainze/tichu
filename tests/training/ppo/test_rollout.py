@@ -26,7 +26,7 @@ class RulePlayPolicy:
     def act_play_batch(self, decisions) -> list[PlayChoice]:
         return [
             PlayChoice(concrete_action=self._rule.act(private_state))
-            for _seat, private_state in decisions
+            for _seat, private_state, _gs in decisions
         ]
 
 
@@ -44,7 +44,7 @@ class TaggingPolicy:
 
     def act_play_batch(self, decisions) -> list[PlayChoice]:
         out = []
-        for seat, private_state in decisions:
+        for seat, private_state, _gs in decisions:
             tag = self._n
             self._n += 1
             self.returned.setdefault(seat, []).append(tag)
@@ -88,7 +88,7 @@ class BatchSpyPolicy:
     def act_play_batch(self, decisions) -> list[PlayChoice]:
         self.batch_sizes.append(len(decisions))
         return [
-            PlayChoice(concrete_action=self._rule.act(ps)) for _seat, ps in decisions
+            PlayChoice(concrete_action=self._rule.act(ps)) for _seat, ps, _gs in decisions
         ]
 
 
@@ -100,9 +100,9 @@ class SeatRecordingPolicy:
         self.seats_seen: list[int] = []
 
     def act_play_batch(self, decisions) -> list[PlayChoice]:
-        self.seats_seen += [seat for seat, _ in decisions]
+        self.seats_seen += [seat for seat, _, _ in decisions]
         return [
-            PlayChoice(concrete_action=self._rule.act(ps)) for _seat, ps in decisions
+            PlayChoice(concrete_action=self._rule.act(ps)) for _seat, ps, _gs in decisions
         ]
 
 

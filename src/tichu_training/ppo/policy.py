@@ -14,6 +14,7 @@ from tichu_engine.legality import legal_actions_for
 from tichu_training.action_space import play_intent_index
 from tichu_training.bc.heads import HEAD_LOGIT_DIMS
 from tichu_training.featurizer import featurize
+from tichu_training.perfect_info import featurize_perfect_info
 from tichu_training.ppo.rollout import PlayChoice
 
 _PLAY_DIM = HEAD_LOGIT_DIMS["play"]
@@ -36,11 +37,18 @@ class BatchedPolicy:
     forward with gradients.
     """
 
-    def __init__(self, model, critic, *, skill_decile: int = 9, generator=None) -> None:
+    def __init__(
+        self, model, critic, *, skill_decile: int = 9, generator=None,
+        perfect_info: bool = False,
+    ) -> None:
         self._model = model
         self._critic = critic
         self._skill_decile = int(skill_decile)  # fixed decile-9 self-play (ADR-0029)
         self._generator = generator
+        # When True, the critic is asymmetric (Perfect-Info Critic, ADR-0033): it
+        # values the 392-dim perfect-info features built from the GameState, while
+        # the policy keeps featurizing the observable PrivateState.
+        self._perfect_info = bool(perfect_info)
 
     def act_play_batch(self, decisions: list[tuple[int, object]]) -> list[PlayChoice]:
         """Decide a tick's worth of Play Decisions in one batched forward.
@@ -53,9 +61,12 @@ class BatchedPolicy:
         """
         masks = torch.zeros(len(decisions), _PLAY_DIM, dtype=torch.bool)
         feats: list[np.ndarray] = []
+        pi_feats: list[np.ndarray] = []  # perfect-info; populated only when asymmetric
         resolvers: list[dict[int, object]] = []
-        for row, (_seat, private_state) in enumerate(decisions):
+        for row, (seat, private_state, game_state) in enumerate(decisions):
             feats.append(featurize(private_state))
+            if self._perfect_info:
+                pi_feats.append(featurize_perfect_info(game_state, seat))
             by_index: dict[int, object] = {}
             for action in legal_actions_for(private_state):
                 try:
@@ -68,8 +79,14 @@ class BatchedPolicy:
             resolvers.append(by_index)
 
         features = torch.from_numpy(np.stack(feats))
+        critic_features = (
+            torch.from_numpy(np.stack(pi_feats)) if self._perfect_info else None
+        )
         skill = torch.full((len(decisions),), self._skill_decile, dtype=torch.long)
-        out = self.sample(features, skill, masks, generator=self._generator)
+        out = self.sample(
+            features, skill, masks,
+            critic_features=critic_features, generator=self._generator,
+        )
 
         choices: list[PlayChoice] = []
         for row in range(len(decisions)):
@@ -82,6 +99,9 @@ class BatchedPolicy:
                     value=float(out.values[row]),
                     features=features[row],
                     legal_mask=masks[row],
+                    critic_features=(
+                        critic_features[row] if critic_features is not None else None
+                    ),
                 )
             )
         return choices
@@ -92,12 +112,17 @@ class BatchedPolicy:
         skill: torch.Tensor,
         legal_masks: torch.Tensor,
         *,
+        critic_features: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
     ) -> SampledBatch:
         with torch.no_grad():
             play_logits = self._model(features, skill)["play"]
             indices, logprobs = sample_masked(play_logits, legal_masks, generator=generator)
-            values = self._critic(features)
+            # Asymmetric critic values the perfect-info features when given; else
+            # the symmetric path values the same observable features (ADR-0033).
+            values = self._critic(
+                critic_features if critic_features is not None else features
+            )
         return SampledBatch(indices=indices, logprobs=logprobs, values=values)
 
 

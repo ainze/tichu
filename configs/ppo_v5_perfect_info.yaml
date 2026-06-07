@@ -1,0 +1,64 @@
+# Perfect-Info Critic PPO Refine (featurizer v5) — ADR-0033.
+#
+# The asymmetric-critic test: identical to ppo_v5.yaml (the flat symmetric run:
+# +2.1 vs master, CI [-4.74, +9.08]) EXCEPT `perfect_info: true` — the critic is
+# a 392-dim ValueBaseline fed all four hands at training time (PerfectDou PTIE),
+# while the deployed policy stays observable (224). A clean A/B isolating whether
+# the symmetric critic was the confound behind the flat PPO result.
+#
+# Run (heavy — background + poll the CSV, per env notes):
+#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_perfect_info.yaml
+#
+# DECISION (ADR-0033 "Result"):
+#   * BUILD  if Tournament-vs-master EV CI excludes 0 positive (vs flat's +2.1),
+#            with value_loss markedly below the flat run's ~6-7k floor (mechanism)
+#            and caller_bomb_passivity moving (flat plateaued ~0.285).
+#   * KILL -> ACCEPT if EV stays within master's noise DESPITE a strong perfect
+#            critic — decisive evidence the critic was never the confound.
+#
+# AFTER training (separate steps): export -> eval_matrix --mode tournament (full
+# zoo, incl. `master` + flat sharpened) and --mode behavioral. The exported
+# policy is observable-only (the perfect-info critic is train-time-only, not shipped).
+
+warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+out:        C:\workbench\tichu\data\runs\ppo_v5_perfect_info\sharpened.bin
+
+perfect_info: true   # asymmetric Perfect-Info Critic (ADR-0033) — the only change vs ppo_v5.yaml
+
+model:
+  skill_dim:     64
+  trunk_hidden:  1024
+  trunk_depth:   4
+  trunk_out_dim: 512
+  head_hidden:   256
+
+# 392-dim Perfect-Info Critic, warm-started under the frozen BC policy so the
+# perfect leaf carries real signal before the policy moves (PerfectDou-faithful).
+critic:
+  hidden:        512
+  warmup_iters:  20
+  warmup_epochs: 3
+
+kl:
+  coef:   1.0
+  target: 0.04
+  factor: 2.0
+
+league:
+  max_snapshots:  5
+  snapshot_every: 10
+
+ppo:
+  iterations:         200    # smoke budget; extend if the signal is alive
+  positions_per_iter: 256
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ent_coef:           0.02
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          3.0e-3
+  skill_decile:       9
+  learner_team:       0
