@@ -9,7 +9,12 @@ from tichu_eval.full_position_pool import generate_full_position_pool
 from tichu_eval.play_full import play_full_round
 from tichu_ml.rule_agent import RuleAgent
 
-from tichu_training.ppo.rollout import PlayChoice, collect_rollout
+from tichu_training.ppo.rollout import (
+    CallChoice,
+    PlayChoice,
+    SchupfenChoice,
+    collect_rollout,
+)
 
 
 class RulePlayPolicy:
@@ -174,6 +179,145 @@ def test_terminal_reward_includes_grand_tichu_call_bonus():
     # A Grand-Tichu by a team-0 seat shifts the team-relative outcome by exactly
     # +/-200 (made or busted); nothing else changes.
     assert abs(reward_call - reward_plain) == 200
+
+
+def test_terminal_reward_includes_tichu_call_bonus():
+    pos = generate_full_position_pool(seed=3, n=1)[0]
+
+    # Identical RuleAgent play in both runs (Play comes from the policy); the only
+    # difference is seat 0 (learner team) calling regular Tichu — solicited at its
+    # first non-Pass Play (ADR-0018), the timing `play_full_round` uses. The driver
+    # used to drop Tichu entirely (ADR-0029 froze calls); the full-stack collector
+    # must solicit it so the +/-100 bonus lands in `round_outcome` (ADR-0034).
+    calling = [ScriptedCaller(tichu=True), RuleAgent(), RuleAgent(), RuleAgent()]
+    plain = [RuleAgent() for _ in range(4)]
+
+    r_call = collect_rollout([pos], RulePlayPolicy(), learner_team=0, seat_agents=calling)
+    r_plain = collect_rollout([pos], RulePlayPolicy(), learner_team=0, seat_agents=plain)
+
+    reward_call = next(t.reward for t in r_call if t.seat == 0)
+    reward_plain = next(t.reward for t in r_plain if t.seat == 0)
+
+    # A Tichu by a team-0 seat shifts the team-relative outcome by exactly +/-100
+    # (made or busted); play is identical, so nothing else moves.
+    assert abs(reward_call - reward_plain) == 100
+
+
+class SchupfenTaggingPolicy:
+    """Plays RuleAgent moves AND serves Schupfen (via RuleAgent) but stamps each
+    schupfen with a globally-unique tag, recording which seats it was asked — so a
+    test can prove learner Schupfen is routed to the policy and recorded once per
+    learner seat, tagged, with the bookkeeping the policy returned (ADR-0034)."""
+
+    def __init__(self) -> None:
+        self._rule = RuleAgent()
+        self.schupfen_seats: list[int] = []
+        self._n = 1000
+
+    def act_play_batch(self, decisions) -> list[PlayChoice]:
+        return [PlayChoice(concrete_action=self._rule.act(ps)) for _s, ps, _gs in decisions]
+
+    def act_schupfen_batch(self, decisions) -> list[SchupfenChoice]:
+        out = []
+        for seat, ps, _gs in decisions:
+            tag = self._n
+            self._n += 1
+            self.schupfen_seats.append(seat)
+            out.append(
+                SchupfenChoice(
+                    concrete_action=self._rule.act(ps),
+                    card_indices=(tag, tag, tag),
+                    logprob=float(-tag),
+                    value=float(tag),
+                )
+            )
+        return out
+
+
+def test_records_learner_schupfen_when_policy_supports_it():
+    pos = generate_full_position_pool(seed=0, n=1)[0]
+    learner = SchupfenTaggingPolicy()
+    # Opponent has no act_schupfen_batch -> opponent Schupfen stays on the frozen
+    # inline seat agent, so only learner seats reach the learner's schupfen method.
+    trajs = collect_rollout(
+        [pos], learner, opponent_policy=RulePlayPolicy(), learner_team=0
+    )
+    by_seat = {t.seat: t for t in trajs}
+
+    for seat in (0, 2):
+        sch = [s for s in by_seat[seat].steps if s.decision_type == "schupfen"]
+        assert len(sch) == 1, f"seat {seat} should schupfen exactly once"
+        # Recorded with exactly the bookkeeping the policy returned.
+        assert sch[0].logprob == float(-sch[0].intent_index[0])
+        assert sch[0].value == float(sch[0].intent_index[0])
+    # Only learner-team seats were routed to the learner's schupfen method.
+    assert set(learner.schupfen_seats) == {0, 2}
+
+
+class CallTaggingPolicy:
+    """Plays RuleAgent moves and serves Calls via `act_call_batch`, scripting seat 0
+    to call Grand-Tichu and seat 2 to call Tichu, stamping each solicitation with a
+    unique tag. Records every call decision (both call and skip are policy actions to
+    train on), so a test can prove learner calls are routed + recorded with the right
+    `decision_type`, and that a Grand-Tichu caller is never asked Tichu (ADR-0034)."""
+
+    def __init__(self) -> None:
+        self._rule = RuleAgent()
+        self.solicited: list[tuple[str, int]] = []
+        self._n = 5000
+
+    def act_play_batch(self, decisions) -> list[PlayChoice]:
+        return [PlayChoice(concrete_action=self._rule.act(ps)) for _s, ps, _gs in decisions]
+
+    def act_call_batch(self, kind: str, decisions) -> list[CallChoice]:
+        out = []
+        for seat, _ps, _gs in decisions:
+            tag = self._n
+            self._n += 1
+            self.solicited.append((kind, seat))
+            called = (kind == "grand" and seat == 0) or (kind == "tichu" and seat == 2)
+            out.append(CallChoice(called=called, logprob=float(-tag), value=float(tag)))
+        return out
+
+
+def test_records_learner_calls_and_grand_supersedes_tichu():
+    pos = generate_full_position_pool(seed=0, n=1)[0]
+    learner = CallTaggingPolicy()
+    trajs = collect_rollout(
+        [pos], learner, opponent_policy=RulePlayPolicy(), learner_team=0
+    )
+    by_seat = {t.seat: t for t in trajs}
+
+    def kinds(seat):
+        return [s.decision_type for s in by_seat[seat].steps if s.decision_type in ("grand", "tichu")]
+
+    # Every learner seat is asked Grand at deal time. Seat 0 called Grand, so it is
+    # NOT asked Tichu; seat 2 declined Grand, so it IS asked Tichu at first non-Pass.
+    assert kinds(0) == ["grand"]
+    assert kinds(2) == ["grand", "tichu"]
+    # Only learner seats were routed to the learner's call method.
+    assert {seat for _kind, seat in learner.solicited} == {0, 2}
+    # Recorded with the bookkeeping the policy returned (logprob == -tag).
+    for seat in (0, 2):
+        for s in by_seat[seat].steps:
+            if s.decision_type in ("grand", "tichu"):
+                assert s.logprob == float(-s.value)
+
+
+def test_outcome_matches_trusted_runner_with_a_tichu_caller():
+    # ADR-0034 parity gate: the full-stack collector, driven by the same agents as
+    # the trusted `play_full_round`, must reach the same Round outcome even with a
+    # caller in play — so it inherits the runner's validated call/play dynamics.
+    pos = generate_full_position_pool(seed=0, n=1)[0]
+    agents = [ScriptedCaller(tichu=True), RuleAgent(), RuleAgent(), RuleAgent()]
+
+    ref = play_full_round(tuple(agents), pos.state, pos.grand_prefixes)
+    expected_team0_relative = ref.total[0] - ref.total[1]
+
+    trajs = collect_rollout(
+        [pos], RulePlayPolicy(), learner_team=0, seat_agents=agents
+    )
+    assert all(t.reward == expected_team0_relative for t in trajs)
 
 
 def test_records_each_learner_play_decision_in_order_and_no_opponent_leak():
