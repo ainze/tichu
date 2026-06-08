@@ -42,7 +42,9 @@ COPY configs/serve_docker.yaml /app/configs/serve_docker.yaml
 # Bake the selected model. The build-context "models" is the export root; MODEL
 # names the subdir. Its contents (policy.pt + the 3 standalone nets) flatten
 # into /app/models/ to match the stable paths in serve_docker.yaml.
-ARG MODEL=bc_full_100k_v5
+# Default = cotrain_wish_v5 (full-stack co-training + wish head, ADR-0034; the
+# shipped policy, +8.37 vs master @ 20k). build.ps1 overrides via --build-arg.
+ARG MODEL=cotrain_wish_v5
 COPY --from=models ${MODEL}/ /app/models/
 
 USER tichu
