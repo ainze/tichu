@@ -264,10 +264,27 @@ co-training in the loop; **Dragon-give remains FROZEN** as recommended.
   `cotrain_v5` resume). Healthy: `wish_kl_coef` settled flat at 4.0 (1→2→4 early, then never
   crept toward the clamp — the head is anchored, **not pinned-to-decline**); `wish_entropy`
   steady ~1.56 (14-way max ≈ 2.64), so the head holds a real spread, not a collapse to decline.
-- **Strength read (not yet 20k-confirmed):** vs `master` on the seat-swap Tournament,
-  iter 200 `+5.60` CI [+0.87, +10.36] → iter 800 `+7.57` CI [+2.92, +12.32] (n=8000 each).
-  This **exceeds the shipped no-wish `cotrain_v5` (+6.29)** — consistent with the wish lever
-  adding value. Confirm a positive snapshot at `--n-deals 20000` + seeds before treating the
-  delta as final.
+- **Strength read:** vs `master` on the seat-swap Tournament, the run climbed then **plateaued
+  by ~iter 800 around +7**: iter 200 `+5.60` → 800 `+7.57` → 1000 `+6.82` → 6225 `+7.13` (all
+  n=8000, overlapping CIs). This **exceeds the shipped no-wish `cotrain_v5` (+6.29)** — the wish
+  lever adds value. Decomposition (iter 1000): ~half the edge is call-bonus (+3.25), ~half
+  play-only (+3.57); round win-rate ~50.6% (the edge is magnitude-driven, not frequency). The
+  plateau is a stable, KL-constrained equilibrium (every coef flat; `wish_kl` parked at its 0.008
+  target). **SHIP NUMBER LOCKED (2026-06-08): iter-6225 at n=40k = `+8.37` CI [+6.22, +10.45]**
+  (seed 1). Higher than the 4k reads because those covered only the first 4000 pool deals (a low
+  sample); the full 20000-deal estimate is the trustworthy one — comfortably above no-wish
+  `cotrain_v5` (+6.29).
+- **Wish-leash loosening — TESTED, NEGATIVE (2026-06-08).** Tested whether the +7 plateau was a
+  wish-leash artifact: `configs/cotrain_wish_v6_loose.yaml` (= v5 but the wish KL target anneals
+  **0.008→0.02 over [750,2750]**; play/schupfen/calls unchanged). The head fully used the slack
+  (`wish_kl` 0.008→0.022, `wish_coef` 4→1). **It HURT**, not helped: at matched n=40k, v6-loose
+  iter-3000 = `+5.03` CI [+2.71,+6.99] vs **v5-tight iter-6225 = `+8.37` CI [+6.22,+10.45]** — a
+  ~3.3-pt drop, CIs barely touching (near-separated), with BOTH channels down (call +3.25→+2.57,
+  play +3.57→+2.47) and win-rate → 50.0% (dead even). Cause = the under-fit critic on lever
+  decisions (see memory `project_cotrain_learning_dynamics`): unreliable wish-value → looser leash
+  lets the head wander into worse wishes, corrupting the shared trunk (so play+calls fall too).
+  **The tight 0.008 anchor is correct; the +7 plateau is a value-signal-limited optimum, not a leash
+  artifact. Don't re-run leash-loosening expecting gains** — the bottleneck is critic generalization
+  on rare/lever states, not the KL targets.
 - **Dragon-give:** left frozen on RuleAgent (shorter-handed opponent) per the recommendation;
   revisit only if a measured plateau traces to it specifically.

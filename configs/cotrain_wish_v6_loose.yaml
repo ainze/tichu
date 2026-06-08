@@ -1,0 +1,89 @@
+# Ceiling experiment: cotrain_wish with a LOOSENED (annealed) wish KL leash.
+#
+# cotrain_wish_v5 converged to ~+7 team-rel pts/round vs master and PLATEAUED by
+# ~iter 800 (confirmed flat through iter 6225). Diagnosis: a KL-CONSTRAINED optimum,
+# not a compute limit — wish_kl sat exactly at its 0.008 target the whole run (the
+# leash was actively holding the wish head near BC's always-decline), while every
+# controller was in stable equilibrium (wish_coef flat 4.0, never saturating).
+#
+# Hypothesis: the wish lever has more headroom than the tight 0.008 anchor allows.
+# This run is IDENTICAL to cotrain_wish_v5 except it ANNEALS the wish target
+# 0.008 -> 0.02 (mirrors the validated cotrain_v5 schupfen anneal mechanism), so the
+# wish head stays BC-grounded during the early climb, then is let off the leash to
+# depart further from always-decline as the policy matures. play/schupfen/calls are
+# UNCHANGED from v5 — wish is the only variable, so any delta vs v5 is attributable
+# to the wish leash.
+#
+# FRESH run (new run_dir), warm-started from BC like v5 — so v5 (+7) is preserved
+# untouched as the A/B baseline. Start it FRESH (do NOT resume a v5 bundle):
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_wish_v6_loose.yaml
+#
+# Check vs master on a snapshot ladder (NOT in-loop; stop training first — OOM):
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_wish_v6_loose.yaml --iter <N>
+# Compare its play-only / total deltas + round win-rate to cotrain_wish_v5.
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v5\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_wish_v6_loose
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+# Perfect-Info Critic ON (train-time only; the shipped policy stays observable).
+critic: { hidden: 512, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10    # 12-core box: 10 rollout workers + room for main proc & GPU update
+
+# Wish co-training ON (ADR-0034 addendum, option (a)): 14-way head on the play trunk.
+cotrain_wish: true
+
+# Per-net adaptive KL-anchor to frozen BC. THE ONLY CHANGE vs cotrain_wish_v5: the
+# wish target is ANNEALED 0.008 -> 0.02 over [750, 2750] (kept tight while the policy
+# forms, loosened as it matures), mirroring cotrain_v5's schupfen anneal. play /
+# schupfen / tichu / grand are byte-identical to v5 so the wish leash is the sole
+# variable. Revisit (loosen play/schupfen too) only after reading this run's verdict.
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.02, anneal_start: 750, anneal_iters: 2000 }
+
+# Modest entropy everywhere — the ADR-0029 escalation showed MORE play entropy hurt.
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+# Offline strength read (the separate `check_cotrain` command — NOT run in-loop):
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # a ceiling, not a plan — run for days; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
