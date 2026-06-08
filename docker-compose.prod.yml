@@ -1,0 +1,60 @@
+# Production deployment: Tichu Nuxt backend + inference service (ADR-0027/0034).
+#
+# Two services on one Compose network. The backend reaches the bot by Compose
+# SERVICE NAME — `http://tichu-inference:8000` — NOT `localhost` (that resolves
+# to the backend's own container) and NOT the host-published port. Using
+# localhost here is the classic mistake that makes every bot call fail with
+# "fetch failed" and silently fall back to the rule bot.
+#
+# Secrets are NOT committed: this file reads ${VARS} from a local .env (see
+# .env.example, and the .env entry in .gitignore). Deploy with:
+#
+#   cp .env.example .env      # then fill in real secrets
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml logs -f tichu_production
+#
+# Image tags are pinned via .env (NUXT_TAG / INFERENCE_TAG) so a release is a
+# tag bump + `up -d`, not an edit to this file.
+
+services:
+  tichu_production:
+    image: ${REGISTRY}/tichu-nuxt:${NUXT_TAG}
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+      # In-network address of the inference service: Compose service name + its
+      # INTERNAL container port. This is the bot endpoint base; the app appends
+      # /act and /call. (See the long note at the top of this file.)
+      BOT_API_URL: http://tichu-inference:8000
+      BOT_API_TOKEN: ${BOT_API_TOKEN:-none}
+    volumes:
+      # RDS TLS root bundle, mounted read-only (matches the sslrootcert path in
+      # DATABASE_URL). The .pem lives on the host, not in the repo.
+      - ./rds-global-bundle.pem:/etc/ssl/rds-global-bundle.pem:ro
+    depends_on:
+      # Don't start the backend until the bot reports healthy (the backend still
+      # falls back gracefully if the bot dies later, but this avoids a cold-start
+      # window of fallbacks on deploy).
+      tichu-inference:
+        condition: service_healthy
+
+  tichu-inference:
+    image: ${REGISTRY}/tichu:${INFERENCE_TAG}
+    container_name: tichu-inference
+    restart: unless-stopped
+    # Host port publish is OPTIONAL — container-to-container calls use the
+    # Compose network, not this mapping. Keep it only if you want to reach the
+    # inference API from the host (e.g. for debugging); drop it to keep the bot
+    # private to the network.
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
