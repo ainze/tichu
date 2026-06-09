@@ -47,6 +47,13 @@ import tichu_training.search.forced_press  # noqa: F401,E402
 import tichu_training.search.forced_claim  # noqa: F401,E402
 # Registers `forced_schupfen` (ADR-0033 schupfen-coupling EV-probe).
 import tichu_training.search.forced_schupfen  # noqa: F401,E402
+# Registers the deep-research heuristic guardrail probes (forced_split_aces,
+# forced_follow_low, forced_support_tichu, forced_keep_partner_trick,
+# forced_dragon_lastout) — 2026-06-08 premise tests.
+import tichu_training.search.heuristic_probes  # noqa: F401,E402
+# Registers the caller-pressure probes (forced_press_opp_caller, forced_yield_opp_caller)
+# — 2026-06-08 divergence-mined premise tests.
+import tichu_training.search.caller_pressure_probes  # noqa: F401,E402
 
 
 log = logging.getLogger("eval_matrix")
