@@ -1,22 +1,14 @@
-# Full-stack co-training PPO + WISH head (ADR-0034 + addendum) — fresh all-in run.
+# HEAD-TO-HEAD EVAL VARIANT of cotrain_wish_v5.yaml — check_cotrain ONLY, never train.
 #
-# Identical to cotrain_v5.yaml but with the Mahjong-wish ALSO co-trained (option (a):
-# the wish is a 14-way head on the play net's trunk; it rides the play weights). The
-# wish lever is high-leverage and was 100% UNUSED before (RuleAgent always declined):
-# a probe showed even a naive fixed wish heuristic gains ~+10 team-rel pts/round vs
-# decline, and the head can always relearn "decline" (index 0), so it strictly
-# dominates the frozen behavior. See the ADR-0034 addendum.
+# Identical to cotrain_wish_v5.yaml except `eval.master` points at the run's OWN
+# iter_06225 export (the locked pure-self-play ship snapshot, +8.37 [+6.22,+10.45]
+# vs BC master at n=40k). Running check_cotrain with this config tournaments a later
+# (league-resumed) snapshot DIRECTLY against iter_06225, which is the improvement
+# bar: head-to-head CI > 0 means the league resume beat the previous best.
 #
-# This is a SEPARATE run from cotrain_v5 (different run_dir) — start it FRESH so the
-# wish head is sharpened from BC alongside play/schupfen/calls from iter 0. Do NOT
-# resume a cotrain_v5 bundle into this config.
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_wish_v5_vs_iter06225.yaml [--iter N]
 #
-#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_wish_v5.yaml
-#       --restart   # only to throw away progress and start fresh
-#
-# Strength reads are OUT OF LOOP (OOM safety): run `check_cotrain` on a snapshot.
-# Poll progress via {run_dir}/ppo_log.csv (per-net dials incl. wish_*, flushed each iter).
-# `iterations` is a target ceiling — bump it to extend; resume continues toward it.
+# Do NOT pass this config to train_cotrain (it shares run_dir with the live run).
 
 warm_start:
   play:     C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
@@ -90,11 +82,12 @@ eval:
   bootstrap_iters: 1000
   seed:           0
   workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  # "master" here = the previous best snapshot (iter_06225), NOT the BC baseline.
   master:
-    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
-    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
-    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
-    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\grand_tichu_call.pt
 
 ppo:
   iterations:         100000   # a ceiling, not a plan — run for days; resume continues

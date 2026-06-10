@@ -59,6 +59,25 @@ def _opponent_models():
     return _WORKER["opp_models"]
 
 
+def _league_opponent(opp_weights_path: str, *, skill_decile, seed: int, train_wish: bool):
+    """Build the frozen league opponent for one task: a separate net set loaded from
+    `opp_weights_path`. Its critic is unused (opponent choices aren't recorded), so
+    reuse the learner's. When the run co-trains the wish, the opponent wishes via its
+    own head too — its snapshot's full policy, matching how the eval master plays."""
+    from tichu_training.ppo.cotrain import BatchedCoTrainPolicy
+
+    opp = _opponent_models()
+    opp_state = torch.load(opp_weights_path, map_location="cpu", weights_only=False)
+    for key, module in opp.items():
+        module.load_state_dict(opp_state["models"][key])
+    return BatchedCoTrainPolicy(
+        opp["play"], opp["schupfen"], opp["tichu"], opp["grand"], _WORKER["critic"],
+        skill_decile=skill_decile, perfect_info=_WORKER["perfect_info"],
+        generator=torch.Generator().manual_seed(int(seed) + 7919),
+        train_wish=bool(train_wish),
+    )
+
+
 def _rollout_chunk(task):
     from tichu_training.ppo.cotrain import BatchedCoTrainPolicy
     from tichu_training.ppo.rollout import collect_rollout
@@ -80,16 +99,9 @@ def _rollout_chunk(task):
     if opp_weights_path is None:
         opponent = learner  # pure self-play: opponents share the learner's weights
     else:
-        # League: opponent seats play a separate frozen weight file. Its critic is
-        # unused (opponent choices aren't recorded), so reuse the learner's critic.
-        opp = _opponent_models()
-        opp_state = torch.load(opp_weights_path, map_location="cpu", weights_only=False)
-        for key, module in opp.items():
-            module.load_state_dict(opp_state["models"][key])
-        opponent = BatchedCoTrainPolicy(
-            opp["play"], opp["schupfen"], opp["tichu"], opp["grand"], critic,
-            skill_decile=skill_decile, perfect_info=_WORKER["perfect_info"],
-            generator=torch.Generator().manual_seed(int(seed) + 7919),
+        opponent = _league_opponent(
+            opp_weights_path, skill_decile=skill_decile, seed=int(seed),
+            train_wish=bool(train_wish),
         )
     return collect_rollout(
         positions, learner, opponent_policy=opponent, learner_team=learner_team
