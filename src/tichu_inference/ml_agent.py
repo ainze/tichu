@@ -29,14 +29,18 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from tichu_engine.combinations import FourOfAKindBomb, StraightFlushBomb
 from tichu_engine.legality import (
+    PASS,
     ConcreteAction,
     DragonGive,
     DragonGivePending,
     MahjongWish,
     MahjongWishPending,
+    Pass,
     SchupfenPass,
     SchupfenPending,
+    _cards_in,
     legal_actions_for,
 )
 from tichu_engine.state import PrivateState
@@ -60,6 +64,37 @@ from tichu_training.featurizer import _combination_to_action_index
 log = logging.getLogger(__name__)
 
 _NEUTRAL_SKILL = 10  # the embedding's neutral / cold-start row
+
+_BOMB_TYPES = (FourOfAKindBomb, StraightFlushBomb)
+
+
+def suppress_partner_trick_bomb(private_state, action, legal) -> bool:
+    """Keep-partner-trick guard: True iff `action` bombs a trick the agent's own
+    partner already tops (the bomb would only steal the partner's lead) and a Pass
+    is legal. Carve-out: a (Grand-)Tichu caller going OUT on that bomb keeps it —
+    banking the call outweighs the stolen lead.
+
+    Shipped on logic + live observation per the 2026-06-08 probe arc
+    (`forced_keep_partner_trick`): the trigger fires ~3/200 deals, below what a
+    tournament CI can adjudicate, but the blunder was observed in real play and
+    passing is near-always correct in-trigger."""
+    if not isinstance(action, _BOMB_TYPES):
+        return False
+    pub = private_state.public
+    if pub.pending_decision is not None:
+        return False
+    partner = (private_state.player + 2) % 4
+    if pub.trick.leader != partner:
+        return False
+    if not any(isinstance(a, Pass) for a in legal):
+        return False
+    is_caller = (
+        private_state.player in pub.tichu_callers
+        or private_state.player in pub.grand_tichu_callers
+    )
+    if is_caller and len(_cards_in(action)) == len(private_state.hand):
+        return False
+    return True
 
 
 def load_policy_module(path: str | Path):
@@ -91,6 +126,7 @@ class MLAgent(Agent):
         fallback_rng: random.Random | None = None,
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
+        partner_trick_guard: bool = True,
     ) -> None:
         # Load each artifact from its path, then hand off to the shared
         # initialiser. `from_loaded` is the path-free entry point the serve
@@ -104,6 +140,7 @@ class MLAgent(Agent):
             fallback_rng=fallback_rng,
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
+            partner_trick_guard=partner_trick_guard,
         )
 
     @classmethod
@@ -118,6 +155,7 @@ class MLAgent(Agent):
         fallback_rng: random.Random | None = None,
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
+        partner_trick_guard: bool = True,
     ) -> "MLAgent":
         """Build an agent over already-loaded modules, skipping disk I/O.
 
@@ -135,6 +173,7 @@ class MLAgent(Agent):
             fallback_rng=fallback_rng,
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
+            partner_trick_guard=partner_trick_guard,
         )
         return self
 
@@ -149,6 +188,7 @@ class MLAgent(Agent):
         fallback_rng: random.Random | None,
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
+        partner_trick_guard: bool = True,
     ) -> None:
         # Skill Embedding input fed to every network at inference. 0..9 are the
         # BSW skill deciles (9 = strongest players); 10 is the neutral/cold-start
@@ -175,6 +215,7 @@ class MLAgent(Agent):
         self._grand_call = grand_call
         self._rule_fallback = RuleAgent()
         self._rng = fallback_rng or random.Random(0)
+        self._partner_trick_guard = bool(partner_trick_guard)
         self.last_fallback_used: bool = False
 
     @staticmethod
@@ -271,7 +312,12 @@ class MLAgent(Agent):
         ranked = _rank_legal_by_logits(legal, play_logits)
         if not ranked:
             raise RuntimeError("no legal action mapped into the action space")
-        return ranked[0]
+        choice = ranked[0]
+        if self._partner_trick_guard and suppress_partner_trick_bomb(
+            private_state, choice, legal
+        ):
+            return PASS
+        return choice
 
     def _rank_play_actions(self, private_state: PrivateState) -> list[ConcreteAction]:
         legal = list(legal_actions_for(private_state))
