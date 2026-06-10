@@ -11,7 +11,12 @@
 
 .EXAMPLE
   ./docker/build.ps1
-  # builds tichu-inference:bc-100k-v5 from C:\workbench\tichu\data\export\bc_full_100k_v5
+  # builds tichu-inference:cotrain-wish-v5 from C:\workbench\tichu\data\export\cotrain_wish_v5
+  # (full-stack co-training + wish head, ADR-0034; iter-6225 snapshot, +8.37 vs master @ 20k).
+
+.EXAMPLE
+  ./docker/build.ps1 -Model bc_full_100k_v5 -Tag tichu-inference:bc-100k-v5
+  # the previous BC-only serving model.
 
 .EXAMPLE
   ./docker/build.ps1 -Model awr_full_100k_v5_round -Tag tichu-inference:awr-100k-v5
@@ -19,9 +24,9 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Model        = "bc_full_100k_v5",
+    [string]$Model        = "cotrain_wish_v5",
     [string]$ExportRoot   = "C:\workbench\tichu\data\export",
-    [string]$Tag          = "tichu-inference:bc-100k-v5",
+    [string]$Tag          = "tichu-inference:cotrain-wish-v5",
     [string]$TorchVersion = "2.11.0"
 )
 

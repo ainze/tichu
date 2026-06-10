@@ -10,7 +10,7 @@
 
 services:
   tichu-inference:
-    image: tichu-inference:bc-100k-v5
+    image: tichu-inference:cotrain-wish-v5
     container_name: tichu-inference
     ports:
       - "8000:8000"
