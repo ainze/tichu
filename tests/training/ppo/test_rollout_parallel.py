@@ -12,7 +12,13 @@ from tichu_eval.full_position_pool import generate_full_position_pool
 from tichu_training.awr.value_baseline import ValueBaseline
 from tichu_training.cli.train_cotrain import _build_models
 from tichu_training.perfect_info import PERFECT_INFO_DIM
-from tichu_training.ppo.rollout_parallel import ParallelRollout, save_rollout_weights
+from tichu_training.ppo.rollout import _supports_wish
+from tichu_training.ppo.rollout_parallel import (
+    ParallelRollout,
+    _init_worker,
+    _league_opponent,
+    save_rollout_weights,
+)
 
 _ARCH = {
     "model": dict(skill_dim=8, trunk_hidden=32, trunk_depth=1, trunk_out_dim=16, head_hidden=16),
@@ -69,3 +75,21 @@ def test_parallel_rollout_uses_a_distinct_league_opponent(tmp_path):
     assert len(trajs) == 8
     assert {t.seat for t in trajs} == {0, 2}
     assert all(len(t.steps) > 0 and t.reward is not None for t in trajs)
+
+
+def test_league_opponent_honors_train_wish(tmp_path):
+    # The Mahjong-wish is part of the policy (ADR-0034 addendum): when the run
+    # co-trains the wish, a league opponent must wish via its own head exactly like
+    # the learner — falling back to the frozen always-decline seat agent would be a
+    # train/eval mismatch (the eval master wishes via its BC head too).
+    torch.manual_seed(0)
+    models = _build_models(_ARCH)
+    critic = ValueBaseline(PERFECT_INFO_DIM, hidden=16)
+    opp_w = tmp_path / "opp.pt"
+    save_rollout_weights(str(opp_w), models, critic)
+
+    _init_worker(_ARCH, 16, True)
+    wishing = _league_opponent(str(opp_w), skill_decile=9, seed=0, train_wish=True)
+    declining = _league_opponent(str(opp_w), skill_decile=9, seed=0, train_wish=False)
+    assert _supports_wish(wishing)
+    assert not _supports_wish(declining)
