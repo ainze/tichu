@@ -47,6 +47,18 @@ update_device: cuda
 # 1 = the single-process path. Each worker is single-threaded (no BLAS oversubscribe).
 rollout_workers: 10    # 12-core box: 10 rollout workers + room for main proc & GPU update
 
+# Opponent league (ADR-0034 league lever) — ENABLED on the 2026-06-10 resume from
+# iter ~6225. Rationale: the pure-self-play run plateaued at its locked ship read
+# (+8.37 [+6.22,+10.45] vs master, n=40k @ iter_06225); the inference-tuning frontier
+# is exhausted (docs/notes/2026-06-09) and leash-loosening + typed-critic A/Bs were
+# both negative — the league is the one untested strength lever (ADR-0029 guard
+# against self-play cycling). Frozen-BC base + rotating learner snapshots in the
+# opponent distribution. Files under {run_dir}/league; state rides the Resume Bundle.
+league:
+  enabled:        true
+  snapshot_every: 50     # freeze a learner snapshot into the league every N iters
+  max_snapshots:  3      # rotating learner snapshots kept (+ the never-evicted BC base)
+
 # Wish co-training ON (ADR-0034 addendum, option (a)): the Mahjong-wish is decided by
 # the play net's 14-way `wish` head (0 == decline, 1..13 == ranks 2..14) and sharpened
 # in-loop. The wish head co-adapts with play through the shared trunk.
