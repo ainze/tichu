@@ -1,0 +1,104 @@
+# HEAD-TO-HEAD EVAL VARIANT of cotrain_wish_v5.yaml — check_cotrain ONLY, never train.
+#
+# Identical to cotrain_wish_v5.yaml except `eval.master` points at the run's OWN
+# iter_06225 export (the locked pure-self-play ship snapshot, +8.37 [+6.22,+10.45]
+# vs BC master at n=40k). Running check_cotrain with this config tournaments a later
+# (league-resumed) snapshot DIRECTLY against iter_06225, which is the improvement
+# bar: head-to-head CI > 0 means the league resume beat the previous best.
+#
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_wish_v5_vs_iter06225.yaml [--iter N]
+#
+# Do NOT pass this config to train_cotrain (it shares run_dir with the live run).
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v5\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v5\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_wish_v5
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+# Perfect-Info Critic ON (train-time only; the shipped policy stays observable).
+# Warm the critic under the frozen BC stack before the policy moves (ADR-0034).
+critic: { hidden: 512, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+# GPU the heavy batched update step only (the rollout is CPU-engine-bound — profiling
+# showed ~60% of an iter is rules-engine legal-action enumeration, which the GPU can't
+# touch; the update is ~30% and is a clean batched forward+backward). Falls back to CPU
+# if no CUDA. The rollout, snapshots, and Resume Bundle stay on CPU. (ADR-0034)
+update_device: cuda
+
+# Process-parallel rollout (ADR-0034 #1): the rollout (~70% of an iter) is CPU-engine-
+# bound and the M games are independent, so fan them across worker processes. Set to
+# ~(physical cores - 1 or 2) to leave room for the main process + the GPU update.
+# 1 = the single-process path. Each worker is single-threaded (no BLAS oversubscribe).
+rollout_workers: 10    # 12-core box: 10 rollout workers + room for main proc & GPU update
+
+# Opponent league (ADR-0034 league lever) — ENABLED on the 2026-06-10 resume from
+# iter ~6225. Rationale: the pure-self-play run plateaued at its locked ship read
+# (+8.37 [+6.22,+10.45] vs master, n=40k @ iter_06225); the inference-tuning frontier
+# is exhausted (docs/notes/2026-06-09) and leash-loosening + typed-critic A/Bs were
+# both negative — the league is the one untested strength lever (ADR-0029 guard
+# against self-play cycling). Frozen-BC base + rotating learner snapshots in the
+# opponent distribution. Files under {run_dir}/league; state rides the Resume Bundle.
+league:
+  enabled:        true
+  snapshot_every: 50     # freeze a learner snapshot into the league every N iters
+  max_snapshots:  3      # rotating learner snapshots kept (+ the never-evicted BC base)
+
+# Wish co-training ON (ADR-0034 addendum, option (a)): the Mahjong-wish is decided by
+# the play net's 14-way `wish` head (0 == decline, 1..13 == ranks 2..14) and sharpened
+# in-loop. The wish head co-adapts with play through the shared trunk.
+cotrain_wish: true
+
+# Per-net adaptive KL-anchor to frozen BC. Schupfen AND wish anchored TIGHTEST: both
+# are sharp, high-variance levers with comparatively thin BC data — keep them close to
+# BC and let the policy gradient earn departures. Loosen on a later resume if stable.
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+# Modest entropy everywhere — the ADR-0029 escalation showed MORE play entropy hurt.
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+# Serving snapshots (all four nets; the wish head ships inside the play net) for the
+# offline `check` strength read.
+snapshot_every: 25
+
+# Offline strength read (the separate `check_cotrain` command — NOT run in-loop):
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_wish_v5.yaml
+# Exports the latest snapshot and tournaments it vs `master`; ship bar = CI 95% > 0.
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  # "master" here = the previous best snapshot (iter_06225), NOT the BC baseline.
+  master:
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # a ceiling, not a plan — run for days; resume continues
+  positions_per_iter: 512      # raised from 128: memory headroom confirmed (~1.7GB @128, CPU ~55%)
+  pool_seed:          0
+  gamma:              1.0       # short episodes, terminal round_outcome
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
