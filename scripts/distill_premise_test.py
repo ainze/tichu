@@ -60,17 +60,30 @@ def _play_logits(model, row):
     return model(row["features"].unsqueeze(0), row["skill"])["play"][0]
 
 
+def _batched_play_logits(model, rows: list[dict], *, chunk: int = 256):
+    """One batched forward over all rows (features are fixed-dim) — the loop over
+    rows happens on the cheap per-row masked ops, not on 40M-param forwards."""
+    device = next(model.parameters()).device
+    outs = []
+    for lo in range(0, len(rows), chunk):
+        part = rows[lo:lo + chunk]
+        feats = torch.stack([r["features"] for r in part]).to(device)
+        skills = torch.cat([r["skill"] for r in part]).to(device)
+        outs.append(model(feats, skills)["play"])
+    return torch.cat(outs, dim=0)
+
+
 def masked_logprob(logits, *, legal_idx: list[int], target_idx: int):
     """Log-probability of `target_idx` under the softmax restricted to the legal
     set — the same legality constraint the served decode applies."""
-    legal = torch.as_tensor(legal_idx, dtype=torch.long)
+    legal = torch.as_tensor(legal_idx, dtype=torch.long, device=logits.device)
     sub = logits[legal]
     pos = legal_idx.index(target_idx)
     return torch.log_softmax(sub, dim=0)[pos]
 
 
 def _top1(logits, legal_idx: list[int]) -> int:
-    legal = torch.as_tensor(legal_idx, dtype=torch.long)
+    legal = torch.as_tensor(legal_idx, dtype=torch.long, device=logits.device)
     return int(legal[int(torch.argmax(logits[legal]))])
 
 
@@ -80,8 +93,9 @@ def fix_rate(model, rows: list[dict]) -> float:
     verified-better alternative."""
     if not rows:
         return 0.0
-    hits = sum(_top1(_play_logits(model, r), r["legal_idx"]) == r["alt_idx"]
-               for r in rows)
+    logits = _batched_play_logits(model, rows).cpu()
+    hits = sum(_top1(logits[i], r["legal_idx"]) == r["alt_idx"]
+               for i, r in enumerate(rows))
     return hits / len(rows)
 
 
@@ -90,10 +104,11 @@ def agreement(model_a, model_b, rows: list[dict]) -> float:
     """Top-1-over-legal agreement between two models (the drift guard)."""
     if not rows:
         return 1.0
+    la = _batched_play_logits(model_a, rows).cpu()
+    lb = _batched_play_logits(model_b, rows).cpu()
     same = sum(
-        _top1(_play_logits(model_a, r), r["legal_idx"])
-        == _top1(_play_logits(model_b, r), r["legal_idx"])
-        for r in rows
+        _top1(la[i], r["legal_idx"]) == _top1(lb[i], r["legal_idx"])
+        for i, r in enumerate(rows)
     )
     return same / len(rows)
 
@@ -101,27 +116,30 @@ def agreement(model_a, model_b, rows: list[dict]) -> float:
 def finetune(model, anchor, train_rows: list[dict], *, ordinary_rows: list[dict],
              epochs: int, lr: float, anchor_coef: float) -> None:
     """CE toward the verified-better action on the corrections + KL-to-anchor on
-    ordinary decisions (keeps the policy itself; only the blunders should move)."""
+    ordinary decisions (keeps the policy itself; only the blunders should move).
+    One batched forward per loss term per epoch; the per-row masked ops are cheap."""
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     anchor.eval()
+    with torch.no_grad():
+        anchor_logits = _batched_play_logits(anchor, ordinary_rows) if ordinary_rows else None
     for _ in range(epochs):
         opt.zero_grad()
-        loss = torch.tensor(0.0)
-        for r in train_rows:
-            loss = loss - masked_logprob(
-                _play_logits(model, r), legal_idx=r["legal_idx"], target_idx=r["alt_idx"]
-            )
-        loss = loss / max(1, len(train_rows))
+        logits = _batched_play_logits(model, train_rows)
+        loss = -torch.stack([
+            masked_logprob(logits[i], legal_idx=r["legal_idx"], target_idx=r["alt_idx"])
+            for i, r in enumerate(train_rows)
+        ]).mean()
         if anchor_coef > 0.0 and ordinary_rows:
-            kl = torch.tensor(0.0)
-            for r in ordinary_rows:
-                legal = torch.as_tensor(r["legal_idx"], dtype=torch.long)
-                p_anchor = torch.log_softmax(_play_logits(anchor, r)[legal], dim=0)
-                p_model = torch.log_softmax(_play_logits(model, r)[legal], dim=0)
-                kl = kl + torch.nn.functional.kl_div(
-                    p_model, p_anchor, log_target=True, reduction="sum"
-                )
-            loss = loss + anchor_coef * kl / len(ordinary_rows)
+            ord_logits = _batched_play_logits(model, ordinary_rows)
+            kls = []
+            for i, r in enumerate(ordinary_rows):
+                legal = torch.as_tensor(r["legal_idx"], dtype=torch.long,
+                                        device=ord_logits.device)
+                p_anchor = torch.log_softmax(anchor_logits[i][legal], dim=0)
+                p_model = torch.log_softmax(ord_logits[i][legal], dim=0)
+                kls.append(torch.nn.functional.kl_div(
+                    p_model, p_anchor, log_target=True, reduction="sum"))
+            loss = loss + anchor_coef * torch.stack(kls).mean()
         loss.backward()
         opt.step()
 
@@ -145,7 +163,11 @@ def main(argv=None) -> int:
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--anchor-coef", type=float, default=10.0)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--out", default=None, help="optional JSON result path")
+    parser.add_argument("--save-policy", default=None,
+                        help="export the fine-tuned play net as a TorchScript policy.pt "
+                             "(MLAgent-loadable) for a tournament read")
     args = parser.parse_args(argv)
 
     with open(args.config, encoding="utf-8") as fh:
@@ -157,6 +179,8 @@ def main(argv=None) -> int:
     else:
         load_checkpoint(args.play_checkpoint, model)
     anchor = copy.deepcopy(model)
+    model.to(args.device)
+    anchor.to(args.device)
 
     corr = pd.read_parquet(args.corrections)
     train_df, held_df = split_by_round(corr)
@@ -198,6 +222,21 @@ def main(argv=None) -> int:
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2)
+    if args.save_policy:
+        from tichu_export.torchscript import export_torchscript
+        from tichu_training.action_space import ACTION_SPACE_VERSION
+        from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM, FEATURIZER_VERSION
+
+        model.cpu()
+        export_torchscript(
+            model,
+            example_inputs=(torch.randn(1, FEATURIZER_OUTPUT_DIM),
+                            torch.tensor([0], dtype=torch.long)),
+            featurizer_version=FEATURIZER_VERSION,
+            action_space_version=ACTION_SPACE_VERSION,
+            output_path=args.save_policy,
+        )
+        print(f"fine-tuned policy exported -> {args.save_policy}", flush=True)
     return 0
 
 
