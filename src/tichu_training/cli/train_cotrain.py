@@ -161,6 +161,8 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         f"{dt}_{k}" for dt in decision_types
         for k in ("policy_loss", "kl", "entropy", "kl_coef")
     ]
+    if bool(config.get("vine", {}).get("enabled", False)):
+        log_fields.append("vine_rows")
     gamma = float(ppo.get("gamma", 1.0))
     lam = float(ppo.get("lam", 0.95))
     pool_seed = int(ppo.get("pool_seed", 0))
@@ -288,6 +290,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 f"iter {iteration + 1:>4}/{total_iters} | loss {stats['loss']:.3e} "
                 f"v {stats['value_loss']:.3e} | "
                 + " ".join(f"{dt[:2]} kl {stats[f'{dt}_kl']:.3f}" for dt in decision_types)
+                + (f" | vine {stats['vine_rows']}" if "vine_rows" in stats else "")
                 + f" | {row['wall_s']:.1f}s", flush=True,
             )
         if on_iteration is not None:
@@ -329,6 +332,34 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 opp_weights_path=opp,
             )
 
+    # Vine play advantages (ADR-0035): dedicated deterministic vine games whose
+    # paired-branch advantages REPLACE the play head's GAE group each iteration.
+    # Parallel-only (the branch playouts are the same CPU-engine work as rollouts);
+    # vine games draw from their own position-seed stream, disjoint from the main
+    # rollout's, so the play data distribution isn't correlated with the GAE data.
+    vine_cfg = config.get("vine", {})
+    vine_collect = None
+    if bool(vine_cfg.get("enabled", False)):
+        if parallel is None:
+            print("  vine requires rollout_workers>1 -> disabled", flush=True)
+        else:
+            vine_games = int(vine_cfg.get("games_per_iter", 64))
+            vine_decisions = int(vine_cfg.get("decisions_per_game", 4))
+            vine_branches = int(vine_cfg.get("branches", 4))
+            vine_seed = int(vine_cfg.get("pool_seed", 555000))
+
+            def vine_collect(iteration: int):
+                # rollout_collect already saved this iteration's weights to
+                # weights_path; no update happens in between, so reuse it.
+                vpos = generate_full_position_pool(
+                    seed=vine_seed + iteration * vine_games, n=vine_games
+                )
+                return parallel.collect_vine(
+                    vpos, weights_path, decisions_per_game=vine_decisions,
+                    branches=vine_branches,
+                    base_seed=vine_seed + iteration * vine_games,
+                )
+
     try:
         history = train_cotrain(
             models, bc_models, critic, _sample_positions,
@@ -339,7 +370,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             learner_team=learner_team, perfect_info=perfect_info,
             on_iteration=_on_iteration, start_iter=start_iter,
             update_device=update_device, rollout_collect=rollout_collect,
-            train_wish=cotrain_wish,
+            train_wish=cotrain_wish, vine_collect=vine_collect,
         )
     finally:
         if parallel is not None:

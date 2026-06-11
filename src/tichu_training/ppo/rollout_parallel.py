@@ -78,6 +78,23 @@ def _league_opponent(opp_weights_path: str, *, skill_decile, seed: int, train_wi
     )
 
 
+def _vine_chunk(task):
+    """Collect vine play-head rows for a chunk of dedicated vine games (ADR-0035).
+    Loads the live weights like `_rollout_chunk`, then runs the deterministic
+    branch-and-compare collection on this worker's positions."""
+    from tichu_training.ppo.vine import collect_vine_rows
+
+    (positions, weights_path, decisions_per_game, branches, skill_decile, seed) = task
+    state = torch.load(weights_path, map_location="cpu", weights_only=False)
+    models = _WORKER["models"]
+    for key, module in models.items():
+        module.load_state_dict(state["models"][key])
+    return collect_vine_rows(
+        models, positions, decisions_per_game=decisions_per_game,
+        branches=branches, skill_decile=skill_decile, seed=seed,
+    )
+
+
 def _rollout_chunk(task):
     from tichu_training.ppo.cotrain import BatchedCoTrainPolicy
     from tichu_training.ppo.rollout import collect_rollout
@@ -142,6 +159,21 @@ class ParallelRollout:
         ]
         results = self._pool.map(_rollout_chunk, tasks)
         return [traj for chunk_trajs in results for traj in chunk_trajs]
+
+    def collect_vine(self, positions, weights_path: str, *, decisions_per_game: int,
+                     branches: int, base_seed: int) -> list[dict]:
+        """Vine play-head rows (ADR-0035) for dedicated vine games, fanned across
+        the same worker pool. Deterministic per (positions, weights, base_seed)."""
+        positions = list(positions)
+        w = max(1, min(self._workers, len(positions)))
+        chunks = [positions[i::w] for i in range(w)]
+        tasks = [
+            (chunk, weights_path, int(decisions_per_game), int(branches),
+             self._skill_decile, base_seed + i)
+            for i, chunk in enumerate(chunks) if chunk
+        ]
+        results = self._pool.map(_vine_chunk, tasks)
+        return [row for chunk_rows in results for row in chunk_rows]
 
     def close(self) -> None:
         self._pool.close()
