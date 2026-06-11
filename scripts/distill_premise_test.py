@@ -136,7 +136,11 @@ def main(argv=None) -> int:
     parser.add_argument("--corrections", required=True)
     parser.add_argument("--ordinary", required=True)
     parser.add_argument("--config", required=True, help="cotrain config (model arch block)")
-    parser.add_argument("--play-checkpoint", required=True, help="raw play .bin snapshot")
+    parser.add_argument("--play-checkpoint", required=True,
+                        help="play weights: a raw .bin snapshot, or a TorchScript "
+                             "export .pt (state_dict round-trips into BCModel — used "
+                             "when the raw snapshot was pruned). If recovery is exact, "
+                             "the BEFORE fix-rates read 0.000 (chosen == argmax).")
     parser.add_argument("--skill-decile", type=int, default=9)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -147,7 +151,11 @@ def main(argv=None) -> int:
     with open(args.config, encoding="utf-8") as fh:
         config = yaml.safe_load(fh)
     model = _build_models(config)["play"]
-    load_checkpoint(args.play_checkpoint, model)
+    if args.play_checkpoint.endswith(".pt"):
+        scripted = torch.jit.load(args.play_checkpoint, map_location="cpu")
+        model.load_state_dict(scripted.state_dict())
+    else:
+        load_checkpoint(args.play_checkpoint, model)
     anchor = copy.deepcopy(model)
 
     corr = pd.read_parquet(args.corrections)
