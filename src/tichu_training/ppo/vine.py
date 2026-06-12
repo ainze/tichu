@@ -27,6 +27,20 @@ Off-policy note: branch actions are argmax choices, not samples from the
 stochastic policy. `old_logp` is the policy's own masked log-prob of that argmax
 action, so the PPO ratio starts at 1 and the clip + KL-to-anchor bound the
 mismatch — the same containment that holds the rest of the stack.
+
+Enrichment (the v1 autopsy, 2026-06-12): chosen-only rows delivered the mined
+signal ~10x too slowly (2.1% blunder fix-rate after 2,400 iters — flat at full
+tournament power because ~+0.2/round is invisible at ±2). Two dials fix the
+density without new playouts:
+  * `emit_branches` — emit a row for EVERY branch, not just the chosen one. The
+    returns are already computed; the alternative rows carry the corrective
+    direction the chosen-only estimator lacks (at a blunder the better branch
+    gets a positive advantage pushing its probability up directly, instead of
+    only pushing the chosen action down and letting the mass renormalize
+    blindly across all legal actions).
+  * `min_abs_advantage` — drop near-tie rows; within a decision the branch
+    advantages sum to zero, so ties contribute only dilution to the per-net
+    advantage normalization.
 """
 
 import random
@@ -46,10 +60,14 @@ from tichu_training.search.blunder_miner import (
 
 
 def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
-                      branches: int, skill_decile: int, seed: int) -> list[dict]:
+                      branches: int, skill_decile: int, seed: int,
+                      emit_branches: bool = False,
+                      min_abs_advantage: float = 0.0) -> list[dict]:
     """Play `positions` as vine games with the current nets in argmax mode and
-    return one row per sampled play decision:
-    `{features, action, mask, old_logp, advantage}` (all picklable)."""
+    return rows `{features, action, mask, old_logp, advantage}` (all picklable):
+    one per sampled play decision, or one per BRANCH of each sampled decision
+    when `emit_branches` (same playouts, denser corrective signal). Rows with
+    `|advantage| < min_abs_advantage` are dropped."""
     from tichu_inference.ml_agent import MLAgent
 
     agent = MLAgent.from_loaded(
@@ -71,24 +89,25 @@ def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
         ]
         rng.shuffle(eligible)
         for d in eligible[:decisions_per_game]:
-            row = _vine_row(models, agents, agent, d, result,
-                            branches=branches, skill_decile=skill_decile)
-            if row is not None:
-                rows.append(row)
+            rows.extend(_vine_rows(models, agents, agent, d, result,
+                                   branches=branches, skill_decile=skill_decile,
+                                   emit_branches=emit_branches))
+    if min_abs_advantage > 0.0:
+        rows = [r for r in rows if abs(r["advantage"]) >= min_abs_advantage]
     return rows
 
 
-def _vine_row(models, agents, agent, decision, result, *, branches: int,
-              skill_decile: int):
+def _vine_rows(models, agents, agent, decision, result, *, branches: int,
+               skill_decile: int, emit_branches: bool) -> list[dict]:
     pv = decision.state.private_view(decision.seat)
     action_idx = _combination_to_action_index(decision.chosen)
     mask = legal_mask("play", decision.state, decision.seat)
     if action_idx is None or not bool(mask[action_idx]):
-        return None
+        return []
     alts = candidate_alternatives(agent, pv, decision.chosen, top_k=branches - 1)
     alts = [a for a in alts if _combination_to_action_index(a) is not None]
     if not alts:
-        return None
+        return []
 
     # The chosen branch IS the recorded game (deterministic agents — the
     # blunder-miner's parity invariant), so only alternatives need playouts.
@@ -112,14 +131,22 @@ def _vine_row(models, agents, agent, decision, result, *, branches: int,
         )["play"][0]
         masked = logits.masked_fill(~torch.as_tensor(mask, dtype=torch.bool),
                                     float("-inf"))
-        old_logp = float(torch.log_softmax(masked, dim=0)[action_idx])
-    return {
-        "features": features,
-        "action": int(action_idx),
-        "mask": mask,
-        "old_logp": old_logp,
-        "advantage": float(chosen_rel - baseline),
-    }
+        logp = torch.log_softmax(masked, dim=0)
+
+    def _row(idx: int, rel: float) -> dict:
+        return {
+            "features": features,
+            "action": int(idx),
+            "mask": mask,
+            "old_logp": float(logp[idx]),
+            "advantage": float(rel - baseline),
+        }
+
+    rows = [_row(action_idx, chosen_rel)]
+    if emit_branches:
+        rows.extend(_row(_combination_to_action_index(alt), rel)
+                    for alt, rel in zip(alts, alt_rels))
+    return rows
 
 
 def vine_net_batch(rows: list[dict], *, skill_decile: int) -> NetBatch:

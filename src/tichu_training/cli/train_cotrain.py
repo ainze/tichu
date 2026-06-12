@@ -347,6 +347,11 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             vine_decisions = int(vine_cfg.get("decisions_per_game", 4))
             vine_branches = int(vine_cfg.get("branches", 4))
             vine_seed = int(vine_cfg.get("pool_seed", 555000))
+            # Enrichment dials (v1 autopsy 2026-06-12): all-branch rows carry the
+            # corrective direction at no extra playout cost; the |A| floor drops
+            # near-tie rows that only dilute the play batch's normalization.
+            vine_emit_branches = bool(vine_cfg.get("emit_branches", False))
+            vine_min_abs_adv = float(vine_cfg.get("min_abs_advantage", 0.0))
 
             def vine_collect(iteration: int):
                 # rollout_collect already saved this iteration's weights to
@@ -358,6 +363,8 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                     vpos, weights_path, decisions_per_game=vine_decisions,
                     branches=vine_branches,
                     base_seed=vine_seed + iteration * vine_games,
+                    emit_branches=vine_emit_branches,
+                    min_abs_advantage=vine_min_abs_adv,
                 )
 
     try:

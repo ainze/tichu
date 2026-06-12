@@ -84,6 +84,41 @@ every iteration; `check_cotrain` out of loop (OOM, ADR-0034).
 - Known smaller bias: argmax branch evaluation under a stochastic-trained policy, and
   exploration for play now comes only from branch comparison (entropy bonus retained).
 
+## Addendum (2026-06-12): v1 verdict — delivery failure, not refuted premise; v2 enriches
+
+**Strength reads (h2h vs iter_06225, seat-swap):** iter 500: +0.13 [−4.07, +4.40]
+(n=8k); iter 1275: +1.67 [−0.37, +3.70] (n=40k); iter 2400: **+0.45 [−1.68, +2.46]
+(n=40k) — flat at full power**; the 1275 read was noise upside.
+
+**Autopsy** (`data/runs/cotrain_vine_v1/autopsy_fixrate.py`, scoring the export
+against the 663 mined corrections — held-out w.r.t. vine's disjoint seed stream):
+iter_2400 fixes **2.1%** of them (06225 baseline 0.2%) at 2.5% ordinary-decision
+drift. Self-consistent: 2% of the ~+10–15/round mineable signal ≈ +0.2–0.3/round,
+exactly the observed flatness. So the kill bar's premise — that the mechanism
+delivered its signal and the signal did nothing — does not hold; the mechanism
+delivered ~10% of its signal. Two structural causes:
+
+1. **Three quarters of the computed evidence was discarded.** Only the chosen
+   branch became a row; the alternative branches' exact returns fed the baseline
+   and were thrown away. The discarded rows carry the corrective direction: at a
+   blunder, pushing UP the better alternative directly, rather than pushing the
+   chosen action down and letting the mass renormalize blindly.
+2. **Near-tie dilution.** Blunders are ~1% of uniformly sampled decisions; the
+   other rows have near-zero advantages that only feed the per-net normalization.
+
+**Positive finding worth keeping:** trust-region containment held at 2.5% drift
+(EV-neutral) where CE-distillation regressed −18 at 0.9% drift — paired-evidence-
+backed drift is harmless. The mechanism is safe; v1 was just slow.
+
+**v2 (`configs/cotrain_vine_v2.yaml`):** same playout budget; `emit_branches`
+turns every branch into a row (≤1024/iter instead of 256), `min_abs_advantage: 5`
+drops near-ties. Warm-start and anchor = vine-v1 iter_02400 (EV-equal to 06225,
+keeps the 2.1%). The corrections fix-rate is the cheap mid-run progress dial
+(minutes, no tournament): if it climbs toward ~15–20%, the +2–3/round becomes
+measurable at n=40k; if branch-enriched delivery can't move it either, THAT is
+the clean kill — the bar itself is unchanged (h2h CI > 0 vs iter_06225 via
+`configs/cotrain_vine_v2_vs_iter06225.yaml`).
+
 ## Build (2026-06-11, test-first, all green)
 
 `ppo/vine.py` (`collect_vine_rows`, `vine_net_batch`) reusing the blunder-miner's

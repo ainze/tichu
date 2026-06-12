@@ -23,10 +23,10 @@ def _models():
     return _build_models(_ARCH)
 
 
-def _rows(models, n_games=2, seed=5):
+def _rows(models, n_games=2, seed=5, **kwargs):
     positions = generate_full_position_pool(seed=31, n=n_games)
     return collect_vine_rows(models, positions, decisions_per_game=3, branches=3,
-                             skill_decile=9, seed=seed)
+                             skill_decile=9, seed=seed, **kwargs)
 
 
 def test_vine_rows_are_valid_play_transitions():
@@ -46,6 +46,41 @@ def test_vine_rows_are_deterministic_per_seed():
     assert len(a) == len(b)
     assert [r["action"] for r in a] == [r["action"] for r in b]
     assert [r["advantage"] for r in a] == [r["advantage"] for r in b]
+
+
+def test_emit_branches_adds_valid_alternative_rows():
+    # All-branch emission (v1-autopsy enrichment): same playouts, one row per
+    # branch. Branch rows must be legal play transitions, and within a decision
+    # the advantages sum to zero (each is rel - mean over the branch set).
+    models = _models()
+    chosen_only = _rows(models)
+    rows = _rows(models, emit_branches=True)
+    assert len(rows) > len(chosen_only)  # alternatives became rows
+    for r in rows:
+        assert bool(r["mask"][r["action"]])
+        assert r["old_logp"] <= 0.0
+    # Consecutive rows sharing a feature vector are one decision's branch set.
+    by_decision: dict[bytes, list[float]] = {}
+    for r in rows:
+        by_decision.setdefault(r["features"].tobytes(), []).append(r["advantage"])
+    for advs in by_decision.values():
+        assert abs(sum(advs)) < 1e-3
+    # The chosen-only rows are a subset: same decisions, same chosen advantages.
+    assert [r["advantage"] for r in chosen_only] == [
+        advs[0] for advs in
+        ([by_decision[r["features"].tobytes()] for r in chosen_only])
+    ]
+
+
+def test_min_abs_advantage_filters_near_ties():
+    models = _models()
+    rows = _rows(models, emit_branches=True)
+    cutoff = sorted(abs(r["advantage"]) for r in rows)[len(rows) // 2] + 1e-6
+    kept = _rows(models, emit_branches=True, min_abs_advantage=cutoff)
+    assert 0 < len(kept) < len(rows)
+    assert all(abs(r["advantage"]) >= cutoff for r in kept)
+    expected = [r["advantage"] for r in rows if abs(r["advantage"]) >= cutoff]
+    assert [r["advantage"] for r in kept] == expected
 
 
 def test_vine_net_batch_shapes():

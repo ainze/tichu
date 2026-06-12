@@ -1,0 +1,108 @@
+# HEAD-TO-HEAD VARIANT of cotrain_vine_v2.yaml — check_cotrain ONLY, never train.
+# "master" below is the SHIPPED policy (cotrain_wish_v5 iter_06225), so reads
+# stay comparable across v1 and v2: CI lower bound > 0 = vine v2 beat the
+# shipped policy.
+#
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_vine_v2_vs_iter06225.yaml --n-deals 20000
+#
+# Vine v2 — branch-enriched paired advantages (ADR-0035 addendum, 2026-06-12).
+#
+# The v1 autopsy (data/runs/cotrain_vine_v1/autopsy_fixrate.py) diagnosed the
+# flat iter-2400 read (+0.45 [-1.68,+2.46], n=40k) as a DELIVERY failure, not a
+# refuted premise: v1 fixed only 2.1% of the 663 mined blunder corrections,
+# which predicts ~+0.2-0.3/round — invisible at +-2 tournament power. Meanwhile
+# trust-region containment held: 2.5% ordinary-decision drift read EV-neutral
+# (CE-distill's 0.9% drift read -18). Safe, just 10x too slow.
+#
+# v2 enrichment, same playout budget:
+#   * emit_branches: every branch becomes a row (v1 kept only the chosen one,
+#     discarding 3/4 of the computed returns AND the corrective direction — at
+#     a blunder the better alternative now gets a positive advantage pushing
+#     its probability up directly).
+#   * min_abs_advantage: drop near-tie rows (within a decision the branch
+#     advantages sum to zero; ties only dilute the play batch normalization).
+#
+# Warm-start AND KL-anchor = vine-v1 iter_02400 (EV-equal to the shipped
+# iter_06225, carries v1's 2.1% fixes; recovered exactly from the TorchScript
+# export — data/runs/cotrain_vine_v2/setup_warmstart.py).
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_vine_v2.yaml
+#
+# Progress dials between tournament reads (cheap, no GPU contention):
+#   fix-rate on mined corrections — data/runs/cotrain_vine_v1/autopsy_fixrate.py
+#   pointed at the newest v2 export. Ship bar unchanged: h2h CI > 0 vs the
+#   SHIPPED iter_06225 via configs/cotrain_vine_v2_vs_iter06225.yaml.
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\cotrain_vine_v2\warm\play_iter02400.bin
+  schupfen: C:\workbench\tichu\data\runs\cotrain_vine_v2\warm\schupfen_iter02400.bin
+  tichu:    C:\workbench\tichu\data\runs\cotrain_vine_v2\warm\tichu_iter02400.bin
+  grand:    C:\workbench\tichu\data\runs\cotrain_vine_v2\warm\grand_iter02400.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_vine_v2
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 512, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+update_device: cuda
+rollout_workers: 10
+
+# Same collection budget as v1 (64 games x 4 decisions x 3 alt playouts); the
+# enrichment is in what the collected playouts become: up to 64*4*4 = 1024 rows
+# pre-filter instead of 256, minus the near-ties. Fresh position-seed stream
+# (v1 consumed 555000..~709000).
+vine:
+  enabled:            true
+  games_per_iter:     64
+  decisions_per_game: 4
+  branches:           4
+  pool_seed:          900000
+  emit_branches:      true
+  min_abs_advantage:  5.0
+
+cotrain_wish: true
+
+# Anchors unchanged from v1: play tight to the warm start (refinement), proven
+# leashes elsewhere.
+kl:
+  play:     { coef: 1.0, target: 0.01,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8
+  # HEAD-TO-HEAD VARIANT: "master" here is the previous best — the
+  # cotrain_wish_v5 iter_06225 export. CI lower bound > 0 means vine v2 beat
+  # the shipped policy.
+  master:
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_wish_v5\export\iter_06225\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
