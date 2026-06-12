@@ -58,8 +58,16 @@ vine:
 
 cotrain_wish: true
 
-# Anchors unchanged from v1: play tight to the warm start (refinement), proven
-# leashes elsewhere.
+# Periodic play re-anchor (ADR-0035 addendum, 2026-06-12): the KL term is a
+# fixed ball around the frozen anchor — v1 and v2 both saturated it within ~20
+# iterations (v2's fix-rate peaked 4.8% at iter 25, then the controller dragged
+# the policy back). Moving the play anchor onto the current net every N
+# iterations turns the ball into a trail of contained, paired-evidence-backed
+# steps. The wish head rides the play net, so its anchor moves too — guarded by
+# the fix-rate/drift dial (autopsy_fixrate.py) and the out-of-loop h2h reads.
+reanchor_play_every: 100
+
+# Play stays tight to its (now moving) anchor; proven fixed leashes elsewhere.
 kl:
   play:     { coef: 1.0, target: 0.01,  factor: 2.0 }
   schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }

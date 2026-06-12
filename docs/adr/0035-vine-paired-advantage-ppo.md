@@ -119,6 +119,31 @@ measurable at n=40k; if branch-enriched delivery can't move it either, THAT is
 the clean kill — the bar itself is unchanged (h2h CI > 0 vs iter_06225 via
 `configs/cotrain_vine_v2_vs_iter06225.yaml`).
 
+### Trust-region saturation (2026-06-12, the second binding constraint)
+
+v2's first dial readings exposed the real geometry: the KL penalty is
+`kl_anchor_loss` to the FROZEN warm-start anchor — a fixed-radius ball capping
+TOTAL movement, not a per-step speed limit. v2 filled the ball in ~20 iterations
+(fix-rate 4.8% at iter 25, play KL 0.025 > target), the adaptive coef slammed
+0.002 → 32 and dragged the policy back (fix-rate 4.1%, drift reverting
+94.7% → 96.7% agreement by iter 75). This retro-explains v1: its 2,400
+iterations orbited a 0.01-ball around 06225 that holds ~2% of fixes; v2's
+enrichment packs ~2.3× more correction into the same ball — instantly — and then
+also parks on the boundary.
+
+**Decision: `reanchor_play_every: 100`** — the play anchor becomes the current
+play net every 100 iterations, converting the ball into a trail of contained
+steps. Each step is the unit v1/v2 proved EV-safe twice (paired-evidence-backed
+drift at one ball's distance read EV-neutral, where CE-distill's smaller drift
+read −18). The wish head rides the play net, so its anchor moves too —
+accepted, since wish's own GAE gradient stays leashed at 0.008 per step.
+Honest caveat: EV-neutrality was measured at ONE ball's distance; compounding
+steps is the new, unverified part. Guard rails: the fix-rate/drift dial
+(`data/runs/cotrain_vine_v2/autopsy_fixrate.py`) every few hundred iterations
+and the h2h read before believing anything. The Resume Bundle now carries the
+moved play anchor (`play_anchor` field) — without it a restart would snap the
+anchor back to the warm start.
+
 ## Build (2026-06-11, test-first, all green)
 
 `ppo/vine.py` (`collect_vine_rows`, `vine_net_batch`) reusing the blunder-miner's

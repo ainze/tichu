@@ -83,6 +83,62 @@ def test_resume_bundle_round_trips_full_training_state(tmp_path):
     assert optimizer2.state_dict()["state"]
 
 
+def test_play_anchor_rides_the_bundle_on_reanchoring_runs(tmp_path):
+    # ADR-0035 addendum: with periodic re-anchoring, the moved play anchor must
+    # survive a stop/resume — otherwise the resume rebuilds it from the warm-start
+    # files and snaps the run back to its origin.
+    import copy
+
+    torch.manual_seed(0)
+    models, critic = _nets()
+    optimizer = _optimizer(models, critic)
+    _take_a_step(models, critic, optimizer)
+    anchor = copy.deepcopy(models["play"])  # a re-anchored (post-warm-start) state
+
+    path = str(tmp_path / "train_state.bin")
+    save_resume_bundle(
+        path, models=models, critic=critic, optimizer=optimizer,
+        kl_coefs={"play": 0.3}, iteration=3, rng_state=capture_rng(),
+        play_anchor=anchor.state_dict(),
+    )
+
+    torch.manual_seed(999)
+    models2, critic2 = _nets()
+    bc_models2 = {dt: copy.deepcopy(m) for dt, m in models2.items()}
+    bc_schupfen_before = copy.deepcopy(bc_models2["schupfen"].state_dict())
+    load_resume_bundle(path, models=models2, critic=critic2,
+                       optimizer=_optimizer(models2, critic2), bc_models=bc_models2)
+
+    for k, v in anchor.state_dict().items():
+        assert torch.equal(v, bc_models2["play"].state_dict()[k]), f"play anchor {k}"
+    for k, v in bc_schupfen_before.items():  # other anchors untouched
+        assert torch.equal(v, bc_models2["schupfen"].state_dict()[k])
+
+
+def test_bundle_without_play_anchor_leaves_the_warm_start_anchor(tmp_path):
+    # Pre-addendum bundles (and non-re-anchoring runs) carry play_anchor=None;
+    # loading them must not touch the caller's anchors.
+    import copy
+
+    torch.manual_seed(0)
+    models, critic = _nets()
+    optimizer = _optimizer(models, critic)
+    path = str(tmp_path / "train_state.bin")
+    save_resume_bundle(
+        path, models=models, critic=critic, optimizer=optimizer,
+        kl_coefs={"play": 0.3}, iteration=1, rng_state=capture_rng(),
+    )
+
+    torch.manual_seed(999)
+    models2, critic2 = _nets()
+    bc_models2 = {dt: copy.deepcopy(m) for dt, m in models2.items()}
+    bc_play_before = copy.deepcopy(bc_models2["play"].state_dict())
+    load_resume_bundle(path, models=models2, critic=critic2,
+                       optimizer=_optimizer(models2, critic2), bc_models=bc_models2)
+    for k, v in bc_play_before.items():
+        assert torch.equal(v, bc_models2["play"].state_dict()[k])
+
+
 def test_save_is_atomic_and_keeps_the_previous_bundle(tmp_path):
     torch.manual_seed(0)
     models, critic = _nets()

@@ -194,6 +194,10 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     kl_controllers = _kl_controllers(config, decision_types)
     ent_cfg = config.get("entropy", {})
     ent_coefs = {dt: float(ent_cfg.get(dt, 0.01)) for dt in decision_types}
+    # Periodic play re-anchor (ADR-0035 addendum): the KL ball around a frozen
+    # anchor caps TOTAL movement; moving the anchor every N iterations turns it
+    # into a trail of contained steps. 0 = off (the fixed-anchor regime).
+    reanchor_play_every = int(config.get("reanchor_play_every", 0))
 
     def _sample_positions(iteration: int):
         return generate_full_position_pool(
@@ -206,7 +210,8 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     resumed = False
     resume_payload = None
     if Path(bundle_path).exists() and not restart:
-        resume_payload = load_resume_bundle(bundle_path, models=models, critic=critic, optimizer=optimizer)
+        resume_payload = load_resume_bundle(bundle_path, models=models, critic=critic,
+                                            optimizer=optimizer, bc_models=bc_models)
         for dt in decision_types:
             if dt in resume_payload["kl_coefs"]:
                 kl_controllers[dt].coef = float(resume_payload["kl_coefs"][dt])
@@ -273,11 +278,15 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             league.snapshot(models, critic, iteration + 1)
 
         # Resume Bundle every iteration (atomic, keep-2): a kill loses <=1 iter.
+        # The play anchor rides along only on re-anchoring runs (it's a full play
+        # net; without it a resume would snap the anchor back to the warm start).
         save_resume_bundle(
             bundle_path, models=models, critic=critic, optimizer=optimizer,
             kl_coefs={dt: kl_controllers[dt].coef for dt in decision_types},
             iteration=iteration + 1, rng_state=capture_rng(),
             league=(league.state() if league is not None else None),
+            play_anchor=(bc_models["play"].state_dict()
+                         if reanchor_play_every else None),
         )
         # Serving snapshots every snapshot_every (for the offline `check` command).
         if (iteration + 1) % snapshot_every == 0:
@@ -378,6 +387,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             on_iteration=_on_iteration, start_iter=start_iter,
             update_device=update_device, rollout_collect=rollout_collect,
             train_wish=cotrain_wish, vine_collect=vine_collect,
+            reanchor_play_every=reanchor_play_every,
         )
     finally:
         if parallel is not None:

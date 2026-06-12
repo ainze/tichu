@@ -65,8 +65,10 @@ vine:
 
 cotrain_wish: true
 
-# Anchors unchanged from v1: play tight to the warm start (refinement), proven
-# leashes elsewhere.
+# Mirrors cotrain_vine_v2.yaml (check_cotrain ignores training knobs).
+reanchor_play_every: 100
+
+# Play stays tight to its (now moving) anchor; proven fixed leashes elsewhere.
 kl:
   play:     { coef: 1.0, target: 0.01,  factor: 2.0 }
   schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
