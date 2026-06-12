@@ -32,12 +32,18 @@ Enrichment (the v1 autopsy, 2026-06-12): chosen-only rows delivered the mined
 signal ~10x too slowly (2.1% blunder fix-rate after 2,400 iters — flat at full
 tournament power because ~+0.2/round is invisible at ±2). Two dials fix the
 density without new playouts:
-  * `emit_branches` — emit a row for EVERY branch, not just the chosen one. The
-    returns are already computed; the alternative rows carry the corrective
-    direction the chosen-only estimator lacks (at a blunder the better branch
-    gets a positive advantage pushing its probability up directly, instead of
-    only pushing the chosen action down and letting the mass renormalize
-    blindly across all legal actions).
+  * `emit_branches` — emit rows for the POSITIVE-advantage alternatives next to
+    the chosen row. The returns are already computed; these rows carry the
+    corrective direction the chosen-only estimator lacks (at a blunder the
+    better branch gets a positive advantage pushing its probability up
+    directly, instead of only pushing the chosen action down and letting the
+    mass renormalize blindly across all legal actions). Negative-advantage
+    alternatives are NOT emitted: they push down actions that are already
+    low-probability — an unbounded burn-down with no opposing force that blew
+    the logit gaps apart in vine v2's first run (play KL 0.01 -> 0.158 over
+    ~170 iterations, then exp(new_logp - old_logp) overflowed and NaN'd the
+    weights). The chosen row keeps both signs: its probability is high, and
+    pushing a blundered choice down IS the signal.
   * `min_abs_advantage` — drop near-tie rows; within a decision the branch
     advantages sum to zero, so ties contribute only dilution to the per-net
     advantage normalization.
@@ -65,9 +71,9 @@ def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
                       min_abs_advantage: float = 0.0) -> list[dict]:
     """Play `positions` as vine games with the current nets in argmax mode and
     return rows `{features, action, mask, old_logp, advantage}` (all picklable):
-    one per sampled play decision, or one per BRANCH of each sampled decision
-    when `emit_branches` (same playouts, denser corrective signal). Rows with
-    `|advantage| < min_abs_advantage` are dropped."""
+    one per sampled play decision, plus one per POSITIVE-advantage alternative
+    branch when `emit_branches` (same playouts, denser corrective signal). Rows
+    with `|advantage| < min_abs_advantage` are dropped."""
     from tichu_inference.ml_agent import MLAgent
 
     agent = MLAgent.from_loaded(
@@ -144,8 +150,9 @@ def _vine_rows(models, agents, agent, decision, result, *, branches: int,
 
     rows = [_row(action_idx, chosen_rel)]
     if emit_branches:
+        # Positive-advantage alternatives only — see the module docstring.
         rows.extend(_row(_combination_to_action_index(alt), rel)
-                    for alt, rel in zip(alts, alt_rels))
+                    for alt, rel in zip(alts, alt_rels) if rel > baseline)
     return rows
 
 

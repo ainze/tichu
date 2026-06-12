@@ -144,6 +144,26 @@ and the h2h read before believing anything. The Resume Bundle now carries the
 moved play anchor (`play_anchor` field) — without it a restart would snap the
 anchor back to the warm start.
 
+### v2 instability and fix (2026-06-12, ~iter 170): positive-advantage alts only
+
+The first v2 run NaN'd at iter 169 (`probability tensor contains inf/nan` in the
+rollout; 41 non-finite play tensors in the bundle, `.prev` at 168 clean). Chain:
+most alternative rows carry NEGATIVE advantage (the policy usually chooses well),
+and those rows push down actions that are already low-probability — an unbounded
+burn-down with no opposing force (entropy 0.01 is negligible). Logit gaps widen
+every iteration (the play KL trail 0.01 → 0.158 was this, not learning), until a
+collected `old_logp` hits ~−90 and `exp(new_logp − old_logp)` overflows float32 →
+one update writes NaN into every play tensor.
+
+Fix, two layers: (1) **estimator** — `emit_branches` now emits only
+positive-advantage alternatives (the corrective "this branch is better" rows; the
+chosen row keeps both signs — its probability is high and pushing a blunder down
+IS the signal; worse-than-baseline alternatives are nearly information-free since
+the policy wasn't going to pick them anyway); (2) **numerical guard** —
+`clipped_policy_loss` clamps the log-ratio to ±20 before exp (a no-op for any
+ratio the 0.1-clip could pass through). The crashed run restarts fresh from the
+v1@2400 warm start (~170 iterations lost, clean attribution).
+
 ## Build (2026-06-11, test-first, all green)
 
 `ppo/vine.py` (`collect_vine_rows`, `vine_net_batch`) reusing the blunder-miner's

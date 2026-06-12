@@ -48,28 +48,45 @@ def test_vine_rows_are_deterministic_per_seed():
     assert [r["advantage"] for r in a] == [r["advantage"] for r in b]
 
 
-def test_emit_branches_adds_valid_alternative_rows():
-    # All-branch emission (v1-autopsy enrichment): same playouts, one row per
-    # branch. Branch rows must be legal play transitions, and within a decision
-    # the advantages sum to zero (each is rel - mean over the branch set).
+def test_emit_branches_adds_positive_advantage_alternative_rows():
+    # Branch emission (v1-autopsy enrichment): same playouts, the chosen row plus
+    # one row per POSITIVE-advantage alternative. Negative-advantage alternatives
+    # must NOT become rows — pushing down already-low-probability actions is the
+    # unbounded burn-down that NaN'd vine v2's first run (play KL 0.01 -> 0.158,
+    # then exp-overflow in the ratio).
     models = _models()
     chosen_only = _rows(models)
     rows = _rows(models, emit_branches=True)
-    assert len(rows) > len(chosen_only)  # alternatives became rows
+    assert len(rows) > len(chosen_only)  # some better-than-baseline alts exist
     for r in rows:
         assert bool(r["mask"][r["action"]])
         assert r["old_logp"] <= 0.0
-    # Consecutive rows sharing a feature vector are one decision's branch set.
+    # Rows sharing a feature vector are one decision's set: chosen first (any
+    # advantage sign), every following alternative row strictly positive.
     by_decision: dict[bytes, list[float]] = {}
     for r in rows:
         by_decision.setdefault(r["features"].tobytes(), []).append(r["advantage"])
     for advs in by_decision.values():
-        assert abs(sum(advs)) < 1e-3
+        assert all(a > 0.0 for a in advs[1:])
     # The chosen-only rows are a subset: same decisions, same chosen advantages.
     assert [r["advantage"] for r in chosen_only] == [
-        advs[0] for advs in
-        ([by_decision[r["features"].tobytes()] for r in chosen_only])
+        by_decision[r["features"].tobytes()][0] for r in chosen_only
     ]
+
+
+def test_clipped_policy_loss_survives_extreme_old_logp():
+    # Regression (vine v2 NaN crash): a dominated branch action collected with
+    # old_logp ~ -90 must not overflow exp() into inf/NaN — loss and gradients
+    # stay finite.
+    from tichu_training.ppo.update import clipped_policy_loss
+
+    new_logp = torch.tensor([-0.5, -2.0, -1.0], requires_grad=True)
+    old_logp = torch.tensor([-90.0, -0.5, -1.0])
+    advantages = torch.tensor([1.5, -2.0, 0.5])
+    loss = clipped_policy_loss(new_logp, old_logp, advantages, clip_eps=0.1)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert torch.isfinite(new_logp.grad).all()
 
 
 def test_min_abs_advantage_filters_near_ties():
