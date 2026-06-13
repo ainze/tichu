@@ -196,6 +196,48 @@ def _run_full_tournament_parallel(
         return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions))
 
 
+def collect_pair_deltas(
+    builder_a: Callable[[], Agent], builder_b: Callable[[], Agent], positions: list,
+    *, workers: int = 1, progress: Callable[[int], None] | None = None,
+    max_chunk: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Raw seat-swap A-minus-B deltas for ONE agent pair over `positions` —
+    `(total_deltas, call_bonus_deltas)`, 2*len(positions) entries each, in Position
+    order. These are exactly the per-Position observations `_bootstrap_ci` draws
+    from, exposed so a sharded run can persist each slice's deltas and pool them
+    into one exact bootstrap later (the resumable A/B path; the matrix writer only
+    keeps aggregates). Builders (not instances) so each spawned worker rebuilds its
+    own agents — torch models do not pickle/fork cleanly.
+
+    `builder_a` / `builder_b` must be importable-by-qualname callables (e.g.
+    module-level `partial`s), never closures or `__main__`-defined functions, or
+    the spawn workers cannot unpickle them."""
+    if workers <= 1:
+        return _play_pair_full(builder_a(), builder_b(), positions, label="a vs b",
+                               progress=progress)
+    builder_a(); builder_b()  # fail-fast on the main process before the Pool
+    builders = {"a": builder_a, "b": builder_b}
+    bounds = _chunk_bounds(len(positions), workers,
+                           max_chunk=(max_chunk or _PROGRESS_CHUNK))
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=workers, initializer=_worker_init,
+                  initargs=(builders, positions)) as pool:
+        pending = [
+            pool.apply_async(
+                _worker_play_chunk, ("a", "b", s, e),
+                callback=(None if progress is None else (lambda _r, n=e - s: progress(n))),
+            )
+            for s, e in bounds
+        ]
+        totals: list[float] = []
+        bonuses: list[float] = []
+        for ar in pending:  # submission order == Position order
+            ct, cb = ar.get()
+            totals.extend(ct)
+            bonuses.extend(cb)
+    return np.array(totals, dtype=np.float64), np.array(bonuses, dtype=np.float64)
+
+
 def _chunk_bounds(
     n: int, workers: int, *, max_chunk: int | None = None
 ) -> list[tuple[int, int]]:

@@ -102,6 +102,7 @@ def play_full_round(
     last_out_order: tuple[int, ...] = ()
 
     asked_tichu: set[int] = set()
+    round_started: set[int] = set()
     first_out: int | None = None
     done = False
     for _ in range(_MAX_STEPS):
@@ -109,6 +110,21 @@ def play_full_round(
             break
         current = state.public.current_player
         private = state.private_view(current)
+        # Run-time policy adaptation hook (ADR-0036): fire `on_round_start` once
+        # per seat, at its first Play Decision, before it acts. Duck-typed and
+        # off by default — agents without the method (every existing Agent) are
+        # untouched, so the eval path stays byte-identical.
+        if state.public.pending_decision is None and current not in round_started:
+            round_started.add(current)
+            # Oracle variant (diagnostic, ADR-0036) gets the full GameState; the
+            # normal hook gets only the seat's info-set. Oracle takes precedence.
+            oracle = getattr(agents[current], "on_round_start_oracle", None)
+            if oracle is not None:
+                oracle(state)
+            else:
+                hook = getattr(agents[current], "on_round_start", None)
+                if hook is not None:
+                    hook(private)
         # Telemetry probes computed before the agent acts (one legal_actions scan
         # shared by both). Only on a normal Play decision (no pending).
         passivity_opp = False
