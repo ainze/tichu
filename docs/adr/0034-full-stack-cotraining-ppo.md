@@ -159,6 +159,8 @@ worker loads the sampled file into a second net set (`ParallelRollout` opponent 
 through the Resume Bundle (`league` field). Config `league: {enabled, snapshot_every, max_snapshots}`
 — **parallel-only** (needs `rollout_workers > 1`); off = pure self-play. The plan: run pure self-play
 first, and if `check_cotrain` reads flat, flip `enabled: true` and resume into the league.
+*(Run 2026-06-10 on the `cotrain_wish_v5` resume — read FLAT at full power; see the closing
+addendum below.)*
 
 **Still open (not blocking the run):** serving snapshots embed the shared optimizer (disk-heavy over
 days) — trim to weights-only. Critic warm-up isn't parallelized (one-time). Move-Prediction-Eval
@@ -288,3 +290,59 @@ co-training in the loop; **Dragon-give remains FROZEN** as recommended.
   on rare/lever states, not the KL targets.
 - **Dragon-give:** left frozen on RuleAgent (shorter-handed opponent) per the recommendation;
   revisit only if a measured plateau traces to it specifically.
+
+## Addendum (2026-06-10): League outcome — FLAT at full power; ACCEPT, strength program closed
+
+The pure-self-play `cotrain_wish_v5` run cleared the ship bar and locked its number at
+**iter_06225: +8.37 vs `master`, CI [+6.22, +10.45], n=40,000** (the full 20k pool, seat-swapped).
+Further reads plateaued there, the inference-tuning frontier was independently exhausted
+(15 interventions, all neutral/−EV — `docs/notes/2026-06-09-inference-tuning-frontier-exhausted.md`),
+and the wish-leash-loosening and typed-critic A/Bs were both negative. Per this ADR's own plan,
+the league — the one structurally untested lever left — was flipped on and the run resumed.
+
+**The run.** Resumed from iter 6225 with `league: {enabled: true, snapshot_every: 50,
+max_snapshots: 3}`. Before launch, a league fidelity gap was found and fixed (PR #55): the
+worker built the opponent `BatchedCoTrainPolicy` without `train_wish`, so league opponents
+would have silently declined every Mahjong wish while the learner and the eval master wish via
+their trained heads (`_league_opponent` in `ppo/rollout_parallel.py`, test-covered). Mid-run
+mess, for the record: an intermediate owner resume used main's league-less config, which wiped
+the bundle's league state (~iters 8885–9396 ran pure self-play) and ran pre-fix code until
+~iter 9467, after which the owner re-pointed the editable install at the fixed worktree — the
+pool self-healed (frozen-BC base is re-seeded; snapshots refill within 150 iters).
+
+**The reads (seat-swap Tournament, head-to-head vs the iter_06225 export —
+`configs/cotrain_wish_v5_vs_iter06225.yaml`; improvement bar = CI lower bound > 0):**
+
+| Snapshot | League iters | n | mean | 95% CI | Verdict |
+|---|---|---|---|---|---|
+| iter_08775 | ~2,550 | 8,000 | +0.76 | [−3.60, +5.47] | neutral |
+| iter_10050 | ~3,800 | 8,000 | −0.94 | [−5.50, +3.67] | neutral |
+| **iter_12450** | **~6,200** | **40,000** | **−0.17** | **[−2.33, +1.90]** | **FLAT (decisive)** |
+
+The 40k read's half-width (±2.1) would have detected a gain of ~+2.5; round win-rate was
+49.2% vs 49.1% — a dead heat. No regression either: iter_08775 vs the BC `master` read
++6.61 [+1.42, +11.24] (n=8,000), in line with iter_06225's own 4k-deal reads.
+
+**Decision: ACCEPT.** Per the *Heavy prior* section above, a flat result makes ADR-0033's
+ACCEPT unconditional. Every documented lever is now tested flat or negative: BC-at-decile-9
+scaling, AWR, PPO play-only (both lever ends), PIMC, search+learning, the standalone
+perfect-info critic, full-stack co-training beyond its plateau, inference-time tuning
+(probes + call thresholds), wish-leash loosening, the typed critic, and the league. The
+**strength program closes**. The plateau is attributed to the value signal's irreducible
+outcome variance on the lever decisions (critic R² gradient play 0.45 > schupfen 0.25 >
+grand 0.10 tracks state-determinism, not capacity), not to any untuned knob of this build.
+
+**Shipped model:** the `cotrain_wish_v5` **iter_06225** export
+(`data/runs/cotrain_wish_v5/export/iter_06225/`) behind `MLAgent`, plus the
+**keep-partner-trick guard** (PR #55: never bomb a trick the partner already tops; carve-out
+for a caller going out on that bomb — shipped on logic + live observation, below tournament-CI
+power by design). The run dir remains losslessly resumable should the league ever be revisited
+with a different hypothesis.
+
+**What could reopen the program** (genuinely new bets, not tunings of this build): a larger
+trunk + substantially more BC compute; a fundamentally different value target that reduces the
+irreducible-variance floor (e.g. distributional / auxiliary-supervised critics); or an external
+stronger reference opponent to define "superhuman" measurably. One cheap untested diagnostic
+remains — an offline per-decision-type critic-capacity ablation on `materialised_full_v5/bc`
+(1.25B rows) — but two independent priors (the caller-passivity arc and the typed-critic null)
+both indicate value quality is not the strength lever; expectations should be set accordingly.

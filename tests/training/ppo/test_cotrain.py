@@ -293,6 +293,47 @@ def test_train_cotrain_runs_iterations_and_logs_per_net_stats():
         assert math.isfinite(st["value_loss"])
 
 
+def test_reanchor_play_every_moves_only_the_play_anchor():
+    # ADR-0035 addendum: at iteration N (and multiples) the play KL anchor must
+    # become the then-current play net; the other heads keep their frozen anchors.
+    import copy as _copy
+
+    from tichu_training.ppo.cotrain import train_cotrain
+    from tichu_training.ppo.train import AdaptiveKLController
+
+    torch.manual_seed(0)
+    policy = _tiny_cotrain_policy(perfect_info=True, seed=3)
+    models = {
+        "play": policy.play_model, "schupfen": policy.schupfen_model,
+        "tichu": policy.call_models["tichu"], "grand": policy.call_models["grand"],
+    }
+    bc_models = {k: _copy.deepcopy(m) for k, m in models.items()}
+    play_anchor_before = _copy.deepcopy(bc_models["play"].state_dict())
+    schupfen_anchor_before = _copy.deepcopy(bc_models["schupfen"].state_dict())
+    params = list(policy.critic.parameters())
+    for m in models.values():
+        params += list(m.parameters())
+    optimizer = torch.optim.Adam(params, lr=1e-2)
+    controllers = {dt: AdaptiveKLController(coef=0.5, target=0.02) for dt in models}
+
+    train_cotrain(
+        models, bc_models, policy.critic,
+        lambda it: generate_full_position_pool(seed=it, n=2),
+        optimizer=optimizer, kl_controllers=controllers,
+        ent_coefs={dt: 0.01 for dt in models},
+        iterations=3, gamma=1.0, lam=0.95, clip_eps=0.1, vf_coef=0.5, ppo_epochs=1,
+        perfect_info=True, generator=torch.Generator().manual_seed(4),
+        reanchor_play_every=2,
+    )
+
+    assert any(
+        not torch.equal(play_anchor_before[k], v)
+        for k, v in bc_models["play"].state_dict().items()
+    ), "play anchor never moved"
+    for k, v in bc_models["schupfen"].state_dict().items():
+        assert torch.equal(schupfen_anchor_before[k], v), "schupfen anchor moved"
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 def test_cotrain_update_on_cuda_runs_and_restores_models_to_cpu():
     # GPU the update only (the heavy batched forward+backward), keeping the nets on

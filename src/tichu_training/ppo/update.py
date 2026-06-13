@@ -116,7 +116,11 @@ def clipped_policy_loss(
     clip_eps: float,
 ) -> torch.Tensor:
     """PPO clipped-surrogate policy loss (to be minimized)."""
-    ratio = torch.exp(new_logp - old_logp)
+    # Overflow guard: exp(>88) is inf in float32, and one inf*advantage NaN's the
+    # whole update (vine v2, 2026-06-12: a dominated branch action's old_logp
+    # reached ~-90 and a single update wrote NaN into every play tensor). ±20 is
+    # a no-op for any ratio the clip below could ever pass through.
+    ratio = torch.exp(torch.clamp(new_logp - old_logp, -20.0, 20.0))
     unclipped = ratio * advantages
     clipped = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
     return -torch.min(unclipped, clipped).mean()

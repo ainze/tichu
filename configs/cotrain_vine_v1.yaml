@@ -1,0 +1,96 @@
+# Vine / paired-advantage PPO (ADR-0035) — refine the SHIPPED policy with exact
+# within-world play advantages.
+#
+# Premises, both verified 2026-06-11:
+#  (1) paired deterministic playouts in a fixed world see per-decision EV that
+#      R - V(s) cannot (blunder-miner: 51 true blunders confirmed at 96 worlds,
+#      0.7% criterion FP; PPO's plateau mechanism per the ADR-0034 closure);
+#  (2) that signal has learnable structure (distill premise test: 20.6% held-out
+#      fix-rate) but must arrive inside the trust region, not as CE labels
+#      (naive distill regressed -18 h2h).
+#
+# Mechanism: each iteration plays `vine.games_per_iter` dedicated rounds with the
+# CURRENT nets in argmax mode; at `decisions_per_game` sampled play decisions the
+# top-(branches-1) alternatives are forced and played out deterministically in the
+# SAME world. A(s, chosen) = R(chosen) - mean(R over branches) — exact, luck-free.
+# These steps REPLACE the play head's GAE group; schupfen/calls/wish keep GAE on
+# the main rollout, and the critic keeps training on all main-rollout steps.
+#
+# Warm-start AND KL-anchor = the shipped iter_06225 policy (recovered from its
+# TorchScript export; data/runs/cotrain_vine_v1/warm). This is a REFINEMENT run:
+# the anchor keeps the policy at the +8.37-vs-master optimum while the vine
+# gradient spends the KL budget only where paired evidence says a move is wrong.
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_vine_v1.yaml
+#
+# Improvement bar (same as always): head-to-head CI > 0 vs iter_06225 via
+# configs/cotrain_vine_v1_vs_iter06225.yaml. Strength reads OUT OF LOOP.
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\cotrain_vine_v1\warm\play_iter06225.bin
+  schupfen: C:\workbench\tichu\data\runs\cotrain_vine_v1\warm\schupfen_iter06225.bin
+  tichu:    C:\workbench\tichu\data\runs\cotrain_vine_v1\warm\tichu_iter06225.bin
+  grand:    C:\workbench\tichu\data\runs\cotrain_vine_v1\warm\grand_iter06225.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_vine_v1
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 512, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+update_device: cuda
+rollout_workers: 10
+
+# Vine play advantages (ADR-0035). ~64 games x 4 decisions x 3 alt playouts adds a
+# few seconds per iteration on the worker pool; play trains on ~256 exact-advantage
+# steps/iter instead of ~15k noisy GAE steps.
+vine:
+  enabled:            true
+  games_per_iter:     64
+  decisions_per_game: 4
+  branches:           4
+  pool_seed:          555000   # disjoint from the main rollout's seed stream
+
+cotrain_wish: true
+
+# Anchors: play tight to the SHIPPED policy (refinement, not exploration — the
+# wish-loosening A/B showed free wandering corrupts the trunk); schupfen/wish keep
+# their proven tight leashes; calls as before.
+kl:
+  play:     { coef: 1.0, target: 0.01,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v5_memmap_unshuffled\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

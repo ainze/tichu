@@ -478,6 +478,8 @@ def train_cotrain(
     update_device: str = "cpu",
     rollout_collect=None,
     train_wish: bool = False,
+    vine_collect=None,
+    reanchor_play_every: int = 0,
 ) -> list[dict]:
     """Run `iterations` of full-stack co-training self-play (ADR-0034).
 
@@ -492,6 +494,17 @@ def train_cotrain(
 
     history: list[dict] = []
     for it in range(start_iter, start_iter + iterations):
+        # Periodic play re-anchor (ADR-0035 addendum): the KL term is a fixed
+        # ball around the frozen anchor, so a tight leash caps TOTAL movement —
+        # the vine v1/v2 runs saturated it within ~20 iterations. Moving the play
+        # anchor onto the current net every N iterations turns the ball into a
+        # trail of contained, paired-evidence-backed steps. The wish head rides
+        # the play net, so its anchor moves too (accepted; guarded by the
+        # fix-rate/drift dial and the out-of-loop h2h reads). The resume bundle
+        # persists the anchors, so the trail survives restarts.
+        if reanchor_play_every and it and it % reanchor_play_every == 0:
+            bc_models["play"].load_state_dict(models["play"].state_dict())
+            print(f"  play anchor -> current net (iter {it})", flush=True)
         positions = sample_positions(it)
         if rollout_collect is not None:
             # Injected collector (e.g. process-parallel, ADR-0034 #1): reads the
@@ -508,6 +521,18 @@ def train_cotrain(
                 positions, policy, opponent_policy=opponent, learner_team=learner_team
             )
         batch = build_cotrain_batch(trajs, skill_decile=skill_decile, gamma=gamma, lam=lam)
+        # Vine play advantages (ADR-0035): replace the play head's GAE group with
+        # exact paired-branch advantages from dedicated deterministic vine games.
+        # The critic still pools the main rollout's play steps (it feeds the OTHER
+        # heads' GAE); an iteration with no vine rows keeps the GAE play group.
+        vine_rows = 0
+        if vine_collect is not None:
+            rows = vine_collect(it)
+            if rows:
+                from tichu_training.ppo.vine import vine_net_batch
+
+                batch.nets["play"] = vine_net_batch(rows, skill_decile=skill_decile)
+                vine_rows = len(rows)
         # Advance each controller's annealed KL target to this global iteration before
         # the update reads its coef / re-checks the band (resume-safe; ADR-0034 follow-up,
         # loosening the Schupfen leash). No-op for controllers without a target schedule.
@@ -527,6 +552,8 @@ def train_cotrain(
             stats[f"{dt}_kl_coef"] = c.coef
             if f"{dt}_kl" in stats:
                 c.update(stats[f"{dt}_kl"])
+        if vine_collect is not None:
+            stats["vine_rows"] = vine_rows
         stats["iter"] = it
         history.append(stats)
         if on_iteration is not None:

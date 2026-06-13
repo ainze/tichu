@@ -161,6 +161,8 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         f"{dt}_{k}" for dt in decision_types
         for k in ("policy_loss", "kl", "entropy", "kl_coef")
     ]
+    if bool(config.get("vine", {}).get("enabled", False)):
+        log_fields.append("vine_rows")
     gamma = float(ppo.get("gamma", 1.0))
     lam = float(ppo.get("lam", 0.95))
     pool_seed = int(ppo.get("pool_seed", 0))
@@ -192,6 +194,10 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     kl_controllers = _kl_controllers(config, decision_types)
     ent_cfg = config.get("entropy", {})
     ent_coefs = {dt: float(ent_cfg.get(dt, 0.01)) for dt in decision_types}
+    # Periodic play re-anchor (ADR-0035 addendum): the KL ball around a frozen
+    # anchor caps TOTAL movement; moving the anchor every N iterations turns it
+    # into a trail of contained steps. 0 = off (the fixed-anchor regime).
+    reanchor_play_every = int(config.get("reanchor_play_every", 0))
 
     def _sample_positions(iteration: int):
         return generate_full_position_pool(
@@ -204,7 +210,8 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     resumed = False
     resume_payload = None
     if Path(bundle_path).exists() and not restart:
-        resume_payload = load_resume_bundle(bundle_path, models=models, critic=critic, optimizer=optimizer)
+        resume_payload = load_resume_bundle(bundle_path, models=models, critic=critic,
+                                            optimizer=optimizer, bc_models=bc_models)
         for dt in decision_types:
             if dt in resume_payload["kl_coefs"]:
                 kl_controllers[dt].coef = float(resume_payload["kl_coefs"][dt])
@@ -271,11 +278,15 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             league.snapshot(models, critic, iteration + 1)
 
         # Resume Bundle every iteration (atomic, keep-2): a kill loses <=1 iter.
+        # The play anchor rides along only on re-anchoring runs (it's a full play
+        # net; without it a resume would snap the anchor back to the warm start).
         save_resume_bundle(
             bundle_path, models=models, critic=critic, optimizer=optimizer,
             kl_coefs={dt: kl_controllers[dt].coef for dt in decision_types},
             iteration=iteration + 1, rng_state=capture_rng(),
             league=(league.state() if league is not None else None),
+            play_anchor=(bc_models["play"].state_dict()
+                         if reanchor_play_every else None),
         )
         # Serving snapshots every snapshot_every (for the offline `check` command).
         if (iteration + 1) % snapshot_every == 0:
@@ -288,6 +299,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 f"iter {iteration + 1:>4}/{total_iters} | loss {stats['loss']:.3e} "
                 f"v {stats['value_loss']:.3e} | "
                 + " ".join(f"{dt[:2]} kl {stats[f'{dt}_kl']:.3f}" for dt in decision_types)
+                + (f" | vine {stats['vine_rows']}" if "vine_rows" in stats else "")
                 + f" | {row['wall_s']:.1f}s", flush=True,
             )
         if on_iteration is not None:
@@ -329,6 +341,41 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 opp_weights_path=opp,
             )
 
+    # Vine play advantages (ADR-0035): dedicated deterministic vine games whose
+    # paired-branch advantages REPLACE the play head's GAE group each iteration.
+    # Parallel-only (the branch playouts are the same CPU-engine work as rollouts);
+    # vine games draw from their own position-seed stream, disjoint from the main
+    # rollout's, so the play data distribution isn't correlated with the GAE data.
+    vine_cfg = config.get("vine", {})
+    vine_collect = None
+    if bool(vine_cfg.get("enabled", False)):
+        if parallel is None:
+            print("  vine requires rollout_workers>1 -> disabled", flush=True)
+        else:
+            vine_games = int(vine_cfg.get("games_per_iter", 64))
+            vine_decisions = int(vine_cfg.get("decisions_per_game", 4))
+            vine_branches = int(vine_cfg.get("branches", 4))
+            vine_seed = int(vine_cfg.get("pool_seed", 555000))
+            # Enrichment dials (v1 autopsy 2026-06-12): all-branch rows carry the
+            # corrective direction at no extra playout cost; the |A| floor drops
+            # near-tie rows that only dilute the play batch's normalization.
+            vine_emit_branches = bool(vine_cfg.get("emit_branches", False))
+            vine_min_abs_adv = float(vine_cfg.get("min_abs_advantage", 0.0))
+
+            def vine_collect(iteration: int):
+                # rollout_collect already saved this iteration's weights to
+                # weights_path; no update happens in between, so reuse it.
+                vpos = generate_full_position_pool(
+                    seed=vine_seed + iteration * vine_games, n=vine_games
+                )
+                return parallel.collect_vine(
+                    vpos, weights_path, decisions_per_game=vine_decisions,
+                    branches=vine_branches,
+                    base_seed=vine_seed + iteration * vine_games,
+                    emit_branches=vine_emit_branches,
+                    min_abs_advantage=vine_min_abs_adv,
+                )
+
     try:
         history = train_cotrain(
             models, bc_models, critic, _sample_positions,
@@ -339,7 +386,8 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             learner_team=learner_team, perfect_info=perfect_info,
             on_iteration=_on_iteration, start_iter=start_iter,
             update_device=update_device, rollout_collect=rollout_collect,
-            train_wish=cotrain_wish,
+            train_wish=cotrain_wish, vine_collect=vine_collect,
+            reanchor_play_every=reanchor_play_every,
         )
     finally:
         if parallel is not None:
