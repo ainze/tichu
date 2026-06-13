@@ -164,6 +164,67 @@ the policy wasn't going to pick them anyway); (2) **numerical guard** —
 ratio the 0.1-clip could pass through). The crashed run restarts fresh from the
 v1@2400 warm start (~170 iterations lost, clean attribution).
 
+### Re-anchoring KILLED — decisive −23 regression (2026-06-12)
+
+The re-anchored run's dial climbed as designed (fix-rate 2.1% → 8.3% @ iter 550
+→ 10.6% @ iter 1000; play KL pinned at target throughout). The h2h read at
+iter 1025 (10 re-anchors), n=40k: **−23.59 [−25.58, −21.53]**, win-rate
+44.8% vs 53.6%. The policy is BROKEN, not under-improved — a larger swing than
+06225's entire +8.37 over BC master.
+
+**Two findings:**
+
+1. **The fix-rate dial is invalid as a strength proxy in this regime** — it rose
+   monotonically while strength collapsed. It measures agreement with a STATIC
+   set of 06225-mined corrections; as the policy drifts from 06225, "fixing" more
+   of them stops meaning "playing better."
+
+2. **The fixed 06225 anchor was load-bearing safety, not a limitation** —
+   exactly the opposite of the re-anchoring premise. Root cause is **self-play
+   co-drift**: the vine advantage plays every branch with all four seats = the
+   CURRENT policy. A fixed 06225 anchor kept those continuations ~06225-quality,
+   so the estimator was honest (hence v1 safe-but-flat at +0.45). Moving the
+   anchor makes the policy and its own sparring partner the same drifting net —
+   the estimator rewards moves that beat a WEAKENING self, not strong play, and
+   each re-anchor degrades the reference further. The tournament (drifted policy
+   vs STATIC 06225) reveals the truth the self-referential estimator cannot see.
+   The KL ball capped both the damage and the gain.
+
+**Cliff map** (`data/runs/cotrain_vine_v2/diag_cliff.ps1`, 4k each) confirms it:
+
+| iter | re-anchors | h2h vs 06225 |
+| --- | --- | --- |
+| 75  | 0 (pre-first) | **+0.23** [−3.98, +5.05] — parity |
+| 300 | 3 | −1.96 [−6.25, +2.58] |
+| 500 | 5 | −2.46 [−6.93, +2.04] |
+| 1025 | 10 | **−23.59** [−25.58, −21.53] |
+
+Smooth monotonic decline ∝ re-anchor count (rules out a re-anchor *bug* — a bug
+would crater at iter 100), SUPER-LINEAR past iter 500 (the runaway co-drift
+feeding on itself). iter 75 at parity also retires the last open experiment in
+the cheap direction: **fixed-anchor vine is safe at any enrichment, full stop**
+(v1 chosen-only +0.45 @ 2400; v2 branch-enriched +0.23 @ 75) — and characterized
+flat, capped by the ball.
+
+**Verdict: the re-anchoring escalation joins the closed ledger, and base vine is
+characterized as EV-neutral-and-safe-but-flat.** Two forward options:
+
+1. **Close ADR-0035 in full.** The strength program re-closes; the
+   human-measurement loop (handoff doc) is the remaining path to the superhuman
+   question. This is the disciplined default — vine had its multi-thousand-iter
+   stretch.
+2. **Frozen-reference vine (v3), if one more build cycle is warranted.** The
+   co-drift diagnosis points at a specific, principled fix: play the branch
+   continuations with a FROZEN strong reference (06225, or a slow-cadence
+   snapshot) as the field instead of the current policy. The advantage then
+   measures "is this move better against a fixed strong opponent field" — exactly
+   the tournament/human target — and stays honest as the learner travels, so
+   re-anchoring becomes safe (this is approximate/conservative policy iteration:
+   improve against a fixed evaluator, update the evaluator on a slow cadence).
+   The chosen-branch parity trick is lost (one extra playout/decision), but the
+   estimator's self-referential bias — the thing that just cost −23 — is removed
+   at the root. Untested; the owner's call whether the program funds it.
+
 ## Build (2026-06-11, test-first, all green)
 
 `ppo/vine.py` (`collect_vine_rows`, `vine_net_batch`) reusing the blunder-miner's
