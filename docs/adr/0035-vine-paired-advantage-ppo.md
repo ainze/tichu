@@ -1,8 +1,17 @@
 ---
-status: proposed
+status: closed
 ---
 
 # Vine / paired-advantage PPO — give the play head the luck-free signal PPO never had
+
+> **CLOSED 2026-06-13.** Built and run across three variants. Fixed-anchor vine is
+> EV-neutral-and-safe but flat (v1 +0.45 @ 2400, v2 +0.23 @ 75); the re-anchoring
+> escalation regressed −23.59 via self-play co-drift (full arc in the addenda
+> below). The paired-advantage lever joins the closed ledger and the strength
+> program re-closes. Owner decision (vine fork): pivot to the human-measurement
+> loop. The diagnosis leaves a principled, unbuilt successor on the table —
+> frozen-reference vine (conservative policy iteration) — should the program ever
+> reopen; it is NOT funded as of this close.
 
 The ADR-0034 closure attributed the +8.37 plateau to advantage noise: `R − V(s)`
 carries the round's irreducible outcome variance (~55–60% even with the perfect-info
