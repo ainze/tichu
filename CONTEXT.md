@@ -447,6 +447,26 @@ _Avoid_: AlphaZero (bare — name the loop), RL fine-tune, online training.
 One cycle of the **Search + Learning loop** — self-play with the current `(policy, critic)`, retrain both on the produced targets, export, evaluate, and gate promotion to the next Generation on strength-non-regression vs `master`.
 _Avoid_: epoch, iteration, round (a Round is one deal — distinct).
 
+### Phase 2 / human-regularized planning terms
+
+**Rule:** these are a **different family** from the **PIMC** line above — human/anchor-regularized planning (the Cicero / Suphx lineage), not perfect-information Monte-Carlo tree search. Never call **piKL** "search" bare (that bare word is reserved for PIMC) and never call it MCTS — it runs **no tree** and takes **no per-world argmax**. **CLOSED — built, run, and falsified** ([ADR-0037](docs/adr/0037-pikl-inference-time-anchored-search.md)): −58/round, the rollout `Q`'s τ-continuation is self-inconsistent with the deployed policy (the same family that closed the vine / pMCPA / search-and-learning levers). The vocabulary is retained for the closed record.
+
+**piKL** (KL-regularized better-response, proposed):
+The inference-time planning method `π_i(a) ∝ τ_i(a) · exp(Q_i(a) / λ_i)` — re-weight the **BC Anchor**'s action distribution by an advantage `Q`, leashed toward the anchor by `λ`. `λ→∞` = pure anchor (BC); `λ→0` = unregularized better-response. Converges to NE in 2-player-zero-sum, **CCE in general/many-player** games — the graceful degradation that lets it fit 4-player partnership Tichu where the **PIMC**/ReBeL/CFR lineage is mathematically restricted to 2p0s. **Structurally outside the closed-lever failure family** ([ADR-0031](docs/adr/0031-search-and-learning-loop.md)/[ADR-0035](docs/adr/0035-vine-paired-advantage-ppo.md)/[ADR-0036](docs/adr/0036-pmcpa-runtime-policy-adaptation.md)): the field is the **frozen** anchor (no self-play **co-drift**) and no weights are updated (no θ_a deviation) — it is the *inference-time realization* of the frozen-reference successor ADR-0035 left unbuilt. Distinct from **PIMC** (no tree, no per-world argmax → no strategy fusion; piKL emits a single info-set policy marginalized over **Determinized Worlds**). The full locked design (rollout-`Q`, Play-first, standardized-`Q` λ, coverage pre-gate, bands) is [ADR-0037](docs/adr/0037-pikl-inference-time-anchored-search.md). Source: Jacob et al., ICML 2022 (arXiv:2112.07544); Cicero/Diplomacy precedent.
+_Avoid_: search (bare — reserved for PIMC), MCTS, anchored softmax (that names only the closed form, not the method), KL-search.
+
+**BC Anchor** (τ, proposed):
+The **frozen** behaviour-cloned policy that **piKL** both regularizes toward (the `τ` in `π ∝ τ·exp(Q/λ)`) and simulates the field with (partner + opponents continue as τ in the `Q` rollout). Concretely the served **Policy Network** play head for v1 (the **Schupfen Network** when piKL extends to Schupfen). Its frozenness is **load-bearing safety, not a limitation** — the re-anchored vine's −23.59 ([ADR-0035](docs/adr/0035-vine-paired-advantage-ppo.md)) proved that letting the field drift is what breaks the estimator. Must **never** be a PPO / self-play / adapting policy (the Cicero off-convention failure).
+_Avoid_: prior, reference policy, frozen policy (bare), anchor (bare — qualify as BC Anchor).
+
+**piKL Q**:
+The advantage `Q(a)` that **piKL** re-weights the **BC Anchor** by — for v1, the **Leaf-Rollout** estimator: from the post-action successor, play the **Determinized World** to terminal under the frozen **BC Anchor** on all four seats and average `round_outcome` over worlds (the **blunder-miner**'s luck-cancelled paired signal, the one value estimate proven to rank actions correctly). The **Perfect-Info Critic** / observable **Value Baseline** as a rollout-free leaf evaluator is the documented variance-reduction escalation, **gated** on a pre-check that it ranks the mined corrections correctly — not the v1 default.
+_Avoid_: Q-value (bare), value, advantage (bare — those collide with critic/AWR terms).
+
+**piKL Agent** (proposed):
+The **Agent** whose `act` runs **piKL** over the frozen **BC Anchor** — the strategy v1 measures against `master` in the **Tournament**. A latency-bearing offline strength experiment first (like the **Search Agent**), not a served **Difficulty** tier in v1.
+_Avoid_: piKL bot, anchored agent.
+
 ### Endgame / claim terms
 
 These are **deterministic, card-counted certainties**, categorically distinct from the Monte-Carlo **PIMC** vocabulary (**Determinized World**, **Leaf Rollout**) — never describe a claim-solver result as a "search" or a "rollout". Proposed in the grilling session of 2026-06-05 as the direction after the entire Phase-2 search / search+learning line was empirically falsified (see [ADR-0031](docs/adr/0031-search-and-learning-loop.md) "Final synthesis").
