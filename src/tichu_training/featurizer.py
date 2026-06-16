@@ -1,4 +1,4 @@
-"""Featurizer v4: PrivateState → fixed-shape float32 ndarray.
+"""Featurizer (v6): PrivateState → fixed-shape float32 ndarray.
 
 Pure function. No I/O, no globals, no hash-seed-sensitive ordering. Output
 shape is `(FEATURIZER_OUTPUT_DIM,)` for every legal PrivateState (including
@@ -39,13 +39,17 @@ from tichu_training.action_space import (
 )
 
 
-FEATURIZER_VERSION: str = "v5"
+FEATURIZER_VERSION: str = "v6"
 
-# v5 == v4 feature *content* — the `featurize()` output is byte-identical to
-# v4. The bump is a deliberate version-stamp realignment (ADR-0022): it makes
-# the stamp match the packed-bundle directory generation and forces a clean
-# re-materialise + retrain, retiring the v4-stamped checkpoints. Do NOT look
-# for a featurizer change in v5; there isn't one. The layout below is ADR-0017's.
+# v6 (ADR-0038): drops aggregate `seen_cards[56]`, adds per-player
+# `played_by[4][56]` (relative-seat [self, next, partner, previous]), re-adds
+# self-only `schupfen_received[3][56]`, adds ADR-0028 B-core cross-Trick
+# negative-info channels (`declined_top[18]`, `lead_summary[6]`,
+# `pass_pressure[3]`), and `trick_leader[4]`. 224 → 591. v5 checkpoints/bundles
+# are not loadable against v6 — the version pin catches this.
+#
+# v5 == v4 feature *content* (kept for context): the bump was a deliberate
+# version-stamp realignment (ADR-0022) with no featurizer change.
 #
 # v4: trick_top_combo is a 50-dim union-of-fields layout, NOT a one-hot
 # over the v1 Action Space. The action-space dependency is severed on
@@ -73,9 +77,19 @@ SECTION_DIMS: dict[str, int] = {
     "phase": 5,
     "trick_top_combo": sum(TRICK_TOP_COMBO_SUBFIELDS.values()),
     "trick_passes": 4,
-    "seen_cards": 56,
+    "trick_leader": 4,        # v6: who led the current trick, relative-seat
+    "played_by": 4 * 56,      # v6: per-player provenance, relative-seat planes
+    "schupfen_received": 3 * 56,  # v6: self-only, 3 give-directions × 56
+    "declined_top": 3 * 6,    # v6 (ADR-0028 B-core): 3 opp × 6 intent-types
+    "lead_summary": 3 * 2,    # v6 (ADR-0028 B-core): 3 opp × (tricks_led, low-lead)
+    "pass_pressure": 3 * 1,   # v6 (ADR-0028 B-core): 3 opp × pass-fraction
 }
 FEATURIZER_OUTPUT_DIM: int = sum(SECTION_DIMS.values())
+
+# v6 (ADR-0028 B-core): fixed cap to normalise a per-opponent tricks-led count
+# into [0, 1]. A Round has at most a handful of tricks per seat in practice;
+# the cap only needs to bound the ratio, not be exact.
+LEAD_TRICKS_CAP: int = 14
 
 
 def _compute_section_offsets() -> dict[str, int]:
@@ -119,7 +133,11 @@ def mask_self_tichu_call(features: np.ndarray, seat: int) -> None:
 # bumps FEATURIZER_VERSION, which the bundle pin already enforces. See
 # [ADR-0019](../../docs/adr/0019-bit-pack-materialised-bundle.md).
 CONTINUOUS_SECTIONS: frozenset[str] = frozenset(
-    {"hand_sizes", "team_scores", "round_points"}
+    {
+        "hand_sizes", "team_scores", "round_points",
+        # v6 (ADR-0028 B-core): normalised ratios, not 0/1 indicators.
+        "declined_top", "lead_summary", "pass_pressure",
+    }
 )
 
 
@@ -274,12 +292,56 @@ def featurize(private_state: PrivateState) -> np.ndarray:
             out[cursor + seat] = 1.0
     cursor += SECTION_DIMS["trick_passes"]
 
-    # 13. Seen-cards multi-hot over 56 slots — every card played so far this
-    # round, accumulated by the engine in `played_cards_this_round` and reset
-    # at round boundaries by `_finalise_round`.
-    for card in pub.played_cards_this_round:
-        out[cursor + _card_slot(card)] = 1.0
-    cursor += SECTION_DIMS["seen_cards"]
+    # 13. Trick leader (v6): who led the current trick, in relative-seat order
+    # [self, next, partner, previous]. All-zero on an empty trick. ADR-0038.
+    leader = pub.trick.leader
+    if leader is not None and 0 <= leader < 4:
+        out[cursor + (leader - private_state.player) % 4] = 1.0
+    cursor += SECTION_DIMS["trick_leader"]
+
+    # 14. played_by (v6): per-player provenance planes, relative-seat ordered
+    # [self, next, partner, previous]. Each played card sits in exactly one
+    # plane (the seat that played it). ADR-0038.
+    for seat in range(4):
+        plane_base = cursor + ((seat - private_state.player) % 4) * 56
+        for card in pub.played_cards_by_player[seat]:
+            out[plane_base + _card_slot(card)] = 1.0
+    cursor += SECTION_DIMS["played_by"]
+
+    # 15. schupfen_received (v6): self-only — the acting seat's three received
+    # cards, by relative give-direction [from_next, from_partner, from_previous].
+    # ADR-0038. All-zero before the schupfen exchange resolves.
+    for direction, card in enumerate(private_state.schupfen_received):
+        if card is not None:
+            out[cursor + direction * 56 + _card_slot(card)] = 1.0
+    cursor += SECTION_DIMS["schupfen_received"]
+
+    # 16. declined_top (v6, ADR-0028 B-core): per opponent (relative-seat
+    # [next, partner, previous]) × 6 non-bomb intent types, the max primary
+    # rank that opponent declined to beat, normalised rank/14.
+    for rel in range(1, 4):  # next, partner, previous
+        seat = (private_state.player + rel) % 4
+        seat_declines = pub.declined_top_by_player[seat]
+        for t in range(6):
+            out[cursor + (rel - 1) * 6 + t] = seat_declines[t] / 14.0
+    cursor += SECTION_DIMS["declined_top"]
+
+    # 17. lead_summary (v6, ADR-0028 B-core): per opponent (relative-seat),
+    # tricks_led / cap and lowest single-lead rank / 14.
+    for rel in range(1, 4):
+        seat = (private_state.player + rel) % 4
+        tricks_led, lowest_single = pub.lead_summary_by_player[seat]
+        out[cursor + (rel - 1) * 2] = tricks_led / LEAD_TRICKS_CAP
+        out[cursor + (rel - 1) * 2 + 1] = lowest_single / 14.0
+    cursor += SECTION_DIMS["lead_summary"]
+
+    # 18. pass_pressure (v6, ADR-0028 B-core): per opponent (relative-seat),
+    # fraction of that opponent's play decisions that were Passes.
+    for rel in range(1, 4):
+        seat = (private_state.player + rel) % 4
+        n_pass, n_dec = pub.pass_stats_by_player[seat]
+        out[cursor + (rel - 1)] = n_pass / n_dec if n_dec else 0.0
+    cursor += SECTION_DIMS["pass_pressure"]
 
     assert cursor == FEATURIZER_OUTPUT_DIM
     return out

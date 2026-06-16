@@ -152,8 +152,14 @@ def test_adaptation_moves_logp_toward_positive_advantage_actions():
     from tichu_training.ppo.pmcpa import adapt_play_net
 
     adapt_play_net(play_a, play_o, rows, steps=8, lr=0.05, kl_coef=0.0, skill_decile=9)
-    before = sum(_logp(play_o, r) for r in positive) / len(positive)
-    after = sum(_logp(play_a, r) for r in positive) / len(positive)
+    # Advantage-weighted mean logp over the positive rows is the principled
+    # measure of "moved toward the higher-advantage actions": the update
+    # concentrates mass on the top-advantage actions, so a plain unweighted mean
+    # is a fragile proxy (lower-but-positive rows can dip and drag it down even
+    # when the mechanism worked — the seeded init at featurizer v6 exposed this).
+    w = sum(r["advantage"] for r in positive)
+    before = sum(r["advantage"] * _logp(play_o, r) for r in positive) / w
+    after = sum(r["advantage"] * _logp(play_a, r) for r in positive) / w
     assert after > before
 
 

@@ -392,3 +392,30 @@ class Straight(_SameTypeSameLengthRankCompare):
         # and trusted-path Straights collide in sets/frozensets.
         object.__setattr__(obj, "_hash", hash((cards, phoenix_as_rank)))
         return obj
+
+
+def combo_type_and_rank(combo: object) -> tuple[int, int] | None:
+    """(type_idx 0..5, primary rank 1..14) for a non-bomb Combination, else None.
+
+    Type indices match the featurizer's intent_kind order: Single 0, Pair 1,
+    Triple 2, FullHouse 3, PairStep 4, Straight 5. Bombs and the NaN-rank Dog
+    return None. Single source of truth for the cross-Trick decline channel
+    (ADR-0028 B-core) — consumed by the engine's live decline accumulators and
+    the belief HistoryAccumulator alike.
+    """
+    if isinstance(combo, Single):
+        r = combo.rank
+        if r != r:  # NaN (Dog)
+            return None
+        return (0, max(1, min(14, int(r))))  # Phoenix 1.5->1, Dragon 25->14
+    if isinstance(combo, Pair):
+        return (1, combo.rank)
+    if isinstance(combo, Triple):
+        return (2, combo.rank)
+    if isinstance(combo, FullHouse):
+        return (3, combo.triple.rank)
+    if isinstance(combo, PairStep):
+        return (4, combo.rank)
+    if isinstance(combo, Straight):
+        return (5, combo.rank)
+    return None

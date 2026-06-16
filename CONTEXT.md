@@ -96,7 +96,7 @@ _Avoid_: observation, view, perspective, info-set.
 A field on PublicState that marks the engine as mid-resolving a special Decision (`DragonGivePending` | `MahjongWishPending` | `SchupfenPending`). Not a separate state type — a flag inside PublicState.
 
 **Feature Vector**:
-The fixed-shape float32 tensor produced by `featurize(PrivateState)`. Width is set by `FEATURIZER_OUTPUT_DIM` (currently 1,983 at v3; targeting 224 at v4 — see [ADR-0017](docs/adr/0017-featurizer-v4-compact-trick-top-combo.md)). Version-pinned via the featurizer version stamped on every Checkpoint.
+The fixed-shape float32 tensor produced by `featurize(PrivateState)`. Width is set by `FEATURIZER_OUTPUT_DIM` (224 at v5; **591 at v6 in design** — per-player `played_by` + self-only `schupfen_received` + cross-Trick negative-info channels + `trick_leader`, see [ADR-0038](docs/adr/0038-featurizer-v6-played-by-and-schupfen-received.md)). Version-pinned via the featurizer version stamped on every Checkpoint.
 _Avoid_: encoded state, observation, input, x, featurized state.
 
 **Wire PrivateState**:
@@ -189,7 +189,7 @@ The in-memory `torch.nn.Module` reconstructed from a Checkpoint's payload. Creat
 _Avoid_: using "Model" for the file on disk.
 
 **Featurizer**:
-The pure function `featurize(PrivateState) -> Feature Vector`. Version-pinned (currently `"v3"`; v4 in design — see [ADR-0017](docs/adr/0017-featurizer-v4-compact-trick-top-combo.md)); the version is stamped on every Checkpoint.
+The pure function `featurize(PrivateState) -> Feature Vector`. Version-pinned (currently `"v5"` at 224 dims; **`"v6"` in design at 591 dims** — replaces aggregate `seen_cards[56]` with per-player `played_by[4][56]` relative-seat planes, re-adds self-only `schupfen_received[3][56]`, and adds cross-Trick negative-info channels (B-core, 27) + `trick_leader[4]`, see [ADR-0038](docs/adr/0038-featurizer-v6-played-by-and-schupfen-received.md)); the version is stamped on every Checkpoint.
 _Avoid_: encoder, feature extractor.
 
 **Trunk**:
@@ -512,4 +512,5 @@ _Avoid_: endgame search, solver (bare), lookahead, claim search.
 - "game" used loosely for either a `ParsedGame` or a Tichu Game-to-1000 — resolved: a **Game** is a sequence of Rounds played to 1000; a `ParsedGame` is a Game iff at least one team's cumulative `ergebnis` reaches ≥ 1000 (a **Complete Game**). The remainder are **Incomplete Sessions** — included in BC labels (round-level data is intact) but excluded from the `"game"` Value Target.
 - "schupfen is a BC head with `HEAD_LOGIT_DIMS['schupfen']=3`" — resolved: schupfen is a **standalone Schupfen Network**, same pattern as Call Networks. The 3-output stub in `bc/heads.py` is removed; the BC model now has three heads (play, wish, dragon_assignment). The `schupfen_00000.parquet` shard feeds `train_schupfen`, not `train_bc`. See [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md).
 - "version" used loosely for both Featurizer Version and a model's training-run identity — resolved: a Tournament agent may mix networks from **different training runs / scales / epochs / checkpoints** freely, but **only at a single Featurizer Version**. Every export an MLAgent loads is asserted against the harness's global `FEATURIZER_VERSION` (`load_exported`), so featurizer-v3 and featurizer-v5 exports cannot coexist in one process — cross-Featurizer-Version comparison is two separate runs, not one matrix. See [ADR-0025](docs/adr/0025-full-strength-tournament-is-the-only-variant-and-includes-calls.md).
+- "Schupfen provenance is hidden — the receiver can't know which seat passed which card" (ADR-0015 Finding 3) — **resolved: factually wrong about Tichu/BSW.** Schupfen passes to *specific seats* and is collected from *specific seats*; the face-down rule enforces *simultaneity* (no one commits after seeing others' passes), **not anonymity of source**. The receiver legitimately knows the provenance of all three received cards. So `schupfen_received` is *not* a rules violation — it is re-added (self-only) at featurizer v6. See [ADR-0038](docs/adr/0038-featurizer-v6-played-by-and-schupfen-received.md). (Note this is *self-only*: a player never sees what opponents passed *each other*.)
 - "Tichu Call sees no Trick or public-play history" (ADR-0007 §rationale 1) — resolved: that's the upper bound at deal-time, not the actual featurise state. **Tichu Call featurises at the seat's first non-Pass Play state** (per-seat, symmetric across positives and negatives). May include up to ~3 prior Plays of public history. Grand-Tichu still featurises at the synthetic deal-time 8-card state. See [ADR-0018](docs/adr/0018-tichu-call-featurises-at-first-non-pass-play.md).

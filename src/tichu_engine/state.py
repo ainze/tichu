@@ -108,6 +108,26 @@ class PublicState:
     tichu_callers: frozenset[int] = frozenset()
     grand_tichu_callers: frozenset[int] = frozenset()
     played_cards_this_round: frozenset[CardOrSpecial] = frozenset()
+    # v6 (ADR-0038): per-player provenance of cards played this round, by
+    # absolute seat. The featurizer reads this relative-seat ordered. Reset
+    # per round alongside `played_cards_this_round`.
+    played_cards_by_player: tuple[
+        frozenset[CardOrSpecial], frozenset[CardOrSpecial],
+        frozenset[CardOrSpecial], frozenset[CardOrSpecial],
+    ] = (frozenset(), frozenset(), frozenset(), frozenset())
+    # v6 (ADR-0028 B-core): per-absolute-seat cross-Trick decline accumulators.
+    # declined_top_by_player[seat] = max primary-rank that seat declined to beat,
+    # per non-bomb intent type (Single, Pair, Triple, FullHouse, PairStep,
+    # Straight); 0 = never. Raw ranks — the featurizer normalises rank/14.
+    declined_top_by_player: tuple[
+        tuple[int, int, int, int, int, int], ...
+    ] = ((0, 0, 0, 0, 0, 0),) * 4
+    # v6 (ADR-0028 B-core): per-absolute-seat (tricks_led, lowest_single_lead_rank).
+    # lowest_single_lead_rank 0 = no single lead yet. Raw — featurizer normalises.
+    lead_summary_by_player: tuple[tuple[int, int], ...] = ((0, 0),) * 4
+    # v6 (ADR-0028 B-core): per-absolute-seat (n_passes, n_play_decisions).
+    # pass_pressure = n_passes / n_play_decisions.
+    pass_stats_by_player: tuple[tuple[int, int], ...] = ((0, 0),) * 4
 
     def __post_init__(self) -> None:
         if not 0 <= self.current_player < NUM_PLAYERS:
@@ -125,6 +145,13 @@ class PrivateState:
     player: int
     hand: frozenset[CardOrSpecial]
     public: PublicState
+    # v6 (ADR-0038): self-only schupfen provenance — the three cards this player
+    # received, by relative give-direction (from_next, from_partner,
+    # from_previous). Private to the player (never opponents' exchanges). None
+    # before the exchange resolves.
+    schupfen_received: tuple[
+        CardOrSpecial | None, CardOrSpecial | None, CardOrSpecial | None,
+    ] = (None, None, None)
 
     def __post_init__(self) -> None:
         if not 0 <= self.player < NUM_PLAYERS:
@@ -142,6 +169,12 @@ class GameState:
 
     hands: tuple[frozenset[CardOrSpecial], ...]
     public: PublicState
+    # v6 (ADR-0038): per-player schupfen provenance — the three cards each seat
+    # received, by relative give-direction (from_next, from_partner,
+    # from_previous), or None before/without an exchange. Private per seat, so it
+    # lives on GameState (never serialised to agents) and is surfaced only via
+    # private_view, NOT on the shared PublicState.
+    schupfen_received: tuple = (None, None, None, None)
 
     def __post_init__(self) -> None:
         if len(self.hands) != NUM_PLAYERS:
@@ -150,7 +183,11 @@ class GameState:
     def private_view(self, player: int) -> PrivateState:
         if not 0 <= player < NUM_PLAYERS:
             raise ValueError(f"player must be in [0, {NUM_PLAYERS}), got {player}")
-        return PrivateState(player=player, hand=self.hands[player], public=self.public)
+        received = self.schupfen_received[player]
+        return PrivateState(
+            player=player, hand=self.hands[player], public=self.public,
+            schupfen_received=received if received is not None else (None, None, None),
+        )
 
 
 def deal_initial_state(seed: int) -> GameState:

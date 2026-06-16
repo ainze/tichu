@@ -1,8 +1,8 @@
 # ADR-0015: Featurizer v3 drops `play_history`, `schupfen_received`, and `phoenix_played`
 
-- **Status:** Accepted
+- **Status:** Accepted — but **Finding 3 (the `schupfen_received` rules-violation classification) is corrected by [ADR-0038](0038-featurizer-v6-played-by-and-schupfen-received.md).** Tichu/BSW *does* let the receiver know which seat passed which card (face-down enforces simultaneity, not anonymity), so `schupfen_received` is legitimate observable signal, re-added self-only at v6. The `play_history` and `phoenix_played` removals stand; the `played_by` deferral (rationale 5) is taken up by ADR-0038.
 - **Date:** 2026-05-29
-- **Related:** [ADR-0011](0011-bc-training-replay-on-the-fly.md), [ADR-0012](0012-schupfen-is-a-standalone-network.md), [ADR-0013](0013-parquet-schema-versioned-by-directory.md), [ADR-0014](0014-pre-featurise-bc-corpus.md)
+- **Related:** [ADR-0011](0011-bc-training-replay-on-the-fly.md), [ADR-0012](0012-schupfen-is-a-standalone-network.md), [ADR-0013](0013-parquet-schema-versioned-by-directory.md), [ADR-0014](0014-pre-featurise-bc-corpus.md), [ADR-0038](0038-featurizer-v6-played-by-and-schupfen-received.md)
 
 ## Context
 

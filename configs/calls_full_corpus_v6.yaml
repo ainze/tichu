@@ -1,0 +1,35 @@
+# Call-Network config — FULL corpus, featurizer v6 (ADR-0038).
+#
+# Pointed at the full-corpus calls bundle (materialised_full_v6/calls).
+# train_calls reads its type's slice (call_tichu / call_grand_tichu) from this
+# dir and STREAMS it via iter_batches — the full slice is ~88M rows per call
+# type, so the old `materialize: true` list path would OOM. `materialize` is
+# ignored for memmap; the val holdout is a game_id hash split carved from the
+# stream (no up-front materialisation).
+#
+# Identical arch/hyperparameters to configs/calls_full_corpus_v5.yaml — the only
+# deltas are the v6 bundle path and this header. Run from the worktree with src
+# first on PYTHONPATH so the v6 featurizer is used (a sibling worktree shadows
+# the import otherwise); the job hard-errors on a v5/v6 bundle-pin mismatch.
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v6\calls
+
+model:
+  hidden: 256
+  skill_dim: 64
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 4
+checkpoint_every: 5000
+seed: 0
+
+# Shuffle the training pass each epoch. The calls slice is small enough for a
+# cheap in-place permutation (no shuffle-buffer machinery like BC needs). The
+# game_id val split is unaffected (it hashes on game_id, already recency-balanced).
+shuffle: true
+
+# Game-level holdout (whole games on one side; split by game_id). Per-epoch
+# val loss/accuracy/AUC logged to <tag>_val.csv.
+val_frac: 0.1

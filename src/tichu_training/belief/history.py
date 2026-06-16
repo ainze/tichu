@@ -25,9 +25,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tichu_engine.combinations import (
-    FullHouse, Pair, PairStep, Single, Straight, Triple,
-)
+from tichu_engine.combinations import combo_type_and_rank
 from tichu_training.card_slots import card_slot
 from tichu_training.featurizer import (
     CONTINUOUS_FEATURE_COLUMNS, FEATURIZER_OUTPUT_DIM,
@@ -54,10 +52,6 @@ TIER_DIMS: dict[str, int] = {
     "B_full": BELIEF_FEATURE_DIM,                     # 307
 }
 
-# Combination type -> index 0..5 (matches the featurizer's intent_kind order).
-_TYPE_SINGLE, _TYPE_PAIR, _TYPE_TRIPLE = 0, 1, 2
-_TYPE_FULL_HOUSE, _TYPE_PAIR_STEP, _TYPE_STRAIGHT = 3, 4, 5
-
 
 def belief_continuous_columns() -> tuple[int, ...]:
     """Continuous (non-bit-packable) column indices of the 307-dim belief input:
@@ -67,27 +61,10 @@ def belief_continuous_columns() -> tuple[int, ...]:
     )
 
 
-def _combo_type_and_rank(combo: object) -> tuple[int, int] | None:
-    """(type_idx 0..5, primary rank 1..14) for a non-bomb Combination, else None.
-
-    Bombs return None (excluded from the decline channel); the Dog (NaN rank)
-    returns None — it can never be a Trick top anyway."""
-    if isinstance(combo, Single):
-        r = combo.rank
-        if r != r:                       # NaN (Dog)
-            return None
-        return (_TYPE_SINGLE, max(1, min(14, int(r))))   # Phoenix 1.5->1, Dragon 25->14
-    if isinstance(combo, Pair):
-        return (_TYPE_PAIR, combo.rank)
-    if isinstance(combo, Triple):
-        return (_TYPE_TRIPLE, combo.rank)
-    if isinstance(combo, FullHouse):
-        return (_TYPE_FULL_HOUSE, combo.triple.rank)
-    if isinstance(combo, PairStep):
-        return (_TYPE_PAIR_STEP, combo.rank)
-    if isinstance(combo, Straight):
-        return (_TYPE_STRAIGHT, combo.rank)
-    return None                          # FourOfAKindBomb / StraightFlushBomb / other
+# The canonical (type_idx, rank) projection lives in the engine layer so the
+# engine's live decline accumulators and this belief-replay path share one
+# definition (ADR-0038). Re-exported under the historic private name.
+_combo_type_and_rank = combo_type_and_rank
 
 
 class HistoryAccumulator:
