@@ -414,6 +414,13 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             _append_gate_row(gate_log_path, iteration + 1, v)
             if v["promote"]:
                 _save_champion(champion_path, models, critic)
+                # Serving snapshot AT the promotion iter so the champion is directly
+                # check_cotrain-able: the regular periodic snapshots are the LEARNER,
+                # which wanders after a promotion, so the nearest one understates the
+                # champion. Same naming, so it coincides cleanly with a periodic save.
+                for dt in _NET_TYPES:
+                    save_checkpoint(models[dt], optimizer, step=iteration + 1,
+                                    path=str(snapshots_dir / f"iter_{iteration + 1:05d}_{dt}.bin"))
                 if reanchor_on_promote:
                     # Validated escape: the KL anchor follows the new champion, so the
                     # learner can move further from the original BC next window.

@@ -70,6 +70,10 @@ def test_gate_creates_champion_and_promotes_on_passing_verdict(tmp_path):
     assert rows, "gate window (2 games) should fill each iter and log a verdict"
     assert all(r["promoted"] == "1" for r in rows)
     assert int(rows[0]["n"]) >= 2
+    # A promotion fires at iter 1 (off the snapshot_every=2 cadence), so a serving
+    # snapshot at iter_00001 exists ONLY because promotion saves one — the champion
+    # is directly check_cotrain-able.
+    assert (run_dir / "snapshots" / "iter_00001_play.bin").exists()
 
 
 def test_gate_holds_when_threshold_unreachable(tmp_path):
