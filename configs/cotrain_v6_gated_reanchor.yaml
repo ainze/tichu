@@ -71,7 +71,12 @@ kl:
   play:     { coef: 1.0, target: 0.08,  factor: 2.0 }
   schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
   tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
-  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  # Grand anchored TIGHTER (0.008, like schupfen) with a gentler controller
+  # (factor 1.5): grand's advantages are ~81% noise (R^2 0.19, worst lever) and it's
+  # a rare near-deterministic binary call, so KL is hyper-sensitive there — at 0.02
+  # the controller overshot to ~0.075 and oscillated hard (beta 1e-4..50). Tighter
+  # target keeps it near the BC it can't beat; lower factor damps the oscillation.
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
 
 entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
 
