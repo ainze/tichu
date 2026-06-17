@@ -90,6 +90,34 @@ def _freeze(module):
     return module
 
 
+def _build_optimizer(models, critic, *, policy_lr: float, critic_lr: float,
+                     freeze_nets=()):
+    """Adam over the trainable policy nets + the shared critic.
+
+    Nets named in `freeze_nets` are frozen at their warm-started BC weights: still
+    driven in the rollout (so the full stack plays at BC quality) but excluded from
+    the optimizer, so only the remaining nets (+ critic) learn. This isolates one
+    net's training from cross-net interference — the shared critic and the single
+    joint `optimizer.step()` are the only coupling between the otherwise-separate
+    nets (ADR-0034), so freezing the call/schupfen nets lets the play net train
+    against a STATIONARY teammate environment instead of chasing drifting calls.
+
+    Returns `(optimizer, trainable_net_names)`. Freezing happens here so the params
+    are excluded before the optimizer captures them."""
+    freeze = set(freeze_nets)
+    if "play" in freeze:
+        raise ValueError("cannot freeze 'play' — there would be nothing to train")
+    unknown = freeze - set(_NET_TYPES)
+    if unknown:
+        raise ValueError(f"freeze_nets has unknown nets {sorted(unknown)}; valid: {list(_NET_TYPES)}")
+    for dt in freeze:
+        _freeze(models[dt])
+    trainable = [dt for dt in _NET_TYPES if dt not in freeze]
+    groups = [{"params": models[dt].parameters(), "lr": policy_lr} for dt in trainable]
+    groups.append({"params": critic.parameters(), "lr": critic_lr})
+    return torch.optim.Adam(groups), trainable
+
+
 def _kl_controllers(config, decision_types) -> dict:
     kl = config.get("kl", {})
     out = {}
@@ -190,10 +218,15 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         depth=int(config.get("critic", {}).get("depth", 1)),
     )
 
-    optimizer = torch.optim.Adam(
-        [{"params": models[dt].parameters(), "lr": float(ppo.get("policy_lr", 1e-4))} for dt in _NET_TYPES]
-        + [{"params": critic.parameters(), "lr": float(ppo.get("critic_lr", 1e-3))}]
+    freeze_nets = list(config.get("freeze_nets", []))
+    optimizer, trainable_nets = _build_optimizer(
+        models, critic,
+        policy_lr=float(ppo.get("policy_lr", 1e-4)),
+        critic_lr=float(ppo.get("critic_lr", 1e-3)),
+        freeze_nets=freeze_nets,
     )
+    if freeze_nets and progress:
+        print(f"  freeze_nets: {freeze_nets} held at BC; training {trainable_nets} + critic", flush=True)
 
     kl_controllers = _kl_controllers(config, decision_types)
     ent_cfg = config.get("entropy", {})
