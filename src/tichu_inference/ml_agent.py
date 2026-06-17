@@ -57,7 +57,13 @@ from tichu_training.action_space import (
     wish_intent_index,
 )
 from tichu_training.card_slots import card_slot, slot_to_card
-from tichu_training.featurizer import FEATURIZER_VERSION, featurize
+# The featurizer is INJECTED per agent (default = the live v6 module) so a
+# v5-trained export can play in a v6 process via `featurizer_v5_frozen` for a
+# cross-version tournament. An injected `featurizer` must expose `featurize` and
+# `FEATURIZER_VERSION`. Only `featurize()` is version-dependent and routed per
+# agent; `_combination_to_action_index` is ACTION-SPACE-bound (v1, shared across
+# featurizer generations — verified byte-identical), so it stays module-level.
+from tichu_training import featurizer as _DEFAULT_FEATURIZER
 from tichu_training.featurizer import _combination_to_action_index
 
 
@@ -97,20 +103,24 @@ def suppress_partner_trick_bomb(private_state, action, legal) -> bool:
     return True
 
 
-def load_policy_module(path: str | Path):
-    """Load an exported **policy** module, asserting featurizer + action-space versions."""
+def load_policy_module(path: str | Path, *, featurizer=_DEFAULT_FEATURIZER):
+    """Load an exported **policy** module, asserting featurizer + action-space versions.
+
+    The featurizer version asserted is the INJECTED featurizer's (default v6), so a
+    v5-stamped export loads iff built with `featurizer=featurizer_v5_frozen`. The
+    action-space version is shared across featurizer generations (still `v1`)."""
     return load_exported(
         path,
-        expected_featurizer_version=FEATURIZER_VERSION,
+        expected_featurizer_version=featurizer.FEATURIZER_VERSION,
         expected_action_space_version=ACTION_SPACE_VERSION,
     )
 
 
-def load_standalone_net(path: str | Path):
+def load_standalone_net(path: str | Path, *, featurizer=_DEFAULT_FEATURIZER):
     """Load an exported **standalone** net (schupfen / call). These carry an empty
     action_space stamp (they don't consume the play action space), so only the
     featurizer version is asserted on load."""
-    return load_exported(path, expected_featurizer_version=FEATURIZER_VERSION)
+    return load_exported(path, expected_featurizer_version=featurizer.FEATURIZER_VERSION)
 
 
 @register_agent("ml")
@@ -127,16 +137,20 @@ class MLAgent(Agent):
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
         partner_trick_guard: bool = True,
+        featurizer=_DEFAULT_FEATURIZER,
     ) -> None:
         # Load each artifact from its path, then hand off to the shared
         # initialiser. `from_loaded` is the path-free entry point the serve
         # builder uses to share one already-loaded module across tier-views.
+        # `featurizer` (default v6) selects the feature generation + load-guard
+        # version — pass `featurizer_v5_frozen` to run a v5-trained export here.
         self._init_with_modules(
-            load_policy_module(checkpoint_path),
+            load_policy_module(checkpoint_path, featurizer=featurizer),
             skill_decile=skill_decile,
-            schupfen=self._maybe_load(schupfen_path),
-            tichu_call=self._maybe_load(tichu_call_path),
-            grand_call=self._maybe_load(grand_call_path),
+            schupfen=self._maybe_load(schupfen_path, featurizer=featurizer),
+            tichu_call=self._maybe_load(tichu_call_path, featurizer=featurizer),
+            grand_call=self._maybe_load(grand_call_path, featurizer=featurizer),
+            featurizer=featurizer,
             fallback_rng=fallback_rng,
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
@@ -156,6 +170,7 @@ class MLAgent(Agent):
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
         partner_trick_guard: bool = True,
+        featurizer=_DEFAULT_FEATURIZER,
     ) -> "MLAgent":
         """Build an agent over already-loaded modules, skipping disk I/O.
 
@@ -170,6 +185,7 @@ class MLAgent(Agent):
             schupfen=schupfen,
             tichu_call=tichu_call,
             grand_call=grand_call,
+            featurizer=featurizer,
             fallback_rng=fallback_rng,
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
@@ -185,6 +201,7 @@ class MLAgent(Agent):
         schupfen,
         tichu_call,
         grand_call,
+        featurizer=_DEFAULT_FEATURIZER,
         fallback_rng: random.Random | None,
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
@@ -209,6 +226,7 @@ class MLAgent(Agent):
             "tichu": float(tichu_threshold), "grand": float(grand_threshold),
         }
         self._skill_decile = int(skill_decile)
+        self._fz = featurizer  # injected featurizer (default v6); see __init__.
         self._module = policy_module
         self._schupfen = schupfen
         self._tichu_call = tichu_call
@@ -219,10 +237,10 @@ class MLAgent(Agent):
         self.last_fallback_used: bool = False
 
     @staticmethod
-    def _maybe_load(path: str | Path | None):
+    def _maybe_load(path: str | Path | None, *, featurizer=_DEFAULT_FEATURIZER):
         if path is None:
             return None
-        return load_standalone_net(path)
+        return load_standalone_net(path, featurizer=featurizer)
 
     def act(self, private_state: PrivateState) -> ConcreteAction:
         self.last_fallback_used = False
@@ -456,7 +474,7 @@ class MLAgent(Agent):
     # ------------------------------------------------------------
 
     def _inputs(self, private_state: PrivateState) -> tuple[torch.Tensor, torch.Tensor]:
-        features = torch.from_numpy(featurize(private_state)).unsqueeze(0)
+        features = torch.from_numpy(self._fz.featurize(private_state)).unsqueeze(0)
         skill = torch.tensor([self._skill_decile], dtype=torch.long)
         return features, skill
 
