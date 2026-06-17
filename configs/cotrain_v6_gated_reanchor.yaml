@@ -1,8 +1,11 @@
 # Validated-escape fork: champion gate + re-anchor-on-promote. The synthesis of the
 # play-improvement arc.
 #
-# Single-variable delta vs configs/cotrain_v6_gated.yaml: promotion_gate gains
-# `reanchor_on_promote: true` (+ a fresh run_dir). Everything else identical.
+# Two deltas vs configs/cotrain_v6_gated.yaml: promotion_gate gains
+# `reanchor_on_promote: true`, AND the play KL target is widened 0.02 -> 0.08 so each
+# validated leg is a BIGGER ball around the champion (faster escape per promotion;
+# the gate still validates each step, so the wider exploration is degeneracy-checked).
+# (+ a fresh run_dir.)
 #
 # WHY: cotrain_v6_gated (gate, fixed BC anchor) STALLED — it ratcheted the OPPONENT
 # (champion) but the learner stayed KL-capped at 0.02 from the ORIGINAL BC, so the
@@ -65,7 +68,7 @@ league:
 cotrain_wish: false
 
 kl:
-  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  play:     { coef: 1.0, target: 0.08,  factor: 2.0 }
   schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
   tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
   grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
