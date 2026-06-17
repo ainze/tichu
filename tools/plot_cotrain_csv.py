@@ -1,0 +1,224 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "pandas",
+#   "matplotlib",
+# ]
+# ///
+"""Plot Full-Stack Co-Training curves from a co-train `ppo_log.csv` (ADR-0034).
+
+Distinct from `plot_ppo_csv.py` (single-policy PPO Refine, ADR-0029): co-train
+sharpens FOUR nets together, so `train_cotrain` writes one row per iteration with
+per-net columns:
+
+    iter, wall_s, loss, value_loss,
+    {net}_policy_loss, {net}_kl, {net}_entropy, {net}_kl_coef   for net in
+    {play, schupfen, tichu, grand}  (+ wish when cotrain_wish is on)
+
+The nets are auto-detected from the `*_policy_loss` columns, so a wish-enabled run
+plots its extra net with no flag. Five panels, one line per net:
+
+  1. Critic value_loss (log) + total loss — the warm-up / under-fit signal. With a
+     deeper/wider Perfect-Info Critic (ADR-0038), this is THE panel: value_loss
+     should fall and flatten low. A high plateau ⇒ the critic still under-fits the
+     lever decisions (go deeper before wider).
+  2. Per-net policy_loss — the clipped surrogate per net.
+  3. Per-net KL-to-BC (lever #1) — does each net move off BC? Watch schupfen: its
+     target ANNEALS 0.008→0.025 (cotrain_v6), so its KL should rise over iters
+     [750, 2750]; pinned-flat-low ⇒ leashed, the lever can't move. --kl-target
+     draws a single reference line (the play/calls target); schupfen differs.
+  4. Per-net beta_KL (kl_coef, log) — the adaptive controller's response. Pinned
+     high ⇒ the anchor can't hold; floored ⇒ the policy isn't moving (loosen).
+  5. Per-net entropy — should sit modest/stable; a collapse ⇒ no exploration.
+
+Behavioral dials + strength vs master are OUT OF LOOP: `check_cotrain` (tournament)
+and `eval_matrix --mode behavioral`. This tool follows training health only.
+
+Usage:
+    ./plot_cotrain_csv.py path/to/run-dir                 # auto-finds ppo_log.csv
+    ./plot_cotrain_csv.py path/to/run-dir --watch 15      # live-follow
+    ./plot_cotrain_csv.py path/to/run-dir --out fig.png --window 20
+"""
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+
+# Stable per-net colour so a net keeps its colour across panels and redraws.
+_NET_COLORS = {"play": "C0", "schupfen": "C1", "tichu": "C2", "grand": "C3", "wish": "C4"}
+_SUFFIX = "_policy_loss"
+
+
+def _resolve_csv(p: Path) -> Path:
+    if p.is_file():
+        return p
+    if p.is_dir():
+        cand = p / "ppo_log.csv"
+        if cand.is_file():
+            return cand
+        sys.exit(f"no ppo_log.csv in {p}")
+    sys.exit(f"not found: {p}")
+
+
+def _roll(s: pd.Series, window: int) -> pd.Series:
+    return s.rolling(window, min_periods=1).mean()
+
+
+def _nets(df: pd.DataFrame) -> list[str]:
+    """Net names in canonical order, derived from the `*_policy_loss` columns."""
+    found = {c[: -len(_SUFFIX)] for c in df.columns if c.endswith(_SUFFIX)}
+    ordered = [n for n in ("play", "schupfen", "tichu", "grand", "wish") if n in found]
+    return ordered + sorted(found - set(ordered))
+
+
+def _plot_critic(ax, df: pd.DataFrame, window: int) -> None:
+    x, v = df["iter"], df["value_loss"]
+    ax.scatter(x, v, s=8, alpha=0.2, color="C0", label="value_loss (per iter)")
+    ax.plot(x, _roll(v, window), color="C0", linewidth=1.6, label=f"value_loss (rolling {window})")
+    if (v > 0).all():
+        ax.set_yscale("log")
+    ax.set_ylabel("value_loss (log)", color="C0")
+    ax.tick_params(axis="y", labelcolor="C0")
+    ax.set_title(f"Critic value loss (deeper-critic / warm-up signal)  —  last: {v.iloc[-1]:,.2f}")
+    ax.grid(True, alpha=0.3, which="both")
+
+    ax2 = ax.twinx()
+    loss = df["loss"]
+    ax2.plot(x, _roll(loss, window), color="C7", linewidth=1.2, alpha=0.8, label="total loss")
+    ax2.set_ylabel("total loss", color="C7")
+    ax2.tick_params(axis="y", labelcolor="C7")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=8)
+
+
+def _plot_per_net(ax, df: pd.DataFrame, window: int, suffix: str, *, ylabel: str,
+                  title: str, logy: bool = False, target: float | None = None) -> None:
+    x = df["iter"]
+    cols = []
+    for net in _nets(df):
+        col = f"{net}{suffix}"
+        if col not in df.columns:
+            continue
+        ax.plot(x, _roll(df[col], window), color=_NET_COLORS.get(net, "C7"),
+                linewidth=1.5, label=f"{net} (last {df[col].iloc[-1]:.4g})")
+        cols.append(col)
+    if target is not None:
+        ax.axhline(target, color="k", linestyle="--", alpha=0.4, label=f"ref target {target:g}")
+    if logy and cols and (df[cols] > 0).all().all():
+        ax.set_yscale("log")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3, which="both")
+    ax.legend(loc="best", fontsize=8, ncol=2)
+
+
+def _suptitle(csv_path: Path, df: pd.DataFrame, positions_per_iter: int) -> str:
+    wall = df["wall_s"]
+    elapsed_h = wall.sum() / 3600.0
+    valid = wall > 0
+    rph = (positions_per_iter * 3600.0 / wall[valid]).tail(max(1, len(df) // 10)).mean() if valid.any() else float("nan")
+    return (f"{csv_path}  [Full-Stack Co-Train]  —  {len(df)} iters, "
+            f"{elapsed_h:.2f} h, ~{rph:,.0f} rounds/h (M={positions_per_iter})")
+
+
+def _draw(fig, axes, csv_path: Path, window: int, kl_target: float, positions_per_iter: int) -> bool:
+    try:
+        df = pd.read_csv(csv_path)
+    except pd.errors.EmptyDataError:
+        return False
+    if df.empty:
+        return False
+
+    for ax in axes:
+        for t in list(getattr(ax, "_twins", [])):
+            t.remove()
+        ax._twins = []
+        ax.clear()
+
+    orig_twinx = {ax: ax.twinx for ax in axes}
+    for ax in axes:
+        def _tracked(_ax=ax):
+            t = orig_twinx[_ax]()
+            _ax._twins.append(t)
+            return t
+        ax.twinx = _tracked
+
+    _plot_critic(axes[0], df, window)
+    _plot_per_net(axes[1], df, window, "_policy_loss", ylabel="policy_loss",
+                  title="Per-net clipped policy loss")
+    _plot_per_net(axes[2], df, window, "_kl", ylabel="kl_to_bc",
+                  title="Per-net KL-to-BC (lever #1; schupfen target anneals 0.008→0.025)",
+                  target=kl_target)
+    _plot_per_net(axes[3], df, window, "_kl_coef", ylabel="beta_KL (log)",
+                  title="Per-net beta_KL (kl_coef) — pinned-high=anchor can't hold, floored=not moving",
+                  logy=True)
+    _plot_per_net(axes[4], df, window, "_entropy", ylabel="entropy",
+                  title="Per-net entropy")
+
+    for ax in axes:
+        ax.twinx = orig_twinx[ax]
+        ax.set_xlabel("iteration")
+
+    fig.suptitle(_suptitle(csv_path, df, positions_per_iter), fontsize=10)
+    fig.tight_layout()
+    return True
+
+
+def _plot(csv_path: Path, window: int, out: Path | None, kl_target: float,
+          positions_per_iter: int, watch: float | None) -> None:
+    fig, axes = plt.subplots(5, 1, figsize=(11, 16))
+    for ax in axes:
+        ax._twins = []
+
+    if watch is not None:
+        plt.ion()
+        plt.show(block=False)
+        print(f"watching {csv_path} (redraw every {watch:g}s; Ctrl-C to stop)")
+        try:
+            while True:
+                if not _draw(fig, axes, csv_path, window, kl_target, positions_per_iter):
+                    print("  (no data rows yet)")
+                fig.canvas.draw_idle()
+                plt.pause(watch)
+                if not plt.fignum_exists(fig.number):
+                    break
+        except KeyboardInterrupt:
+            print("\nstopped watching")
+        return
+
+    if not _draw(fig, axes, csv_path, window, kl_target, positions_per_iter):
+        sys.exit(f"{csv_path} has no data rows yet")
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=120, bbox_inches="tight")
+        print(f"wrote {out}")
+    else:
+        plt.show()
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("path", type=Path, help="co-train ppo_log.csv file or run directory containing it")
+    ap.add_argument("--window", type=int, default=10, help="rolling-mean window in iterations (default 10)")
+    ap.add_argument("--out", type=Path, default=None, help="save PNG here instead of opening a window")
+    ap.add_argument("--kl-target", type=float, default=0.02,
+                    help="reference KL target line (default 0.02 = play/calls target; schupfen anneals)")
+    ap.add_argument("--positions-per-iter", type=int, default=512,
+                    help="M games per iteration, for the rounds/hour estimate (default 512)")
+    ap.add_argument("--watch", type=float, default=None, metavar="SECONDS",
+                    help="live-follow: redraw every SECONDS (the CSV is flushed each iteration)")
+    args = ap.parse_args()
+    _plot(_resolve_csv(args.path), args.window, args.out, args.kl_target,
+          args.positions_per_iter, args.watch)
+
+
+if __name__ == "__main__":
+    main()
