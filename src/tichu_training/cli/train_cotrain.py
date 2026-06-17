@@ -303,12 +303,21 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     champion_path = None
     gate_log_path = run_dir / "promotion_gate.csv"
     _save_champion = None
+    reanchor_on_promote = False
     gate_cfg = config.get("promotion_gate", {})
     if bool(gate_cfg.get("enabled", False)):
         if rollout_workers <= 1:
             if progress:
                 print("  promotion_gate requires rollout_workers>1 -> disabled", flush=True)
         else:
+            # reanchor_on_promote: on a validated promotion, also move the PLAY KL
+            # anchor onto the new champion (= current net), so the learner can leave
+            # the BC ball and keep improving. Without it the gate ratchets only the
+            # OPPONENT and the learner stays capped at 0.02 from the ORIGINAL BC — it
+            # stalls at the in-ball optimum. With it, the gate is a VALIDATED escape:
+            # the anchor advances only on a CI-confirmed win (vs the ungated
+            # reanchor_play_every trail, which moved blindly and regressed).
+            reanchor_on_promote = bool(gate_cfg.get("reanchor_on_promote", False))
             from tichu_training.ppo.promotion_gate import PromotionGate
             from tichu_training.ppo.rollout_parallel import save_rollout_weights as _save_champion
             champion_path = str(run_dir / "_champion.pt")
@@ -322,7 +331,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             )
             if progress:
                 print(f"  promotion_gate ON: opponent=champion, window {gate.window_games} games, "
-                      f"threshold {gate.threshold:+g}"
+                      f"threshold {gate.threshold:+g}, reanchor_on_promote={reanchor_on_promote}"
                       + (" (league opponent ignored)" if league is not None else ""), flush=True)
 
     warmup_iters = int(config.get("critic", {}).get("warmup_iters", 0))
@@ -369,7 +378,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             iteration=iteration + 1, rng_state=capture_rng(),
             league=(league.state() if league is not None else None),
             play_anchor=(bc_models["play"].state_dict()
-                         if reanchor_play_every else None),
+                         if (reanchor_play_every or reanchor_on_promote) else None),
         )
         # Serving snapshots every snapshot_every (for the offline `check` command).
         if (iteration + 1) % snapshot_every == 0:
@@ -386,6 +395,10 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             _append_gate_row(gate_log_path, iteration + 1, v)
             if v["promote"]:
                 _save_champion(champion_path, models, critic)
+                if reanchor_on_promote:
+                    # Validated escape: the KL anchor follows the new champion, so the
+                    # learner can move further from the original BC next window.
+                    bc_models["play"].load_state_dict(models["play"].state_dict())
             if progress:
                 print(f"  gate {'PROMOTE' if v['promote'] else 'hold'} @ iter {iteration + 1}: "
                       f"margin {v['mean']:+.2f} CI[{v['ci_lo']:+.2f}, {v['ci_hi']:+.2f}] "

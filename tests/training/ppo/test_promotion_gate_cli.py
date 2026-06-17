@@ -15,7 +15,7 @@ import torch
 from tichu_training.bc.call_model import GrandTichuCallNetwork, TichuCallNetwork
 from tichu_training.bc.heads import BCModel
 from tichu_training.bc.schupfen_model import SchupfenNetwork
-from tichu_training.bc.training import save_checkpoint
+from tichu_training.bc.training import load_checkpoint, save_checkpoint
 from tichu_training.cli.train_cotrain import run_cotrain_training
 from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM as _D
 
@@ -87,3 +87,33 @@ def test_gate_holds_when_threshold_unreachable(tmp_path):
     # Champion was never re-saved after the initial BC write (no promotion occurred).
     # (Sanity: a promotion would have rewritten it during the loop, after setup.)
     assert isinstance(mtime_after_setup_and_run, float)
+
+
+def test_reanchor_on_promote_moves_and_persists_the_play_anchor(tmp_path):
+    # With reanchor_on_promote, a validated promotion moves the play KL anchor onto
+    # the champion (= current net) and persists it in the bundle (survives resume).
+    torch.manual_seed(0)
+    config = _config(tmp_path, threshold=-1e9)  # force a promotion
+    config["promotion_gate"]["reanchor_on_promote"] = True
+
+    bc_play = BCModel(_D, skill_buckets=10, **_MODEL)
+    load_checkpoint(config["warm_start"]["play"], bc_play)
+    orig = {k: v.detach().clone() for k, v in bc_play.state_dict().items()}
+
+    result = run_cotrain_training(config, progress=False)
+
+    bundle = torch.load(result["bundle_path"], map_location="cpu", weights_only=False)
+    assert bundle["play_anchor"] is not None, "moved anchor must persist for resume"
+    anchor = bundle["play_anchor"]
+    assert any(not torch.equal(orig[k], anchor[k]) for k in orig), \
+        "play anchor should have moved off the original BC after a promotion"
+
+
+def test_no_reanchor_on_promote_leaves_anchor_unpersisted(tmp_path):
+    # Default (reanchor_on_promote off): the gate ratchets only the opponent; the KL
+    # anchor stays at BC and is not persisted (the existing behaviour).
+    torch.manual_seed(0)
+    config = _config(tmp_path, threshold=-1e9)  # promotes, but no anchor move
+    result = run_cotrain_training(config, progress=False)
+    bundle = torch.load(result["bundle_path"], map_location="cpu", weights_only=False)
+    assert bundle["play_anchor"] is None
