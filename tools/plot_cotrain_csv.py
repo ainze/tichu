@@ -77,7 +77,23 @@ def _nets(df: pd.DataFrame) -> list[str]:
     return ordered + sorted(found - set(ordered))
 
 
-def _plot_critic(ax, df: pd.DataFrame, window: int) -> None:
+def _promotion_iters(csv_path: Path) -> list[int]:
+    """Iters at which a new champion was promoted, from a sibling `promotion_gate.csv`
+    (rounds-as-gate runs). Empty for non-gated runs. The CSV has one row per opponent
+    per verdict, so dedupe the iters where `promoted == 1`."""
+    gate = csv_path.parent / "promotion_gate.csv"
+    if not gate.is_file():
+        return []
+    try:
+        g = pd.read_csv(gate)
+    except (pd.errors.EmptyDataError, OSError):
+        return []
+    if not {"iter", "promoted"} <= set(g.columns):
+        return []
+    return sorted({int(i) for i in g.loc[g["promoted"] == 1, "iter"]})
+
+
+def _plot_critic(ax, df: pd.DataFrame, window: int, promo_iters=()) -> None:
     x, v = df["iter"], df["value_loss"]
     ax.scatter(x, v, s=8, alpha=0.2, color="C0", label="value_loss (per iter)")
     ax.plot(x, _roll(v, window), color="C0", linewidth=1.6, label=f"value_loss (rolling {window})")
@@ -85,8 +101,16 @@ def _plot_critic(ax, df: pd.DataFrame, window: int) -> None:
         ax.set_yscale("log")
     ax.set_ylabel("value_loss (log)", color="C0")
     ax.tick_params(axis="y", labelcolor="C0")
-    ax.set_title(f"Critic value loss (deeper-critic / warm-up signal)  —  last: {v.iloc[-1]:,.2f}")
+    promo = f"  —  {len(promo_iters)} champion promotions" if promo_iters else ""
+    ax.set_title(f"Critic value loss (deeper-critic / warm-up signal)  —  last: {v.iloc[-1]:,.2f}{promo}")
     ax.grid(True, alpha=0.3, which="both")
+
+    # Champion promotions (rounds-as-gate): a dashed vertical marker each time a new
+    # champion was selected, so the value-loss / total-loss panel reads against the
+    # ratchet. One legend entry for the set.
+    for k, it in enumerate(promo_iters):
+        ax.axvline(it, color="C3", linestyle="--", alpha=0.55, linewidth=1.0,
+                   label="champion promoted" if k == 0 else None)
 
     ax2 = ax.twinx()
     loss = df["loss"]
@@ -150,7 +174,7 @@ def _draw(fig, axes, csv_path: Path, window: int, kl_target: float, positions_pe
             return t
         ax.twinx = _tracked
 
-    _plot_critic(axes[0], df, window)
+    _plot_critic(axes[0], df, window, _promotion_iters(csv_path))
     _plot_per_net(axes[1], df, window, "_policy_loss", ylabel="policy_loss",
                   title="Per-net clipped policy loss")
     _plot_per_net(axes[2], df, window, "_kl", ylabel="kl_to_bc",
