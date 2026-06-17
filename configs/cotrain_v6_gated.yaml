@@ -1,0 +1,101 @@
+# Champion-gated co-train fork of cotrain_v6 (the rounds-as-gate ratchet) — can play
+# escape the +8 plateau by best-responding to a champion that only advances on a
+# VALIDATED improvement?
+#
+# Deltas vs configs/cotrain_v6.yaml: a `promotion_gate` block + a fresh run_dir.
+# Everything else (arch, critic, KL leashes, eval master) is the baseline.
+#
+# How it works (no separate tournaments): with the gate on, the rollout OPPONENT is a
+# frozen champion (initially the BC warm-start), so each iteration's learner
+# round_outcomes ARE the candidate-vs-champion margin. The gate accumulates those
+# per-game margins over a `window_games` window and, when the bootstrap CI lower bound
+# clears `threshold`, PROMOTES the candidate to champion (overwrites _champion.pt) and
+# resets. The learner then best-responds to the new, stronger champion — a ratchet
+# driven by games you're already playing. This is the VALIDATED sibling of the ungated
+# `reanchor_play_every` trail: the reference only advances on a CI-confirmed win.
+#
+# window_games 4096 ≈ 8 iters x 512 ≈ a tournament's n (tight CI); threshold 0 = any
+# CI-positive win. Output: {run_dir}/promotion_gate.csv (iter,n,mean,ci_lo,ci_hi,
+# promoted) records every verdict + when the champion advanced; console prints
+# "gate PROMOTE/hold @ iter N ...". The KL leashes still apply (the policy stays near
+# BC each leg); the champion ratchet is what lets STRENGTH climb past the fixed-anchor
+# plateau, and it shows in the gate CSV / check_cotrain, not in play_kl.
+#
+# Caveats (by design): the margin is read off the training stream (fresh deals + frozen
+# champion => unbiased, mildly optimistic); a single champion can be CYCLED in a
+# non-transitive game. So the ship check stays check_cotrain + the move-prediction
+# DRIFT flag, not the gate alone.
+#
+# Combine-with options (not set here): add `freeze_nets: [schupfen, tichu, grand]` for
+# a play-only gated ratchet; the gate is parallel-only (needs rollout_workers>1).
+# Run AFTER stopping other runs (don't overlap — OOM, ADR-0034).
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_gated
+
+# Champion promotion gate (rounds-as-gate). enabled=false (default) reproduces the
+# baseline self-play loop exactly. Parallel-only.
+promotion_gate:
+  enabled:         true
+  window_games:    4096      # per-window games before a verdict (~8 iters x 512)
+  threshold:       0.0       # promote iff margin CI lower bound > this (0 = any positive)
+  bootstrap_iters: 1000
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: false
+
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
