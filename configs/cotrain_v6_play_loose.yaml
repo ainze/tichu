@@ -1,0 +1,105 @@
+# Play-leash-loosening fork of cotrain_v6 (ADR-0034) — does play's +8 plateau come
+# from the BC KL-anchor, or is it a genuine value-limited optimum?
+#
+# BYTE-IDENTICAL to configs/cotrain_v6.yaml EXCEPT two lines: `kl.play.target`
+# 0.02 -> 0.08 (4x looser; let play depart human BC much further) and a fresh
+# `run_dir`. Same BC warm-start, same critic (1024x3), same everything else — so
+# the PLAY leash is the SOLE variable vs the cotrain_v6 baseline (the 0.02 arm,
+# already characterised: +8.75 @ iter 225, converged value_loss ~16.6k).
+#
+# Why play is the leash worth loosening when wish/schupfen were NOT (those A/Bs
+# went negative): play has the cleanest critic R² (0.52 vs the levers' 0.19-0.34),
+# so the gradient driving the drift is trustworthy, not noise; and play IS the
+# trunk (no shared-trunk corruption of another net). Direct evidence the leash
+# binds: in the baseline play_kl sits pinned at ~0.018 against the 0.02 target with
+# an active beta (~0.25) — the anchor is holding it back, not play sitting there by
+# choice (contrast schupfen, which sits BELOW its target = not leash-bound).
+#
+# HOW TO JUDGE (read the GATE, not the training curves):
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6_play_loose.yaml \
+#       --iter <N> --held-out <dir|archive>
+#   1) mean / CI vs the v6 BC master  — did strength rise vs the 0.02 baseline at a
+#      MATCHED iter?
+#   2) the move-prediction DRIFT flag (--held-out, >3pp play-top-1 drop) — the
+#      degeneracy guard. At 4x leash, play can drift into a "degenerate winner" that
+#      beats the fixed BC-master but is weaker vs the real distribution. mean up +
+#      drift small => genuine; mean up + top-1 cratered => exploit, the leash was
+#      load-bearing. (vs-master is a first screen; the honest read is the champion /
+#      cross-version comparison.)
+#
+# Run alongside or after the baseline (NOT concurrently on the same box — 2x rollout
+# pools => OOM/CPU contention, ADR-0034). Stop/resume safe, same as cotrain_v6.
+
+warm_start:
+  # SAME BC nets as the baseline — this is a fresh fork, the warm-start is held
+  # fixed so only the play leash differs. Verify the exact final play checkpoint
+  # filename before launch (depends on the realised row count; last save ~b01250000).
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_play_loose
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+# Perfect-Info Critic — identical to the baseline (the critic is NOT the variable
+# here; the play KL target is). hidden 1024, depth 3 residual blocks, v6
+# PERFECT_INFO_DIM=759 input. Changing hidden/depth would reshape it; this fork
+# leaves them untouched so it warms from BC the same way the baseline did.
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: false
+
+# THE ONLY KNOB THAT DIFFERS FROM cotrain_v6.yaml: play.target 0.02 -> 0.08.
+# Schupfen/tichu/grand held byte-identical to the baseline (their anneal/targets
+# unchanged) so play-leash is the sole variable. The adaptive controller will let
+# play_kl climb toward 0.08 (4x further from BC) and drop play's beta accordingly.
+kl:
+  play:     { coef: 1.0, target: 0.08,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 25
+
+# Offline strength read — SAME v6 BC master as the baseline (apples-to-apples).
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

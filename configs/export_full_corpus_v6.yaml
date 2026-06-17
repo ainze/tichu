@@ -1,0 +1,40 @@
+# Export arch config for `export_model` — FULL corpus, featurizer v6.
+#
+# `export_model` reads these sections and calls the model constructors, so this
+# file carries ONLY architecture (no data scale, no checkpoint paths). The
+# sections MUST match the arch each full-corpus network was trained with:
+#   policy            -> configs/bc_full_corpus_v6_memmap.yaml  `model:`
+#   tichu/grand_call  -> configs/calls_full_corpus_v6.yaml      `model:`
+#   schupfen          -> configs/schupfen_full_corpus_v6.yaml   `model:`
+# These are also the arch the cotrain_v6 nets warm-started from, so they match
+# configs/cotrain_v6.yaml `model:` / `call_model:` / `schupfen_model:` exactly.
+#
+# Identical to export_full_corpus_v5.yaml EXCEPT feature_dim 224 -> 591: v6 only
+# enlarged the FEATURE VECTOR (played_by per-player + schupfen_received +
+# negative-info, ADR-0038), not the trunk/head widths. Used to export the FROZEN
+# v6 BC stack into the `master` dir that `check_cotrain --config cotrain_v6.yaml`
+# tournaments the co-train snapshots against.
+#
+# feature_dim = FEATURIZER_OUTPUT_DIM = 591 (v6) for every network.
+policy:
+  feature_dim: 591
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+tichu_call:
+  feature_dim: 591
+  skill_dim: 64
+  hidden: 256
+
+grand_tichu_call:
+  feature_dim: 591
+  skill_dim: 64
+  hidden: 256
+
+schupfen:
+  feature_dim: 591
+  skill_dim: 64
+  hidden: 256

@@ -1,0 +1,107 @@
+# Play-only RATCHET fork of cotrain_v6 (ADR-0034 freeze + ADR-0035 re-anchor) —
+# train ONLY play, and let it escape the +8 plateau by RATCHETING away from BC
+# instead of sitting at a fixed 0.02 leash.
+#
+# TWO deltas vs configs/cotrain_v6.yaml (both about isolating + freeing PLAY):
+#   1) freeze_nets: [schupfen, tichu, grand] — train only play (+ critic); the call/
+#      schupfen nets stay at BC, still played in the rollout (stationary teammates).
+#   2) reanchor_play_every: 50 — every 50 iters the play anchor snaps onto the
+#      current play net (cotrain.py: bc_models["play"].load_state_dict(...)).
+# play KL target stays 0.02 (same per-step ball radius); fresh run_dir.
+#
+# Fixed-anchor regime (cotrain_v6): the 0.02 KL term is a CAP — play sits ~0.02 from
+# the ORIGINAL BC forever and cannot drift further. Re-anchoring turns that cap into
+# a RATE: each 50-iter leg, play moves up to 0.02 from the leg-start anchor, then the
+# anchor catches up, so total divergence from the original BC accumulates as a trail
+# of contained steps (~20 legs over 1000 iters). N=50 ≈ how long play takes to
+# saturate its 0.02 ball in the baseline (it hit the cap by iter ~30), so each leg is
+# a CONVERGED step, not a half-step. Conservative alt: 100 (fully-converged legs);
+# aggressive: 25.
+#
+# Why play is the right net to ratchet (vs the levers): play has the cleanest critic
+# R² (0.52), so each step follows a TRUSTWORTHY gradient — more likely improvement
+# than drift. (Re-anchoring play also moves the wish-head anchor since wish rides the
+# play trunk, but cotrain_wish is off here so the wish head never moves — moot.)
+#
+# ⚠️ This is an UNGATED ratchet: it moves the anchor every N iters regardless of
+# whether the step was actually an improvement (unlike champion-gating, which
+# validates before promoting). So degeneracy is the real risk — play can ratchet
+# into a drift that beats the fixed BC-master but is weaker vs the true distribution.
+# JUDGE with the move-prediction DRIFT flag, not just the mean:
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6_play_reanchor.yaml \
+#       --iter <N> --held-out <dir|archive>
+#   mean up + play-top-1 drift small => genuine escape; mean up + top-1 cratered =>
+#   degenerate winner, dial N up (slower ratchet) or stop.
+#
+# Run AFTER stopping the baseline / other forks (don't overlap — OOM, ADR-0034).
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_play_reanchor
+
+# Train ONLY play — freeze the call/schupfen nets at BC (still driven in the rollout,
+# excluded from the optimizer). Combined with the ratchet below, play is the sole
+# learner and is free to drift far from BC.
+freeze_nets: [schupfen, tichu, grand]
+
+# 0 (default) = fixed-anchor cap; 50 = snap play's KL anchor onto the current net
+# every 50 iters (ADR-0035 trail), turning the 0.02 cap into a ratchet.
+reanchor_play_every: 50
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: false
+
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
