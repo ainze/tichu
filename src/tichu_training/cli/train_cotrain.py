@@ -184,7 +184,11 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     bc_models = {dt: _freeze(copy.deepcopy(models[dt])) for dt in _NET_TYPES}
 
     critic_dim = PERFECT_INFO_DIM if perfect_info else FEATURIZER_OUTPUT_DIM
-    critic = ValueBaseline(critic_dim, hidden=int(config.get("critic", {}).get("hidden", 512)))
+    critic = ValueBaseline(
+        critic_dim,
+        hidden=int(config.get("critic", {}).get("hidden", 512)),
+        depth=int(config.get("critic", {}).get("depth", 1)),
+    )
 
     optimizer = torch.optim.Adam(
         [{"params": models[dt].parameters(), "lr": float(ppo.get("policy_lr", 1e-4))} for dt in _NET_TYPES]
@@ -327,6 +331,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         arch_cfg = {k: config.get(k, {}) for k in ("model", "schupfen_model", "call_model")}
         parallel = ParallelRollout(
             arch_cfg, critic_hidden=int(config.get("critic", {}).get("hidden", 512)),
+            critic_depth=int(config.get("critic", {}).get("depth", 1)),
             skill_decile=skill_decile, perfect_info=perfect_info, workers=rollout_workers,
             train_wish=cotrain_wish,
         )

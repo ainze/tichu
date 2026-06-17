@@ -88,7 +88,7 @@ def test_league_opponent_honors_train_wish(tmp_path):
     opp_w = tmp_path / "opp.pt"
     save_rollout_weights(str(opp_w), models, critic)
 
-    _init_worker(_ARCH, 16, True)
+    _init_worker(_ARCH, 16, 1, True)  # (arch, critic_hidden, critic_depth, perfect_info)
     wishing = _league_opponent(str(opp_w), skill_decile=9, seed=0, train_wish=True)
     declining = _league_opponent(str(opp_w), skill_decile=9, seed=0, train_wish=False)
     assert _supports_wish(wishing)

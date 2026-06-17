@@ -20,13 +20,29 @@ from tqdm import tqdm
 
 
 class ValueBaseline(nn.Module):
-    def __init__(self, feature_dim: int, *, hidden: int = 128) -> None:
+    """V(state) MLP. `depth` = number of hidden layers (default 1 = the original
+    2-layer net). depth>1 inserts `depth-1` residual `hidden->hidden` blocks
+    between the input projection and the output head — for an under-fitting value
+    function (e.g. the cotrain Perfect-Info Critic on grand/schupfen) where depth
+    captures feature interactions a single wide layer can't.
+
+    At depth=1 the `blocks` ModuleList is empty, so the forward pass and the
+    state_dict (`fc1.*`, `fc2.*` only) are byte-identical to the pre-depth model —
+    older checkpoints load unchanged.
+    """
+
+    def __init__(self, feature_dim: int, *, hidden: int = 128, depth: int = 1) -> None:
         super().__init__()
+        if depth < 1:
+            raise ValueError(f"depth must be >= 1, got {depth}")
         self.fc1 = nn.Linear(feature_dim, hidden)
+        self.blocks = nn.ModuleList(nn.Linear(hidden, hidden) for _ in range(depth - 1))
         self.fc2 = nn.Linear(hidden, 1)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         h = F.gelu(self.fc1(features))
+        for block in self.blocks:
+            h = h + F.gelu(block(h))  # residual hidden->hidden
         return self.fc2(h).squeeze(-1)
 
 

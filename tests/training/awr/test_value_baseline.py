@@ -6,6 +6,24 @@ import torch
 from tichu_training.awr.value_baseline import ValueBaseline, fit_value_baseline
 
 
+def test_depth_default_is_one_and_state_dict_is_backward_compatible():
+    # depth defaults to 1: only fc1/fc2 params, so existing (AWR) checkpoints
+    # trained before the depth knob still load byte-identically.
+    b = ValueBaseline(feature_dim=8, hidden=16)
+    top = {k.split(".")[0] for k in b.state_dict()}
+    assert top == {"fc1", "fc2"}
+
+
+def test_deeper_critic_adds_params_and_keeps_output_contract():
+    torch.manual_seed(0)
+    shallow = ValueBaseline(feature_dim=8, hidden=16, depth=1)
+    deep = ValueBaseline(feature_dim=8, hidden=16, depth=3)
+    assert sum(p.numel() for p in deep.parameters()) > sum(p.numel() for p in shallow.parameters())
+    y = deep(torch.randn(5, 8))
+    assert y.shape == (5,)            # same (batch,) contract as depth=1
+    assert y.dtype == torch.float32
+
+
 def test_output_shape_is_batch_1d():
     torch.manual_seed(0)
     b = ValueBaseline(feature_dim=8, hidden=16)

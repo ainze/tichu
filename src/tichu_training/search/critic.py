@@ -44,6 +44,8 @@ def save_critic(
             "state_dict": baseline.state_dict(),
             "feature_dim": int(feature_dim),
             "hidden": int(hidden),
+            # Derived from the model so a deeper critic reloads at the right depth.
+            "depth": len(baseline.blocks) + 1,
             "featurizer_version": FEATURIZER_VERSION,
             "note": note,
         },
@@ -58,6 +60,6 @@ def load_critic(path) -> CriticValue:
             f"critic featurizer_version {blob.get('featurizer_version')!r} "
             f"!= harness {FEATURIZER_VERSION!r}"
         )
-    baseline = ValueBaseline(blob["feature_dim"], hidden=blob["hidden"])
+    baseline = ValueBaseline(blob["feature_dim"], hidden=blob["hidden"], depth=blob.get("depth", 1))
     baseline.load_state_dict(blob["state_dict"])
     return CriticValue(baseline)
