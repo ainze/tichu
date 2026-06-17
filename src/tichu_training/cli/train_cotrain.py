@@ -119,15 +119,16 @@ def _build_optimizer(models, critic, *, policy_lr: float, critic_lr: float,
 
 
 def _append_gate_row(path: Path, iteration: int, v: dict) -> None:
-    """Append one promotion-gate verdict to `promotion_gate.csv` (the run's record of
-    when the champion advanced and on what margin)."""
+    """Append a promotion-gate verdict to `promotion_gate.csv` — one row per opponent
+    (the run's record of when the champion advanced and on what margin vs each)."""
     fresh = not path.exists() or path.stat().st_size == 0
     with open(path, "a", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         if fresh:
-            w.writerow(["iter", "n", "mean", "ci_lo", "ci_hi", "promoted"])
-        w.writerow([iteration, v["n"], f"{v['mean']:.4f}", f"{v['ci_lo']:.4f}",
-                    f"{v['ci_hi']:.4f}", int(v["promote"])])
+            w.writerow(["iter", "opponent", "n", "mean", "ci_lo", "ci_hi", "promoted"])
+        for opp, s in v["opponents"].items():
+            w.writerow([iteration, opp, s["n"], f"{s['mean']:.4f}", f"{s['ci_lo']:.4f}",
+                        f"{s['ci_hi']:.4f}", int(v["promote"])])
 
 
 def _kl_controllers(config, decision_types) -> dict:
@@ -301,6 +302,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     # margin window resets on resume — at most one window is re-accumulated).
     gate = None
     champion_path = None
+    gate_opp_cycle = None   # [(opponent_name, weights_path)] the rollout alternates over
     gate_log_path = run_dir / "promotion_gate.csv"
     _save_champion = None
     reanchor_on_promote = False
@@ -318,19 +320,36 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             # the anchor advances only on a CI-confirmed win (vs the ungated
             # reanchor_play_every trail, which moved blindly and regressed).
             reanchor_on_promote = bool(gate_cfg.get("reanchor_on_promote", False))
+            # also_beat_bc: add the FROZEN BC as a second opponent the candidate must
+            # also beat to promote (anti-cycling). The rollout alternates champion/BC
+            # per iter; a promotion needs a CI-validated win over BOTH over their
+            # respective windows. BC is an OPPONENT here, not the KL anchor — so the
+            # policy diverges from BC freely (anchor follows the champion) but must
+            # still out-SCORE BC, rejecting champion-beating exploits that don't hold
+            # up vs the fixed human reference.
+            also_beat_bc = bool(gate_cfg.get("also_beat_bc", False))
             from tichu_training.ppo.promotion_gate import PromotionGate
             from tichu_training.ppo.rollout_parallel import save_rollout_weights as _save_champion
             champion_path = str(run_dir / "_champion.pt")
             if not Path(champion_path).exists():
                 _save_champion(champion_path, bc_models, critic)  # champion := frozen BC
+            gate_opp_cycle = [("champion", champion_path)]
+            opponents = ["champion"]
+            if also_beat_bc:
+                bc_opp_path = str(run_dir / "_bc_opponent.pt")
+                if not Path(bc_opp_path).exists():
+                    _save_champion(bc_opp_path, bc_models, critic)  # frozen BC opponent
+                gate_opp_cycle.append(("bc", bc_opp_path))
+                opponents.append("bc")
             gate = PromotionGate(
+                opponents=tuple(opponents),
                 window_games=int(gate_cfg.get("window_games", positions_per_iter * 8)),
                 threshold=float(gate_cfg.get("threshold", 0.0)),
                 bootstrap_iters=int(gate_cfg.get("bootstrap_iters", 1000)),
                 seed=pool_seed,
             )
             if progress:
-                print(f"  promotion_gate ON: opponent=champion, window {gate.window_games} games, "
+                print(f"  promotion_gate ON: opponents={opponents}, window {gate.window_games} games/opp, "
                       f"threshold {gate.threshold:+g}, reanchor_on_promote={reanchor_on_promote}"
                       + (" (league opponent ignored)" if league is not None else ""), flush=True)
 
@@ -400,9 +419,11 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                     # learner can move further from the original BC next window.
                     bc_models["play"].load_state_dict(models["play"].state_dict())
             if progress:
+                opp_str = "  ".join(
+                    f"{o} {s['mean']:+.1f}[{s['ci_lo']:+.1f},{s['ci_hi']:+.1f}]"
+                    for o, s in v["opponents"].items())
                 print(f"  gate {'PROMOTE' if v['promote'] else 'hold'} @ iter {iteration + 1}: "
-                      f"margin {v['mean']:+.2f} CI[{v['ci_lo']:+.2f}, {v['ci_hi']:+.2f}] "
-                      f"n={v['n']}", flush=True)
+                      f"{opp_str}", flush=True)
             gate.reset()
 
         if progress:
@@ -447,13 +468,14 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         def rollout_collect(iteration: int, positions):
             save_rollout_weights(weights_path, models, critic)
             # Champion gate takes precedence over the league as the opponent: playing
-            # the frozen champion is what makes the learner's round_outcomes a
-            # candidate-vs-champion margin (self-play / a random league sample would
-            # average to ~0 and carry no promotion signal).
+            # a frozen opponent is what makes the learner's round_outcomes a
+            # candidate-vs-opponent margin (self-play / a random league sample would
+            # average to ~0 and carry no promotion signal). With also_beat_bc the
+            # cycle alternates champion/BC per iter so each accumulates its own window.
             if gate is not None:
-                opp = champion_path
+                opp_name, opp = gate_opp_cycle[iteration % len(gate_opp_cycle)]
             else:
-                opp = league.sample() if league is not None else None
+                opp_name, opp = None, (league.sample() if league is not None else None)
             trajs = parallel.collect(
                 positions, weights_path, learner_team=learner_team,
                 base_seed=pool_seed + iteration * positions_per_iter,
@@ -462,7 +484,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             if gate is not None:
                 # One margin per game: the learner team's round_outcome, taken at its
                 # representative seat (== learner_team) so each game counts once.
-                gate.record(t.reward for t in trajs if t.seat == learner_team)
+                gate.record(opp_name, (t.reward for t in trajs if t.seat == learner_team))
             return trajs
 
     # Vine play advantages (ADR-0035): dedicated deterministic vine games whose

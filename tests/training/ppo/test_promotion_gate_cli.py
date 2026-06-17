@@ -117,3 +117,38 @@ def test_no_reanchor_on_promote_leaves_anchor_unpersisted(tmp_path):
     result = run_cotrain_training(config, progress=False)
     bundle = torch.load(result["bundle_path"], map_location="cpu", weights_only=False)
     assert bundle["play_anchor"] is None
+
+
+def test_also_beat_bc_adds_bc_opponent_and_logs_both(tmp_path):
+    # With also_beat_bc the gate alternates champion/BC, creates a frozen BC opponent
+    # file, and a verdict must beat BOTH — the per-opponent CSV records both streams.
+    torch.manual_seed(0)
+    config = _config(tmp_path, threshold=-1e9)  # pass-everything => promotes
+    config["promotion_gate"]["also_beat_bc"] = True
+    config["ppo"]["iterations"] = 6  # alternation needs >1 iter to fill both windows
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    assert (run_dir / "_champion.pt").exists()
+    assert (run_dir / "_bc_opponent.pt").exists()
+    rows = _gate_rows(run_dir)
+    opps = {r["opponent"] for r in rows}
+    assert opps == {"champion", "bc"}, f"expected both opponents logged, got {opps}"
+    assert all(r["promoted"] == "1" for r in rows)
+
+
+def test_also_beat_bc_holds_when_one_opponent_fails(tmp_path):
+    # Pass-nothing threshold: even though it would beat the champion, the beat-BOTH
+    # gate holds (neither opponent clears) — champion not promoted.
+    torch.manual_seed(0)
+    config = _config(tmp_path, threshold=1e9)
+    config["promotion_gate"]["also_beat_bc"] = True
+    config["ppo"]["iterations"] = 6
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc"}
+    assert all(r["promoted"] == "0" for r in rows)
