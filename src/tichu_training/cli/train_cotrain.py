@@ -328,6 +328,19 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             # still out-SCORE BC, rejecting champion-beating exploits that don't hold
             # up vs the fixed human reference.
             also_beat_bc = bool(gate_cfg.get("also_beat_bc", False))
+            # greedy: source the gate's margins from a GREEDY mini-tournament (the
+            # deployed MLAgent via run_full_tournament) instead of the SAMPLED rollout
+            # reward. The sampled margin inflates as the policy sharpens (low-entropy
+            # learner barely hurt by sampling; the BC opponent is) — an artifact that
+            # drove 201 phantom promotions while DEPLOYED strength fell (2026-06-18
+            # close). The greedy margin is exactly what check_cotrain measures, so the
+            # gate validates deployed strength. verdict/promote/reanchor are unchanged;
+            # only the margin SOURCE differs (see ppo/greedy_gate.py).
+            gate_greedy = bool(gate_cfg.get("greedy", False))
+            greedy_n_deals = int(gate_cfg.get("greedy_n_deals", 2048))
+            greedy_every = int(gate_cfg.get("greedy_every", 64))
+            greedy_workers = int(gate_cfg.get("greedy_workers", rollout_workers))
+            gate_arch_cfg = {k: config.get(k, {}) for k in ("model", "schupfen_model", "call_model")}
             from tichu_training.ppo.promotion_gate import PromotionGate
             from tichu_training.ppo.rollout_parallel import save_rollout_weights as _save_champion
             champion_path = str(run_dir / "_champion.pt")
@@ -341,16 +354,25 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                     _save_champion(bc_opp_path, bc_models, critic)  # frozen BC opponent
                 gate_opp_cycle.append(("bc", bc_opp_path))
                 opponents.append("bc")
+            # A greedy window is ONE mini-tournament => 2*n_deals seat-swapped obs per
+            # opponent, filled in a single eval (so gate.ready() trips immediately after
+            # it); the sampled window instead accumulates positions_per_iter per iter.
+            window_games = (2 * greedy_n_deals if gate_greedy
+                            else int(gate_cfg.get("window_games", positions_per_iter * 8)))
             gate = PromotionGate(
                 opponents=tuple(opponents),
-                window_games=int(gate_cfg.get("window_games", positions_per_iter * 8)),
+                window_games=window_games,
                 threshold=float(gate_cfg.get("threshold", 0.0)),
                 bootstrap_iters=int(gate_cfg.get("bootstrap_iters", 1000)),
                 seed=pool_seed,
             )
             if progress:
+                src = (f"GREEDY mini-tournament ({greedy_n_deals} deals/opp every "
+                       f"{greedy_every} iters, {greedy_workers}w)" if gate_greedy
+                       else "sampled rollout reward")
                 print(f"  promotion_gate ON: opponents={opponents}, window {gate.window_games} games/opp, "
-                      f"threshold {gate.threshold:+g}, reanchor_on_promote={reanchor_on_promote}"
+                      f"threshold {gate.threshold:+g}, reanchor_on_promote={reanchor_on_promote}, "
+                      f"margin source = {src}"
                       + (" (league opponent ignored)" if league is not None else ""), flush=True)
 
     warmup_iters = int(config.get("critic", {}).get("warmup_iters", 0))
@@ -405,10 +427,31 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 save_checkpoint(models[dt], optimizer, step=iteration + 1,
                                 path=str(snapshots_dir / f"iter_{iteration + 1:05d}_{dt}.bin"))
 
+        # Greedy gate: every greedy_every iters, run ONE mini-tournament of the current
+        # learner vs each pool opponent (the deployed greedy MLAgent), recording the
+        # per-deal margins — the deployed-strength signal that replaces the confounded
+        # sampled reward. A single eval fills every opponent's window, so the verdict
+        # below fires right after. Fresh, unseen deals each window (base 1e9, far above
+        # the rollout/vine seed streams) so the gate can't overfit a fixed eval set.
+        if gate is not None and gate_greedy and (iteration + 1) % greedy_every == 0:
+            from tichu_training.ppo.greedy_gate import record_greedy_window
+            eval_idx = (iteration + 1) // greedy_every
+            eval_positions = generate_full_position_pool(
+                seed=1_000_000_000 + eval_idx * greedy_n_deals, n=greedy_n_deals
+            )
+            record_greedy_window(
+                gate, models, gate_opp_cycle, arch_cfg=gate_arch_cfg,
+                positions=eval_positions, skill_decile=skill_decile,
+                workers=greedy_workers, export_root=run_dir / "_gate_export",
+            )
+            if progress:
+                print(f"  greedy gate eval @ iter {iteration + 1}: {greedy_n_deals} deals x2 "
+                      f"vs {[o for o, _ in gate_opp_cycle]} ({greedy_workers}w)", flush=True)
+
         # Champion promotion gate verdict: this iter's per-game margins were recorded
-        # in rollout_collect; once a full window has accumulated, draw a verdict and —
-        # on a CI-validated win — overwrite the champion file with the current nets,
-        # then reset for the next window (non-overlapping).
+        # in rollout_collect (sampled) or by the greedy eval above; once a full window
+        # has accumulated, draw a verdict and — on a CI-validated win — overwrite the
+        # champion file with the current nets, then reset for the next window.
         if gate is not None and gate.ready():
             v = gate.verdict()
             _append_gate_row(gate_log_path, iteration + 1, v)
@@ -488,9 +531,11 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 base_seed=pool_seed + iteration * positions_per_iter,
                 opp_weights_path=opp,
             )
-            if gate is not None:
-                # One margin per game: the learner team's round_outcome, taken at its
-                # representative seat (== learner_team) so each game counts once.
+            if gate is not None and not gate_greedy:
+                # SAMPLED margin: one per game = the learner team's round_outcome at its
+                # representative seat (== learner_team) so each game counts once. Skipped
+                # under the greedy gate — the margin comes from the mini-tournament in
+                # _on_iteration, not the sampled rollout reward (the confounded signal).
                 gate.record(opp_name, (t.reward for t in trajs if t.seat == learner_team))
             return trajs
 

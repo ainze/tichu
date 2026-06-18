@@ -156,3 +156,68 @@ def test_also_beat_bc_holds_when_one_opponent_fails(tmp_path):
     rows = _gate_rows(run_dir)
     assert rows and {r["opponent"] for r in rows} == {"champion", "bc"}
     assert all(r["promoted"] == "0" for r in rows)
+
+
+# --- Greedy-margin gate (option A): margins from a GREEDY mini-tournament -----------
+# The deployed-strength source that replaces the confounded sampled rollout reward.
+_GREEDY_N_DEALS = 2  # tiny mini-tournament => 2*2 = 4 seat-swapped obs/opponent/window
+
+
+def _greedy_config(tmp_path, *, threshold, also_beat_bc=False):
+    config = _config(tmp_path, threshold=threshold)
+    config["promotion_gate"].update(
+        {"greedy": True, "greedy_n_deals": _GREEDY_N_DEALS,
+         "greedy_every": 1, "greedy_workers": 1}
+    )
+    if also_beat_bc:
+        config["promotion_gate"]["also_beat_bc"] = True
+    config["ppo"]["iterations"] = 2  # greedy_every=1 => eval fires after the first iter
+    return config
+
+
+def test_greedy_gate_promotes_and_sources_margins_from_the_mini_tournament(tmp_path):
+    # The anti-confound regression test (the whole point): with greedy=True the gate's
+    # margins come from a GREEDY mini-tournament, NOT the sampled rollout reward. At a
+    # pass-everything threshold it promotes, AND each window's n equals the tournament's
+    # obs count (2*greedy_n_deals seat-swapped), proving the source is the tournament
+    # (the sampled gate would record positions_per_iter=2 per iter instead).
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=-1e9)
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and all(r["promoted"] == "1" for r in rows)
+    assert all(int(r["n"]) == 2 * _GREEDY_N_DEALS for r in rows), \
+        "greedy window must be the mini-tournament's seat-swapped obs count, not sampled"
+    assert (run_dir / "_champion.pt").exists()
+
+
+def test_greedy_gate_holds_when_threshold_unreachable(tmp_path):
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=1e9)  # no greedy margin clears
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and all(r["promoted"] == "0" for r in rows)
+    assert all(int(r["n"]) == 2 * _GREEDY_N_DEALS for r in rows)
+
+
+def test_greedy_gate_fills_both_opponents_in_a_single_eval(tmp_path):
+    # Unlike the sampled gate (which alternates opponents per iter and needs several
+    # iters to fill both windows), the greedy eval scores BOTH pool opponents in one
+    # mini-tournament — so both windows fill, and a beat-both verdict is drawn, at the
+    # very first eval.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=-1e9, also_beat_bc=True)
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc"}
+    assert all(r["promoted"] == "1" for r in rows)
+    assert (run_dir / "_bc_opponent.pt").exists()
