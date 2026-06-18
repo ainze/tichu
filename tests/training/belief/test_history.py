@@ -35,16 +35,24 @@ def _play(seat, cards, leader):
 
 
 def test_tier_dims_are_nested_prefixes():
-    assert FEATURIZER_OUTPUT_DIM == 224
+    # Belief tiers are defined relative to the policy Feature Vector, so they
+    # track FEATURIZER_OUTPUT_DIM (591 at v6). NB: post-v6 the B_core history
+    # channels (declined/lead/pass) now ALSO live in the policy features —
+    # a redundancy the deferred belief-rung redesign must address (ADR-0038).
     assert HISTORY_DIM == 83
-    assert BELIEF_FEATURE_DIM == 307
-    assert TIER_DIMS == {"A": 224, "B_core": 251, "B_full": 307}
+    assert BELIEF_FEATURE_DIM == FEATURIZER_OUTPUT_DIM + HISTORY_DIM
+    assert TIER_DIMS == {
+        "A": FEATURIZER_OUTPUT_DIM,
+        "B_core": FEATURIZER_OUTPUT_DIM + 27,
+        "B_full": FEATURIZER_OUTPUT_DIM + HISTORY_DIM,
+    }
 
 
 def test_belief_continuous_columns_cover_policy_plus_all_history():
     cols = belief_continuous_columns()
-    # policy continuous + every History column (224..306).
-    assert set(cols) == set(CONTINUOUS_FEATURE_COLUMNS) | set(range(224, 307))
+    # policy continuous + every History column (appended after the policy block).
+    history_cols = range(FEATURIZER_OUTPUT_DIM, FEATURIZER_OUTPUT_DIM + HISTORY_DIM)
+    assert set(cols) == set(CONTINUOUS_FEATURE_COLUMNS) | set(history_cols)
     assert len(cols) == len(CONTINUOUS_FEATURE_COLUMNS) + HISTORY_DIM
 
 

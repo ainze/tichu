@@ -1,0 +1,96 @@
+# Play-only isolation fork of cotrain_v6 (ADR-0034) — does freezing the call/
+# schupfen nets remove cross-net interference and let play train cleaner?
+#
+# BYTE-IDENTICAL to configs/cotrain_v6.yaml EXCEPT: `freeze_nets: [schupfen, tichu,
+# grand]` (held at their warm-started BC weights — still PLAYED in the rollout at BC
+# quality, but excluded from the optimizer) and a fresh `run_dir`. play KL target
+# stays 0.02 so the SOLE variable vs the all-nets baseline is the freeze.
+#
+# Hypothesis: the four nets are separate trunks, so their only coupling is the
+# SHARED critic + the single joint optimizer step. In full co-train the call/
+# schupfen policies DRIFT (schupfen leashed but moving, grand controller-fought),
+# making play's teammate environment non-stationary; and the lever nets feed noisy
+# returns into the shared critic (84% play-weighted already). Freezing them gives
+# play a STATIONARY environment + a critic fit on stable BC-distribution call/
+# schupfen returns. If play then trains stronger than the all-nets baseline, the
+# combination WAS interfering.
+#
+# Note: the levers stay at BC here (no attempt to improve them) — that's the point.
+# The deployed full stack keeps BC-quality calls/schupfen; only play is sharpened.
+# Critic still POOLS all decision types (frozen nets' returns are stable BC data,
+# which is fine — arguably better critic targets). To also restrict the critic to
+# play-only steps would be a further change; not done here.
+#
+# Compare at a MATCHED iter vs the cotrain_v6 baseline:
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6_play_only.yaml \
+#       --iter <N> --held-out <dir|archive>
+# Run AFTER stopping the baseline (don't overlap — 2x rollout pools => OOM, ADR-0034).
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_play_only
+
+# Freeze the call/schupfen nets — train ONLY play (+ the shared critic). Frozen
+# nets are still warm-started + driven in the rollout; they just never update.
+freeze_nets: [schupfen, tichu, grand]
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: false
+
+# play target held at the baseline 0.02 (freeze is the only variable). The frozen
+# nets' kl/entropy entries are inert (their loss contributes no gradient) but kept
+# so the config stays a clean diff of cotrain_v6.
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

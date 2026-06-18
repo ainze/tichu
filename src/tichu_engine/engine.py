@@ -13,7 +13,7 @@ out-of-turn bomb interrupts are handled in their own sub-slices.
 from dataclasses import replace
 
 from tichu_engine.cards import Card, DOG, DRAGON, MAHJONG, PHOENIX, SpecialCard
-from tichu_engine.combinations import CardOrSpecial, Single
+from tichu_engine.combinations import CardOrSpecial, Single, combo_type_and_rank
 from tichu_engine.legality import (
     ConcreteAction,
     BombInterrupt,
@@ -68,7 +68,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             round_points_by_player=new_round_points,
             pending_decision=None,
         )
-        new_state = GameState(hands=state.hands, public=next_public)
+        new_state = replace(state, public=next_public)
         # Capture done BEFORE finalising: _finalise_round resets out_order, after
         # which _round_done_state no longer recognises a slam (fewer than 3 hands
         # empty) and would wrongly report done=False.
@@ -96,7 +96,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             mahjong_wish=action.rank,
             pending_decision=None,
         )
-        new_state = GameState(hands=state.hands, public=next_public)
+        new_state = replace(state, public=next_public)
         # If the Mahjong play ended the round (wisher went out via the last
         # play), finalise now — the wish is moot but Tichu/Grand-Tichu bonuses
         # still need to be applied.
@@ -109,6 +109,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
 
     # Dog short-circuits normal trick mechanics: lead passes to partner, trick clears.
     if isinstance(action, Single) and action.card is DOG:
+        dog_declined, dog_lead, dog_pass = _fold_decision(state.public, current, action)
         next_hands = _remove_from_hand(state.hands, current, frozenset({DOG}))
         next_hand_sizes = tuple(len(h) for h in next_hands)
         partner = _partner_target(partner=(current + 2) % NUM_PLAYERS, hand_sizes=next_hand_sizes)  # type: ignore[arg-type]
@@ -126,8 +127,14 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             trick=Trick.empty(),
             out_order=new_out_order,
             played_cards_this_round=state.public.played_cards_this_round | {DOG},
+            played_cards_by_player=_add_played_by(
+                state.public.played_cards_by_player, current, frozenset({DOG})
+            ),
+            declined_top_by_player=dog_declined,
+            lead_summary_by_player=dog_lead,
+            pass_stats_by_player=dog_pass,
         )
-        new_state = GameState(hands=next_hands, public=next_public)
+        new_state = replace(state, hands=next_hands, public=next_public)
         done = _round_done_state(new_state)  # capture before finalise resets out_order
         if done:
             new_state = _finalise_round(new_state)
@@ -143,6 +150,12 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         next_trick = state.public.trick.add_play(player=current, combination=action)
 
     next_played_cards_this_round = state.public.played_cards_this_round | played_cards
+    next_played_by = _add_played_by(
+        state.public.played_cards_by_player, current, played_cards
+    )
+    next_declined, next_lead_summary, next_pass_stats = _fold_decision(
+        state.public, current, action
+    )
 
     next_hand_sizes = tuple(len(h) for h in next_hands)
 
@@ -167,8 +180,12 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             out_order=new_out_order,
             pending_decision=MahjongWishPending(player=current),
             played_cards_this_round=next_played_cards_this_round,
+            played_cards_by_player=next_played_by,
+            declined_top_by_player=next_declined,
+            lead_summary_by_player=next_lead_summary,
+            pass_stats_by_player=next_pass_stats,
         )
-        return GameState(hands=next_hands, public=next_public), 0.0, _round_done(next_hand_sizes), {}  # type: ignore[arg-type]
+        return replace(state, hands=next_hands, public=next_public), 0.0, _round_done(next_hand_sizes), {}  # type: ignore[arg-type]
 
     # Advance turn or resolve trick.
     next_player, resolved_trick = _advance_or_resolve(
@@ -238,8 +255,12 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         mahjong_wish=new_wish,
         pending_decision=new_pending,  # type: ignore[arg-type]
         played_cards_this_round=next_played_cards_this_round,
+        played_cards_by_player=next_played_by,
+        declined_top_by_player=next_declined,
+        lead_summary_by_player=next_lead_summary,
+        pass_stats_by_player=next_pass_stats,
     )
-    new_state = GameState(hands=next_hands, public=next_public)
+    new_state = replace(state, hands=next_hands, public=next_public)
     # Capture done before finalise resets out_order (else a slam — partner pair
     # out, fewer than 3 hands empty — re-checks as not-done and reports False).
     done = new_pending is None and _round_done_state(new_state)
@@ -293,6 +314,59 @@ def _add_to_player(
     new = list(points)
     new[player] += delta
     return (new[0], new[1], new[2], new[3])
+
+
+def _add_played_by(
+    prev: tuple[frozenset, frozenset, frozenset, frozenset],
+    seat: int,
+    cards: frozenset,
+) -> tuple[frozenset, frozenset, frozenset, frozenset]:
+    """v6 (ADR-0038): record `cards` as played by `seat`. No-op for an empty
+    set (a Pass), so callers can pass it unconditionally."""
+    if not cards:
+        return prev
+    new = list(prev)
+    new[seat] = new[seat] | cards
+    return (new[0], new[1], new[2], new[3])
+
+
+def _single_lead_rank(action: object) -> int | None:
+    """The natural rank (2..14) of a Single lead, else None — used to track each
+    seat's lowest single-card lead. Specials (Mahjong/Dog/Phoenix/Dragon) are
+    not naturals and return None."""
+    if isinstance(action, Single) and isinstance(action.card, Card):
+        r = action.card.rank
+        if 2 <= r <= 14:
+            return r
+    return None
+
+
+def _fold_decision(public: PublicState, seat: int, action: object) -> tuple:
+    """v6 (ADR-0028 B-core): fold one Play/Pass Decision by `seat` into the
+    decline / lead / pass accumulators. Mirrors belief `HistoryAccumulator`:
+    a Pass records the declined top (per type) and bumps pass + decision counts;
+    a play leading a fresh Trick bumps lead count (and lowest single lead).
+    Returns (declined_top_by_player, lead_summary_by_player, pass_stats_by_player)."""
+    declined = [list(x) for x in public.declined_top_by_player]
+    lead = [list(x) for x in public.lead_summary_by_player]
+    passes = [list(x) for x in public.pass_stats_by_player]
+    passes[seat][1] += 1  # every Decision counts toward pass pressure's denominator
+    if isinstance(action, Pass):
+        passes[seat][0] += 1
+        tr = combo_type_and_rank(public.trick.top_combination)
+        if tr is not None:
+            tidx, rank = tr
+            declined[seat][tidx] = max(declined[seat][tidx], rank)
+    elif public.trick.leader is None:  # a play leading a fresh Trick
+        lead[seat][0] += 1
+        rank = _single_lead_rank(action)
+        if rank is not None:
+            lead[seat][1] = rank if lead[seat][1] == 0 else min(lead[seat][1], rank)
+    return (
+        tuple(tuple(x) for x in declined),
+        tuple(tuple(x) for x in lead),
+        tuple(tuple(x) for x in passes),
+    )
 
 
 def _finalise_round(state: GameState) -> GameState:
@@ -363,6 +437,10 @@ def _finalise_round(state: GameState) -> GameState:
         tichu_callers=frozenset(),
         grand_tichu_callers=frozenset(),
         played_cards_this_round=frozenset(),
+        played_cards_by_player=(frozenset(), frozenset(), frozenset(), frozenset()),
+        declined_top_by_player=((0, 0, 0, 0, 0, 0),) * 4,
+        lead_summary_by_player=((0, 0),) * 4,
+        pass_stats_by_player=((0, 0),) * 4,
     )
     return GameState(hands=state.hands, public=next_public)
 
@@ -415,7 +493,19 @@ def _apply_schupfen(
             hand_sizes=tuple(len(h) for h in frozen_hands),  # type: ignore[arg-type]
             pending_decision=None,
         )
-        return GameState(hands=frozen_hands, public=next_public), 0.0, False, {}
+        # v6 (ADR-0038): record each seat's received-card provenance, relative-seat
+        # ordered [from_next, from_partner, from_previous]. Seat r receives the
+        # to_previous card from its next seat, the to_partner card from its
+        # partner, and the to_next card from its previous seat.
+        received = tuple(
+            (
+                new_submitted[(r + 1) % NUM_PLAYERS][2],  # from_next
+                new_submitted[(r + 2) % NUM_PLAYERS][1],  # from_partner
+                new_submitted[(r + 3) % NUM_PLAYERS][0],  # from_previous
+            )
+            for r in range(NUM_PLAYERS)
+        )
+        return GameState(hands=frozen_hands, public=next_public, schupfen_received=received), 0.0, False, {}
 
     next_public = replace(
         state.public,
@@ -429,6 +519,9 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
     """Apply an out-of-turn bomb. The bomber becomes the new trick leader; previously
     passed players are cleared (everyone gets to react to the new top); turn advances
     clockwise from the bomber."""
+    bomb_declined, bomb_lead, bomb_pass = _fold_decision(
+        state.public, action.player, action.bomb
+    )
     played_cards = frozenset(_cards_in(action.bomb))  # type: ignore[arg-type]
     next_hands = _remove_from_hand(state.hands, action.player, played_cards)
     next_hand_sizes = tuple(len(h) for h in next_hands)
@@ -477,8 +570,14 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
         out_order=new_out_order,
         pending_decision=new_pending,  # type: ignore[arg-type]
         played_cards_this_round=state.public.played_cards_this_round | played_cards,
+        played_cards_by_player=_add_played_by(
+            state.public.played_cards_by_player, action.player, played_cards
+        ),
+        declined_top_by_player=bomb_declined,
+        lead_summary_by_player=bomb_lead,
+        pass_stats_by_player=bomb_pass,
     )
-    new_state = GameState(hands=next_hands, public=next_public)
+    new_state = replace(state, hands=next_hands, public=next_public)
     # Capture done before finalise resets out_order (else a slam — partner pair
     # out, fewer than 3 hands empty — re-checks as not-done and reports False).
     done = new_pending is None and _round_done_state(new_state)

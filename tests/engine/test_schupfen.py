@@ -109,6 +109,45 @@ def test_schupfen_exchanges_cards_between_players():
         assert sent_to_next[sender] not in state.hands[sender]
 
 
+def test_private_view_exposes_schupfen_received_provenance():
+    """v6 (ADR-0038): after the exchange, private_view(r).schupfen_received holds
+    r's three received cards by relative give-direction [from_next, from_partner,
+    from_previous]. Here every seat sends its hand[0] as `to_next`, so seat r's
+    `from_previous` card is the to_next card sent by the previous seat (r-1)."""
+    state = deal_for_schupfen(seed=0)
+    sent_to_next: dict[int, object] = {}
+    for _ in range(4):
+        current = state.public.current_player
+        hand = list(state.hands[current])
+        sent_to_next[current] = hand[0]
+        state, _, _, _ = step(
+            state, SchupfenPass(to_next=hand[0], to_partner=hand[1], to_previous=hand[2])
+        )
+    for r in range(4):
+        pv = state.private_view(r)
+        assert pv.schupfen_received[2] == sent_to_next[(r - 1) % 4]  # from_previous
+        # The received cards are exactly the three cards that arrived in r's hand.
+        assert set(pv.schupfen_received).issubset(pv.hand)
+
+
+def test_schupfen_received_persists_through_the_round():
+    """The provenance is set once at the exchange and must survive every `step`
+    reconstruction of GameState until the round ends. Guards against a step branch
+    that rebuilds GameState without carrying schupfen_received forward."""
+    state = deal_for_schupfen(seed=0)
+    state = _submit_all_schupfens(state)
+    expected = state.schupfen_received
+    assert all(r is not None for r in expected)  # set by the exchange
+    for _ in range(500):
+        actions = list(legal_actions(state))
+        if not actions:
+            break
+        state, _, done, _ = step(state, actions[0])
+        if done:
+            break
+        assert state.schupfen_received == expected
+
+
 def test_schupfen_total_cards_preserved():
     state = deal_for_schupfen(seed=0)
     initial_all = set()

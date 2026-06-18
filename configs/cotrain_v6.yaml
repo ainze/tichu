@@ -1,0 +1,124 @@
+# Full-stack co-training PPO (ADR-0034) on the featurizer-v6 nets — multi-day all-in run.
+#
+# Sharpens play + Schupfen + Tichu/Grand calls together, warm-started from the v6
+# BC nets and KL-anchored to each frozen BC. Goal: beat the v6 `master` BC stack on
+# the seat-swap Tournament with 95% CI excluding 0 (any positive). Stop any time
+# (Ctrl-C) and re-run the SAME command to continue from the last atomic bundle:
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v6.yaml
+#       --restart   # only to throw away progress and start fresh
+#
+# PPO/KL/entropy hyperparameters held constant against cotrain_v5.yaml. THREE
+# deliberate v6 deltas, all flagged below:
+#   1) warm-start from the SHUFFLED v6 BC (cotrain_v5 warm-started from an
+#      *unshuffled* v5 BC — a latent recency-weight bias; see ADR-0038 / the
+#      shuffle note in bc_full_corpus_v6_memmap.yaml).
+#   2) the Perfect-Info Critic INPUT auto-widens to the v6 PERFECT_INFO_DIM
+#      (591 + 3*56 = 759) — derived from the featurizer, not a config choice.
+#   3) the Perfect-Info Critic is given CAPACITY — hidden 512 -> 1024 and depth
+#      1 -> 3 (residual blocks). ADR-0038's headroom lever; see the `critic` block.
+# Attribution caveat: vs the flat cotrain_v5 result, a strength gain reflects the
+# COMBINATION of v6 content + a bigger critic, not either alone. The clean read on
+# the v6 *featurizer* is the BC decile-9 Top-k (Framing X), which is independent of
+# this run. To isolate the critic lever specifically, also run a critic-512 variant.
+#
+# Strength reads are OUT OF LOOP (OOM safety): run `check_cotrain` on a snapshot.
+# Poll progress via {run_dir}/ppo_log.csv (per-net dials, flushed each iter).
+
+warm_start:
+  # NB: SHUFFLED v6 BC run (not _unshuffled). Verify the exact final checkpoint
+  # filename in the checkpoints dir before launch — the batch index depends on
+  # the realised row count (~1.256M batches; last periodic save at b01250000).
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+# Perfect-Info Critic ON (train-time only; the shipped policy stays observable).
+# Input auto-derives to the v6 PERFECT_INFO_DIM (759). This is ADR-0038's
+# capacity-headroom lever: the measured co-train under-fit is the critic's R² on
+# grand/schupfen (0.10/0.25), NOT the actor trunk, so capacity is spent HERE.
+#   hidden: 1024  — wide (was 512; matches the actor trunk).
+#   depth:  3     — 3 hidden layers (was the hardcoded 1). The default ValueBaseline
+#                   is a SINGLE hidden layer; depth>1 adds residual hidden->hidden
+#                   blocks. Depth is the more principled lever for an under-fitting
+#                   value net — it captures (opponent-hand x my-hand x call-state)
+#                   interactions a single wide layer can't, so it should move the
+#                   grand/schupfen R² more than width alone.
+# Free vs the actor — the critic is discarded at inference, so a bigger critic costs
+# nothing in the shipped model. Cost is train-time only: the deeper/wider forward+
+# backward slows the GPU update step (watch ex/s). Lighter alternative if throughput
+# suffers: { hidden: 512, depth: 3 } (let depth do the work). If R² still under-fits,
+# go deeper (depth: 4) before wider.
+# NB: changing hidden OR depth reshapes the critic, so this needs a FRESH run (policy
+# nets warm-start from BC again; the new critic re-initialises and re-warms) — it
+# cannot resume from a differently-shaped Resume Bundle.
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+
+# Process-parallel rollout (ADR-0034 #1): rollout is CPU-engine-bound; fan the M
+# games across workers. ~(physical cores - 1 or 2). 1 = single-process path.
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+# OFF here to hold the baseline; flip true + add kl.wish / entropy.wish for a run
+# that learns the Mahjong-wish on the play net's 14-way head (ADR-0034 addendum).
+cotrain_wish: false
+
+# Per-net adaptive KL-anchor to frozen BC. Schupfen anchored TIGHTEST (cratering it
+# is the demonstrated big downside) with the same linear leash-anneal as v5
+# (0.008 -> 0.025 over iters [750, 2750]) so the lever the run exists to move can
+# actually move (cotrain_v5 learning-dynamics diagnosis, 2026-06-07).
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 25
+
+# Offline strength read (separate `check_cotrain` command — NOT run in-loop):
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6.yaml
+# Exports the latest snapshot and tournaments it vs the v6 `master`; ship bar = CI 95% > 0.
+# `master` MUST be the v6 BC export (the strongest offline v6 agent — apples-to-apples
+# with the warm-start). Produce it by exporting the v6 BC/calls/schupfen nets into the
+# dir below before running check_cotrain.
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # a ceiling, not a plan — run for days; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

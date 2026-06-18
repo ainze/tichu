@@ -1,0 +1,113 @@
+# Beat-BOTH pool gate: champion + re-anchor-on-promote + ALSO-BEAT-BC. The
+# anti-cycling / trustworthy-divergence version of the validated escape.
+#
+# Delta vs configs/cotrain_v6_gated_reanchor.yaml: promotion_gate gains
+# `also_beat_bc: true` (+ fresh run_dir). The rollout now alternates opponent per iter
+# — champion on even iters, frozen BC on odd — and a promotion requires a CI-validated
+# win over BOTH over their 4096-game windows (16 iters/window: 8 vs each).
+#
+# WHY: the single-champion gated_reanchor run promoted 5x but only reached ~+3.66 vs
+# the BC master — beating-your-ancestor != getting-stronger in a non-transitive game
+# (cycling). Adding BC as a SECOND, fixed opponent attacks that two ways: (1) training
+# best-responds to a {champion, BC} pool, so narrow champion-only exploits don't
+# survive; (2) a promotion must out-SCORE BC too, rejecting champion-beating moves that
+# don't hold up vs the fixed human reference. Crucially BC is an OPPONENT here, NOT the
+# KL anchor — the anchor follows the champion (reanchor_on_promote), so the policy
+# DIVERGES from BC in policy-space freely (the drift flag is expected, not feared) but
+# must still BEAT BC in outcome-space: "play differently, but provably better."
+#
+# The arc:
+#   fixed cap (cotrain_v6)               -> +8.75  (stable in-ball optimum)
+#   ungated reanchor (play_reanchor)     -> +1.27  (blind escape, degraded)
+#   gate, fixed anchor (gated)           -> stalls (validated, never leaves ball)
+#   gate + reanchor (gated_reanchor)     -> +3.66  (escapes, but single-champion CYCLES)
+#   + also_beat_bc (HERE)                -> the test: does beat-both stop the cycling?
+#
+# JUDGE: promotion_gate.csv now has rows per opponent — promotions should be RARER but
+# each implies a real win vs BOTH. Then check_cotrain mean vs the +8.75 baseline + the
+# play/call decomposition (is play-only finally climbing?). The drift flag is expected
+# to fire (divergence is the goal); trust the beat-both gate over human-similarity.
+# NB: this won't raise the absolute ceiling (that's the critic's play-value R^2 0.52) —
+# it makes the divergence TRUSTWORTHY so you can push it without fear of cycling.
+#
+# Optional: add `freeze_nets: [schupfen, tichu, grand]` for a play-only pool escape.
+# Parallel-only; run AFTER stopping other runs (OOM, ADR-0034).
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_gated_pool
+
+# Beat-BOTH pool gate WITH anchor-follow: alternate champion/BC per iter; a promotion
+# needs a CI-validated win over BOTH (4096 games each, 16 iters/window). On promote,
+# the play KL anchor follows the champion (diverge from BC freely) while still having
+# to out-score BC (the anti-cycling floor).
+promotion_gate:
+  enabled:             true
+  window_games:        4096      # per opponent => 16 iters/window (8 champion + 8 BC)
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: false
+
+kl:
+  play:     { coef: 1.0, target: 0.08,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  # Grand anchored TIGHTER (0.008, like schupfen) with a gentler controller
+  # (factor 1.5): grand's advantages are ~81% noise (R^2 0.19, worst lever) and it's
+  # a rare near-deterministic binary call, so KL is hyper-sensitive there — at 0.02
+  # the controller overshot to ~0.075 and oscillated hard (beta 1e-4..50). Tighter
+  # target keeps it near the BC it can't beat; lower factor damps the oscillation.
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

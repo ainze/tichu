@@ -1,0 +1,76 @@
+# BC training on the FULL corpus packed bundle, featurizer v6 (ADR-0038).
+#
+# Same bc_full arch (1024x4 trunk, 256-hidden heads, 64-dim skill) and
+# hyperparameters as configs/bc_full_corpus_v5_memmap.yaml — the ONLY deltas are
+# the v6 bundle path and this header. Arch is deliberately held at 1024x4: BC is
+# label-bound, not capacity-bound (docs/notes/2026-06-02-bc-is-label-bound-not-
+# capacity-bound.md), and ADR-0038 routes any PPO "headroom" to the critic, not
+# the actor trunk. Holding arch/LR/batch/seed against the v5 run lets a quality
+# delta attribute cleanly to the v6 featurizer content (played_by +
+# schupfen_received + B-core negative-info + trick_leader), not to scale or arch.
+#
+# Row counts are a property of the decisions, not the featurizer, so they match
+# v5 (the v6 manifest re-states them; verify before trusting this comment):
+#   play  ~1,248,160,023
+#   wish     ~18,137,682
+#   dragon   ~19,887,678
+#   total ~1,286,185,383 examples
+# v6 is ~458 B/row vs v5's ~306 (wider feature block), so expect the memmap
+# fast path to run somewhat below v5's ~130k ex/s — budget a little more than
+# v5's ~2.5-3 h/epoch for I/O.
+#
+# Prereq — one parse pass emitting the parquet manifest + bc/calls/schupfen
+# bundles. MUST run from the worktree with src first on PYTHONPATH, else the
+# editable install silently materialises at the WRONG featurizer version (a
+# sibling worktree currently shadows the import — verify v6 first):
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\practical-gauss-8758e8\src"
+#   python -c "import tichu_training.featurizer as f; print(f.FEATURIZER_VERSION)"   # must print v6
+#   python -m tichu_training.cli.parse_bsw `
+#     --archive        C:\workbench\tichu\data\archive.zst `
+#     --output         C:\workbench\tichu\data\parquet_full_v6 `
+#     --bundle-out-dir C:\workbench\tichu\data\materialised_full_v6 `
+#     --bundle-tasks   all `
+#     --trueskill      C:\workbench\tichu\data\ratings_full.parquet `
+#     --workers        10
+#
+# Use (same PYTHONPATH requirement — the train job reads FEATURIZER_VERSION and
+# the bundle's manifest pin, and will hard-error on a v5/v6 mismatch):
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs\bc_full_corpus_v6_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap `
+#     --device  cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v6\bc
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+# REQUIRED at full-corpus scale (NOT optional). The bundle is emitted in game_id
+# order and sample_weight is a recency weight that flips 0.5 -> 1.0 at game_id
+# 1,855,844 (parse_bsw --recency-cutoff-game-id). Unshuffled, training crosses
+# that boundary mid-epoch: the weighted loss + effective LR double and the final
+# 1-epoch checkpoint is biased toward last-seen games. Shuffling interleaves
+# old/recent into weight-mixed, ~i.i.d. batches. Two-level knobs: large block
+# keeps order.dat reads near-sequential; buffer controls within-batch mixing.
+shuffle: true
+shuffle_buffer: 1048576           # rows held per drain (within-batch mixing)
+shuffle_block: 65536              # contiguous order.dat rows per read (I/O locality)
+
+checkpoint_every: 100000           # won't fire — epochs=1
+checkpoint_every_batches: 50000    # ~51M ex per save (~6-7 min on the fast path),
+                                   # ~25 mid-epoch checkpoints for resume / AWR targets
+seed: 0

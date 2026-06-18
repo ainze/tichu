@@ -107,7 +107,11 @@ def run_ppo_training(config, *, on_iteration=None, progress: bool = True) -> dic
     model = _build_model(config)
     load_checkpoint(config["warm_start"], model)
     bc_model = _freeze(copy.deepcopy(model))
-    critic = ValueBaseline(critic_dim, hidden=int(config.get("critic", {}).get("hidden", 512)))
+    critic = ValueBaseline(
+        critic_dim,
+        hidden=int(config.get("critic", {}).get("hidden", 512)),
+        depth=int(config.get("critic", {}).get("depth", 1)),
+    )
 
     optimizer = torch.optim.Adam([
         {"params": model.parameters(), "lr": float(ppo.get("policy_lr", 1e-4))},

@@ -149,6 +149,115 @@ def test_finalise_round_resets_played_cards():
     assert finalised.public.played_cards_this_round == frozenset()
 
 
+# ---- v6: per-player provenance (played_cards_by_player) ----
+
+
+def test_single_play_attributes_card_to_playing_seat():
+    """v6 (ADR-0038): played_cards_by_player[seat] accumulates the cards that
+    seat played; every other seat's set stays empty."""
+    seven = _c(Suit.JADE, 7)
+    state = _state({0: frozenset({seven, _c(Suit.SWORD, 3)}), 1: frozenset({_c(Suit.STAR, 10)})})
+    ns, _, _, _ = step(state, Single(seven))
+    by = ns.public.played_cards_by_player
+    assert by[0] == frozenset({seven})
+    assert by[1] == by[2] == by[3] == frozenset()
+
+
+def test_pass_does_not_change_played_by_player():
+    seven = _c(Suit.JADE, 7)
+    eight = _c(Suit.SWORD, 8)
+    state = _state(
+        {0: frozenset({seven}), 1: frozenset({_c(Suit.STAR, 10)})},
+        top=Single(eight), current_player=1, played=frozenset({eight}),
+    )
+    ns, _, _, _ = step(state, PASS)
+    assert ns.public.played_cards_by_player == (frozenset(),) * 4
+
+
+def test_dog_play_attributes_dog_to_player():
+    state = _state(
+        {
+            0: frozenset({DOG}),
+            1: frozenset({_c(Suit.STAR, 10)}),
+            2: frozenset({_c(Suit.PAGODA, 11)}),
+            3: frozenset({_c(Suit.SWORD, 12)}),
+        },
+    )
+    ns, _, _, _ = step(state, Single(DOG))
+    assert ns.public.played_cards_by_player[0] == frozenset({DOG})
+
+
+def test_bomb_interrupt_attributes_bomb_to_the_bomber():
+    sevens = [_c(Suit.JADE, 7), _c(Suit.SWORD, 7), _c(Suit.PAGODA, 7), _c(Suit.STAR, 7)]
+    state = _state(
+        {
+            0: frozenset({_c(Suit.STAR, 14)}),
+            2: frozenset(sevens + [_c(Suit.STAR, 8)]),
+            1: frozenset({_c(Suit.STAR, 9)}),
+            3: frozenset({_c(Suit.STAR, 11)}),
+        },
+        top=Single(_c(Suit.JADE, 10)), current_player=1,
+    )
+    ns, _, _, _ = step(state, BombInterrupt(player=2, bomb=FourOfAKindBomb(*sevens)))
+    # Attributed to the bomber (seat 2), not the current player.
+    assert set(sevens).issubset(ns.public.played_cards_by_player[2])
+    assert ns.public.played_cards_by_player[1] == frozenset()
+
+
+def test_multiple_plays_attribute_to_respective_players():
+    seven, eight, nine = _c(Suit.JADE, 7), _c(Suit.SWORD, 8), _c(Suit.PAGODA, 9)
+    state = _state(
+        {
+            0: frozenset({seven, _c(Suit.STAR, 2)}),
+            1: frozenset({eight, _c(Suit.STAR, 3)}),
+            2: frozenset({nine, _c(Suit.STAR, 4)}),
+            3: frozenset({_c(Suit.STAR, 5), _c(Suit.STAR, 6)}),
+        },
+    )
+    s1, _, _, _ = step(state, Single(seven))
+    s2, _, _, _ = step(s1, Single(eight))
+    s3, _, _, _ = step(s2, Single(nine))
+    by = s3.public.played_cards_by_player
+    assert by[0] == frozenset({seven})
+    assert by[1] == frozenset({eight})
+    assert by[2] == frozenset({nine})
+
+
+def test_finalise_round_resets_played_by_player():
+    public = PublicState(
+        current_player=0, hand_sizes=(0, 0, 0, 2), scores=(0, 0),
+        trick=Trick.empty(), out_order=(0, 1, 2),
+        played_cards_this_round=frozenset({_c(Suit.JADE, 7)}),
+        played_cards_by_player=(frozenset({_c(Suit.JADE, 7)}), frozenset(), frozenset(), frozenset()),
+    )
+    hands = (frozenset(), frozenset(), frozenset(),
+             frozenset({_c(Suit.STAR, 4), _c(Suit.STAR, 5)}))
+    finalised = _finalise_round(GameState(hands=hands, public=public))
+    assert finalised.public.played_cards_by_player == (frozenset(),) * 4
+
+
+def test_played_by_player_union_matches_aggregate_over_a_round():
+    """Cross-site invariant: every card in played_cards_this_round is attributed
+    to exactly one seat, so the union of played_cards_by_player must equal the
+    aggregate at every step. Holds for any legal line, so picking first-legal is
+    fine. Guards against a future step-branch that updates one field but not the
+    other."""
+    from tichu_engine.state import deal_initial_state
+    from tichu_engine.legality import legal_actions
+
+    state = deal_initial_state(seed=7)
+    for _ in range(500):  # safety bound; a round finishes well within this
+        actions = list(legal_actions(state))
+        if not actions:
+            break
+        state, _, done, _ = step(state, actions[0])
+        if done:
+            break
+        pub = state.public
+        union = frozenset().union(*pub.played_cards_by_player)
+        assert union == pub.played_cards_this_round
+
+
 def test_phoenix_in_play_accumulates_as_phoenix():
     # Phoenix substitutes for a rank in a Pair; _cards_in returns PHOENIX
     # itself, so the seen-cards view records the special card (not the

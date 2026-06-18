@@ -51,28 +51,23 @@ def _simple_private_state(player: int = 0) -> PrivateState:
     return PrivateState(player=player, hand=hand, public=public)
 
 
-def test_version_is_pinned_to_v5():
-    # v5 == v4 feature content; the stamp bump is a version realignment for the
-    # packed-bundle generation, not a featurizer change (ADR-0022).
-    assert FEATURIZER_VERSION == "v5"
+def test_version_is_pinned_to_v6():
+    # v6 (ADR-0038): played_by + schupfen_received + B-core + trick_leader.
+    assert FEATURIZER_VERSION == "v6"
 
 
-def test_dropped_v2_sections_are_absent():
-    """v3 dropped play_history, schupfen_received, phoenix_played
-    (see ADR-0015). v4 additionally rejects phoenix_position and
-    suit fields inside trick_top_combo (see ADR-0017): the union-of-
-    fields layout absorbs phoenix-half-rank semantics into
-    `primary_rank + phoenix_used`, and suit-of-top carries zero
-    beat-relevant signal."""
-    for dropped in (
-        "play_history",
-        "schupfen_received",
-        "phoenix_played",
-    ):
+def test_dropped_sections_are_absent():
+    """play_history and phoenix_played stay dropped (ADR-0015); seen_cards is
+    replaced by per-player played_by (ADR-0038). schupfen_received is *back*
+    self-only at v6 — ADR-0015's rules-violation finding was corrected. v4
+    still rejects phoenix_position and suit inside trick_top_combo (ADR-0017)."""
+    for dropped in ("play_history", "phoenix_played", "seen_cards"):
         assert dropped not in SECTION_DIMS, (
-            f"{dropped} was dropped in v3 — re-adding it needs an ADR "
+            f"{dropped} is dropped — re-adding it needs an ADR "
             f"and a featurizer version bump"
         )
+    # schupfen_received is legitimately present again at v6 (self-only).
+    assert "schupfen_received" in SECTION_DIMS
     for forbidden_subfield in ("phoenix_position", "suit"):
         assert forbidden_subfield not in TRICK_TOP_COMBO_SUBFIELDS, (
             f"{forbidden_subfield} was rejected in ADR-0017 — re-adding "
@@ -80,8 +75,8 @@ def test_dropped_v2_sections_are_absent():
         )
 
 
-def test_v4_total_dim_is_224():
-    assert FEATURIZER_OUTPUT_DIM == 224
+def test_v6_total_dim_is_591():
+    assert FEATURIZER_OUTPUT_DIM == 591
 
 
 def test_trick_top_combo_section_is_50_dims():
@@ -527,56 +522,177 @@ def test_featurize_handles_all_engine_phases(simple_phases):
         assert feat.shape == (FEATURIZER_OUTPUT_DIM,)
 
 
-# ---- v2: seen_cards section ----
-
-def test_seen_cards_section_dim_is_56():
-    assert SECTION_DIMS["seen_cards"] == 56
+# ---- v6: section helpers + new sections ----
 
 
-def _seen_cards_section(feat: np.ndarray) -> np.ndarray:
-    """Slice the trailing seen_cards section from a featurised state."""
-    start = FEATURIZER_OUTPUT_DIM - SECTION_DIMS["seen_cards"]
-    return feat[start:]
+def _section(feat: np.ndarray, name: str) -> np.ndarray:
+    """Slice a named section out of a featurised state via SECTION_DIMS."""
+    cursor = 0
+    for n, d in SECTION_DIMS.items():
+        if n == name:
+            return feat[cursor:cursor + d]
+        cursor += d
+    raise AssertionError(f"{name} not in SECTION_DIMS")
 
 
-def test_seen_cards_section_is_empty_when_nothing_played():
-    s = _simple_private_state()
-    feat = featurize(s)
-    assert _seen_cards_section(feat).sum() == 0.0
-
-
-def test_seen_cards_section_reflects_played_cards_this_round():
-    played = frozenset({Card(Suit.JADE, 7), DRAGON, PHOENIX})
+def _play_state(acting: int, leader: int) -> PrivateState:
+    """A play-phase PrivateState whose current trick was led by `leader`."""
     hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
-    public = PublicState(
-        current_player=0,
-        hand_sizes=(14, 14, 14, 14),
-        scores=(0, 0),
-        trick=Trick.empty(),
-        played_cards_this_round=played,
+    return PrivateState(
+        player=acting, hand=hand,
+        public=PublicState(
+            current_player=acting, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+            trick=Trick(
+                plays=(Play(player=leader, combination=Single(Card(Suit.JADE, 7))),),
+                leader=leader,
+            ),
+        ),
     )
-    s = PrivateState(player=0, hand=hand, public=public)
-    feat = featurize(s)
-    seen = _seen_cards_section(feat)
-    assert seen.sum() == 3.0
 
 
-def test_seen_cards_includes_specials_separately_from_naturals():
-    # Phoenix and a natural 7 occupy different slots in the 56-dim section.
-    played = frozenset({Card(Suit.JADE, 7), PHOENIX})
-    hand = frozenset({Card(Suit.SWORD, r) for r in range(2, 15)} | {MAHJONG})
-    public = PublicState(
-        current_player=0,
-        hand_sizes=(14, 14, 14, 14),
-        scores=(0, 0),
+def test_trick_leader_is_relative_seat_one_hot():
+    """`trick_leader[4]` marks who led the current trick, in relative-seat
+    order [self, next, partner, previous]. Empty trick → all-zero (ADR-0038)."""
+    # acting=0: absolute leader L lands in relative slot (L - 0) % 4.
+    for leader, slot in ((0, 0), (1, 1), (2, 2), (3, 3)):
+        sec = _section(featurize(_play_state(acting=0, leader=leader)), "trick_leader")
+        assert sec.shape == (4,)
+        assert sec[slot] == 1.0
+        assert sec.sum() == 1.0
+    # Relativity: acting=2, leader=3 (the seat to acting's left) → slot 1.
+    sec = _section(featurize(_play_state(acting=2, leader=3)), "trick_leader")
+    assert sec[1] == 1.0
+    assert sec.sum() == 1.0
+
+
+def _played_by_planes(feat: np.ndarray) -> np.ndarray:
+    return _section(feat, "played_by").reshape(4, 56)
+
+
+def test_played_by_attributes_each_card_to_its_player_relative_seat():
+    """`played_by[4][56]` puts each played card in the plane of the seat that
+    played it, relative-seat ordered [self, next, partner, previous]. ADR-0038."""
+    from tichu_training.card_slots import card_slot
+
+    hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
+    pub = PublicState(
+        current_player=0, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
         trick=Trick.empty(),
-        played_cards_this_round=played,
+        played_cards_by_player=(
+            frozenset({Card(Suit.SWORD, 3)}),   # self  → plane 0
+            frozenset({PHOENIX}),               # next  → plane 1
+            frozenset({DRAGON}),                # partner → plane 2
+            frozenset({Card(Suit.SWORD, 5)}),   # previous → plane 3
+        ),
     )
-    s = PrivateState(player=0, hand=hand, public=public)
-    seen = _seen_cards_section(featurize(s))
-    # Exactly two distinct bits set.
-    assert int(seen.sum()) == 2
-    assert int((seen > 0).sum()) == 2
+    planes = _played_by_planes(featurize(PrivateState(player=0, hand=hand, public=pub)))
+    assert planes[0][card_slot(Card(Suit.SWORD, 3))] == 1.0
+    assert planes[1][card_slot(PHOENIX)] == 1.0
+    assert planes[2][card_slot(DRAGON)] == 1.0
+    assert planes[3][card_slot(Card(Suit.SWORD, 5))] == 1.0
+    assert planes.sum() == 4.0
+
+    # Relativity: viewed from acting seat 2, a card played by seat 3 (next) → plane 1.
+    pub2 = PublicState(
+        current_player=2, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+        trick=Trick.empty(),
+        played_cards_by_player=(frozenset(), frozenset(), frozenset(), frozenset({DRAGON})),
+    )
+    planes2 = _played_by_planes(featurize(PrivateState(player=2, hand=hand, public=pub2)))
+    assert planes2[1][card_slot(DRAGON)] == 1.0
+    assert planes2.sum() == 1.0
+
+
+def test_declined_top_encodes_max_declined_rank_per_opponent_relative_seat():
+    """`declined_top[3 opp × 6 types]` carries, per opponent (relative-seat
+    [next, partner, previous]) and per non-bomb intent type, the max primary
+    rank that opponent declined to beat, normalised rank/14. ADR-0028 / ADR-0038."""
+    hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
+    pub = PublicState(
+        current_player=0, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+        trick=Trick.empty(),
+        declined_top_by_player=(
+            (0, 0, 0, 0, 0, 0),    # self  (seat 0) — never read
+            (13, 7, 0, 0, 0, 0),   # next  (seat 1): Single=13, Pair=7
+            (0, 0, 0, 0, 0, 0),    # partner (seat 2): none
+            (0, 0, 0, 0, 0, 10),   # previous (seat 3): Straight=10
+        ),
+    )
+    sec = _section(featurize(PrivateState(player=0, hand=hand, public=pub)),
+                   "declined_top").reshape(3, 6)
+    assert sec[0][0] == pytest.approx(13 / 14)   # next, Single
+    assert sec[0][1] == pytest.approx(7 / 14)    # next, Pair
+    assert sec[1].sum() == 0.0                    # partner, none
+    assert sec[2][5] == pytest.approx(10 / 14)   # previous, Straight
+
+
+def test_lead_summary_encodes_tricks_led_and_lowest_single_lead_relative_seat():
+    """`lead_summary[3 opp × 2]`: per opponent (relative-seat), tricks_led
+    normalised by a fixed cap, and the lowest single-lead rank / 14. ADR-0028."""
+    from tichu_training.featurizer import LEAD_TRICKS_CAP
+
+    hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
+    pub = PublicState(
+        current_player=0, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+        trick=Trick.empty(),
+        lead_summary_by_player=(
+            (0, 0),    # self
+            (3, 4),    # next: led 3 tricks, lowest single lead rank 4
+            (0, 0),    # partner
+            (1, 14),   # previous: led 1 trick, lowest single lead rank 14
+        ),
+    )
+    sec = _section(featurize(PrivateState(player=0, hand=hand, public=pub)),
+                   "lead_summary").reshape(3, 2)
+    assert sec[0][0] == pytest.approx(3 / LEAD_TRICKS_CAP)  # next, tricks_led
+    assert sec[0][1] == pytest.approx(4 / 14)               # next, lowest single
+    assert sec[1].sum() == 0.0                               # partner
+    assert sec[2][0] == pytest.approx(1 / LEAD_TRICKS_CAP)  # previous, tricks_led
+    assert sec[2][1] == pytest.approx(14 / 14)              # previous, lowest single
+
+
+def test_pass_pressure_is_pass_fraction_per_opponent_relative_seat():
+    """`pass_pressure[3 opp]`: fraction of each opponent's play decisions that
+    were Passes, relative-seat ordered. No decisions → 0. ADR-0028."""
+    hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
+    pub = PublicState(
+        current_player=0, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+        trick=Trick.empty(),
+        pass_stats_by_player=(
+            (0, 0),   # self
+            (3, 6),   # next: 3 of 6 → 0.5
+            (0, 0),   # partner: no decisions → 0
+            (2, 2),   # previous: 2 of 2 → 1.0
+        ),
+    )
+    sec = _section(featurize(PrivateState(player=0, hand=hand, public=pub)),
+                   "pass_pressure")
+    assert sec.shape == (3,)
+    assert sec[0] == pytest.approx(0.5)
+    assert sec[1] == 0.0
+    assert sec[2] == pytest.approx(1.0)
+
+
+def test_schupfen_received_encodes_self_received_cards_by_direction():
+    """`schupfen_received[3][56]` is self-only: the acting seat's three received
+    cards, indexed by relative give-direction [from_next, from_partner,
+    from_previous]. ADR-0038 (corrects ADR-0015's rules-violation finding)."""
+    from tichu_training.card_slots import card_slot
+
+    hand = frozenset({Card(Suit.JADE, r) for r in range(2, 15)} | {MAHJONG})
+    s = PrivateState(
+        player=0, hand=hand,
+        public=PublicState(
+            current_player=0, hand_sizes=(14, 14, 14, 14), scores=(0, 0),
+            trick=Trick.empty(),
+        ),
+        schupfen_received=(Card(Suit.SWORD, 3), PHOENIX, Card(Suit.SWORD, 5)),
+    )
+    sec = _section(featurize(s), "schupfen_received").reshape(3, 56)
+    assert sec[0][card_slot(Card(Suit.SWORD, 3))] == 1.0  # from next
+    assert sec[1][card_slot(PHOENIX)] == 1.0              # from partner
+    assert sec[2][card_slot(Card(Suit.SWORD, 5))] == 1.0  # from previous
+    assert sec.sum() == 3.0
 
 
 @pytest.fixture

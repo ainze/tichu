@@ -31,7 +31,7 @@ def save_rollout_weights(path: str, models: dict, critic) -> None:
     )
 
 
-def _init_worker(arch_cfg: dict, critic_hidden: int, perfect_info: bool) -> None:
+def _init_worker(arch_cfg: dict, critic_hidden: int, critic_depth: int, perfect_info: bool) -> None:
     from tichu_training.awr.value_baseline import ValueBaseline
     from tichu_training.cli.train_cotrain import _build_models
     from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
@@ -44,7 +44,7 @@ def _init_worker(arch_cfg: dict, critic_hidden: int, perfect_info: bool) -> None
     _WORKER.update(
         arch_cfg=arch_cfg,
         models=_build_models(arch_cfg),
-        critic=ValueBaseline(critic_dim, hidden=int(critic_hidden)),
+        critic=ValueBaseline(critic_dim, hidden=int(critic_hidden), depth=int(critic_depth)),
         perfect_info=bool(perfect_info),
         opp_models=None,  # built lazily on the first league task
     )
@@ -133,12 +133,13 @@ class ParallelRollout:
     Build once (before the iteration loop); call `collect` each iteration with the
     path to the freshly-saved weights. `close` at the end."""
 
-    def __init__(self, arch_cfg: dict, *, critic_hidden: int, skill_decile: int,
-                 perfect_info: bool, workers: int, train_wish: bool = False) -> None:
+    def __init__(self, arch_cfg: dict, *, critic_hidden: int, critic_depth: int = 1,
+                 skill_decile: int, perfect_info: bool, workers: int,
+                 train_wish: bool = False) -> None:
         ctx = mp.get_context("spawn")
         self._pool = ctx.Pool(
             int(workers), initializer=_init_worker,
-            initargs=(arch_cfg, int(critic_hidden), bool(perfect_info)),
+            initargs=(arch_cfg, int(critic_hidden), int(critic_depth), bool(perfect_info)),
         )
         self._workers = int(workers)
         self._skill_decile = int(skill_decile)

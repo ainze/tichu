@@ -9,11 +9,30 @@ import pytest
 from tichu_eval.starting_position_pool import generate_starting_position_pool, save_starting_position_pool
 from tichu_eval.full_position_pool import generate_full_position_pool, save_full_position_pool
 from tichu_training.cli.eval_matrix import main
+from tichu_training.featurizer import FEATURIZER_VERSION
+from tichu_export.torchscript import VersionMismatchError, load_exported
 
 
-# Real exported network bundle (featurizer v5). Present on the dev box; absent in
-# CI, where the heavy `ml`-in-workers test below is skipped. See ADR-0025.
-_EXPORT_DIR = Path(r"C:\workbench\tichu\data\export\bc_full_100k_v5")
+# Real exported network bundle. Present on the dev box; absent in CI, where the
+# heavy `ml`-in-workers test below is skipped. See ADR-0025. Path tracks the live
+# featurizer version so the test auto-activates against a compatible export and
+# skips against a stale one (e.g. a v5 bundle under v6 code).
+_EXPORT_DIR = Path(r"C:\workbench\tichu\data\export") / f"bc_full_100k_{FEATURIZER_VERSION}"
+
+
+def _export_bundle_compatible() -> bool:
+    """True iff a version-compatible exported policy is on disk — skip guard for
+    the dev-box-only `ml` eval test. A bundle whose embedded featurizer version
+    disagrees with the live one (the expected state right after a version bump,
+    before re-export) is treated as absent."""
+    policy = _EXPORT_DIR / "policy.pt"
+    if not policy.exists():
+        return False
+    try:
+        load_exported(policy, expected_featurizer_version=FEATURIZER_VERSION)
+        return True
+    except (VersionMismatchError, RuntimeError, OSError):
+        return False
 
 
 def _write_pool(tmp_path: Path, *, n: int = 10) -> Path:
@@ -224,8 +243,8 @@ def test_full_strength_parallel_cli_matches_serial(tmp_path):
 
 
 @pytest.mark.skipif(
-    not (_EXPORT_DIR / "policy.pt").exists(),
-    reason="requires exported v5 network bundle (dev box only)",
+    not _export_bundle_compatible(),
+    reason="requires a featurizer-compatible exported network bundle (dev box only)",
 )
 def test_full_strength_parallel_cli_rebuilds_ml_agents_in_workers(tmp_path):
     """The real eval path: a `factory: ml` agent must rebuild from its checkpoint

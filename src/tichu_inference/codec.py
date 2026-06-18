@@ -239,6 +239,14 @@ def public_state_to_json(public: PublicState) -> dict:
         "out_order": list(public.out_order),
         "tichu_callers": sorted(public.tichu_callers),
         "grand_tichu_callers": sorted(public.grand_tichu_callers),
+        # v6 (ADR-0038): per-player provenance + cross-Trick decline accumulators.
+        "played_cards_by_player": [
+            [card_to_id(c) for c in sorted(s, key=card_to_id)]
+            for s in public.played_cards_by_player
+        ],
+        "declined_top_by_player": [list(t) for t in public.declined_top_by_player],
+        "lead_summary_by_player": [list(t) for t in public.lead_summary_by_player],
+        "pass_stats_by_player": [list(t) for t in public.pass_stats_by_player],
     }
 
 
@@ -254,6 +262,24 @@ def public_state_from_json(blob: dict) -> PublicState:
         out_order=tuple(int(x) for x in blob.get("out_order", ())),
         tichu_callers=frozenset(int(x) for x in blob.get("tichu_callers", ())),
         grand_tichu_callers=frozenset(int(x) for x in blob.get("grand_tichu_callers", ())),
+        # v6 (ADR-0038): default to the empty accumulators so older clients that
+        # omit these keys deserialize to a valid (zeroed) state.
+        played_cards_by_player=tuple(
+            frozenset(id_to_card(i) for i in s)
+            for s in blob.get("played_cards_by_player", ([], [], [], []))
+        ),  # type: ignore[arg-type]
+        declined_top_by_player=tuple(
+            tuple(int(x) for x in row)
+            for row in blob.get("declined_top_by_player", ((0,) * 6,) * 4)
+        ),  # type: ignore[arg-type]
+        lead_summary_by_player=tuple(
+            tuple(int(x) for x in row)
+            for row in blob.get("lead_summary_by_player", ((0, 0),) * 4)
+        ),  # type: ignore[arg-type]
+        pass_stats_by_player=tuple(
+            tuple(int(x) for x in row)
+            for row in blob.get("pass_stats_by_player", ((0, 0),) * 4)
+        ),  # type: ignore[arg-type]
     )
 
 
@@ -262,6 +288,11 @@ def private_state_to_json(ps: PrivateState) -> dict:
         "player": ps.player,
         "hand": [card_to_id(c) for c in sorted(ps.hand, key=card_to_id)],
         "public": public_state_to_json(ps.public),
+        # v6 (ADR-0038): self-only schupfen provenance [from_next, from_partner,
+        # from_previous]; per-slot null before the exchange resolves.
+        "schupfen_received": [
+            None if c is None else card_to_id(c) for c in ps.schupfen_received
+        ],
     }
 
 
@@ -271,8 +302,12 @@ def private_state_from_json(blob: dict) -> PrivateState:
             "private_state_from_json requires keys {'player', 'hand', 'public'}; "
             f"got {sorted(blob.keys())}"
         )
+    received = blob.get("schupfen_received", (None, None, None))
     return PrivateState(
         player=int(blob["player"]),
         hand=frozenset(id_to_card(i) for i in blob["hand"]),
         public=public_state_from_json(blob["public"]),
+        schupfen_received=tuple(
+            None if i is None else id_to_card(i) for i in received
+        ),  # type: ignore[arg-type]
     )

@@ -10,6 +10,7 @@ from tichu_engine.state import (
     GameState,
     MahjongWishPending,
     Play,
+    PrivateState,
     PublicState,
     SchupfenPending,
     Trick,
@@ -67,6 +68,43 @@ def test_mid_trick_round_trip():
     blob = private_state_to_json(ps)
     restored = private_state_from_json(blob)
     assert restored == ps
+
+
+def test_v6_provenance_and_decline_fields_round_trip():
+    """v6 (ADR-0038): the new per-player provenance / decline accumulators
+    (PublicState) and self-only schupfen_received (PrivateState) survive the
+    wire round-trip — else the served featurizer sees them as empty."""
+    hand = frozenset({Card(Suit.SWORD, r) for r in range(2, 15)})  # 13 cards
+    public = PublicState(
+        current_player=1, hand_sizes=(13, 14, 14, 14), scores=(0, 0),
+        trick=Trick.empty(),
+        played_cards_by_player=(
+            frozenset({Card(Suit.JADE, 7)}), frozenset({DRAGON}),
+            frozenset(), frozenset({PHOENIX}),
+        ),
+        declined_top_by_player=((0,) * 6, (13, 7, 0, 0, 0, 0), (0,) * 6, (0,) * 6),
+        lead_summary_by_player=((1, 4), (0, 0), (2, 9), (0, 0)),
+        pass_stats_by_player=((0, 1), (3, 6), (0, 0), (2, 2)),
+    )
+    ps = PrivateState(
+        player=0, hand=hand, public=public,
+        schupfen_received=(Card(Suit.STAR, 3), MAHJONG, Card(Suit.STAR, 5)),
+    )
+    restored = private_state_from_json(private_state_to_json(ps))
+    assert restored == ps
+
+
+def test_pre_v6_blob_without_new_keys_deserializes_to_defaults():
+    """Backward-compat: a client that omits the v6 keys yields a valid state with
+    the zeroed/empty accumulator defaults (no decode error)."""
+    ps = deal_initial_state(seed=0).private_view(0)
+    blob = private_state_to_json(ps)
+    del blob["schupfen_received"]
+    for k in ("played_cards_by_player", "declined_top_by_player",
+              "lead_summary_by_player", "pass_stats_by_player"):
+        del blob["public"][k]
+    restored = private_state_from_json(blob)
+    assert restored == ps  # all new fields fall back to their defaults
 
 
 def test_dragon_give_pending_round_trip():
