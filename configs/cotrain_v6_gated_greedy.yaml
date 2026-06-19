@@ -25,11 +25,12 @@
 # negative or a small one.
 #
 # COST / OOM: each window = export + 2 greedy tournaments (champion + BC). At
-# greedy_n_deals=4096 that is ~8k seat-swapped obs/opponent (~16 min/window, 8w) every
-# greedy_every=256 iters (~32 min of training) -> ~33% overhead. The persistent rollout
+# greedy_n_deals=4096 that is ~8k seat-swapped obs/opponent (~13 min/window, 10w) every
+# greedy_every=128 iters (~16 min of training) -> ~45% overhead. The persistent rollout
 # pool stays resident during the eval (idle, not computing), so peak = rollout_workers +
-# greedy_workers processes — keep both modest (OOM, ADR-0034). Parallel-only; run AFTER
-# stopping other heavy runs. The cotrain_v6 baseline (+8.75) export is the agent to keep.
+# greedy_workers processes — on a 12-core box the 10 eval workers run while the 10
+# rollout workers are idle (OOM watch, ADR-0034). Parallel-only; run AFTER stopping
+# other heavy runs. The cotrain_v6 baseline (+8.75) export is the agent to keep.
 #
 # JUDGE: promotion_gate.csv margins should now TRACK check_cotrain (the gap this change
 # exists to close) — verify a late champion's gate margin ~= its tournament margin. Most
@@ -52,8 +53,8 @@ promotion_gate:
   enabled:             true
   greedy:              true      # margin source = greedy mini-tournament (option A)
   greedy_n_deals:      4096      # deals/opponent/window => 8192 seat-swapped obs/opp
-  greedy_every:        256       # run the eval every N iters (~32 min training/window)
-  greedy_workers:      8         # tournament worker processes (resident WITH the rollout pool)
+  greedy_every:        128       # run the eval every N iters (~16 min training/window)
+  greedy_workers:      10        # tournament worker procs (12-core box; rollout pool idle during eval)
   threshold:           0.0
   bootstrap_iters:     1000
   reanchor_on_promote: true
