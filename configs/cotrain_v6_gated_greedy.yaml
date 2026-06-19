@@ -1,0 +1,115 @@
+# GREEDY-margin pool gate: champion + BC, reanchor-on-promote, but the gate's margin
+# now comes from a GREEDY MINI-TOURNAMENT (option A), not the sampled rollout reward.
+#
+# Delta vs configs/cotrain_v6_gated_pool.yaml: promotion_gate gains `greedy: true`
+# (+ greedy_n_deals / greedy_every / greedy_workers; fresh run_dir). EVERYTHING else —
+# beat-both pool, reanchor_on_promote, KL leashes, arch — is identical.
+#
+# WHY (the 2026-06-18 close): the pool gate promoted 201x on SAMPLED rollout margins
+# (+16 -> +62) while DEPLOYED (greedy) strength FELL (+3.29 -> +1.96, drift -6.2pp).
+# Root cause: the rollout SAMPLES actions; the deployed MLAgent plays GREEDY (rank-by-
+# logit + threshold calls). A low-entropy learner is barely hurt by sampling while the
+# higher-entropy BC opponent is, so the sampled margin INFLATES as the policy sharpens
+# — an artifact, not skill. The gate optimised that proxy -> over-sharpening -> degraded
+# greedy play. Fix: gate on the GREEDY margin = exactly what check_cotrain measures
+# (run_full_tournament with the deployed MLAgent), so a promotion implies a real,
+# deployed-strength win. See ppo/greedy_gate.py + memory project_cotrain_learning_dynamics.
+#
+# EXPECTATIONS — read before judging. A correct greedy gate is NOT expected to beat the
+# +8.75 fixed-cap baseline; the real play lever is the critic's play-value R^2 (~0.52),
+# not the gate. The greedy margins center ~+3 with a per-obs std ~222 (Tichu deal swing
+# dwarfs the skill edge) — so even at n=8000 the iter-48 greedy CI SPANS ZERO. This gate
+# will therefore promote RARELY (only on a CI-validated, deployed-strength win). The
+# value here is methodological: (a) a gate whose signal == deployed strength, and (b) a
+# clean test of whether validated-greedy escape can exceed the baseline. Expect a clean
+# negative or a small one.
+#
+# COST / OOM: each window = export + 2 greedy tournaments (champion + BC). At
+# greedy_n_deals=4096 that is ~8k seat-swapped obs/opponent (~13 min/window, 10w) every
+# greedy_every=128 iters (~16 min of training) -> ~45% overhead. The persistent rollout
+# pool stays resident during the eval (idle, not computing), so peak = rollout_workers +
+# greedy_workers processes — on a 12-core box the 10 eval workers run while the 10
+# rollout workers are idle (OOM watch, ADR-0034). Parallel-only; run AFTER stopping
+# other heavy runs. The cotrain_v6 baseline (+8.75) export is the agent to keep.
+#
+# JUDGE: promotion_gate.csv margins should now TRACK check_cotrain (the gap this change
+# exists to close) — verify a late champion's gate margin ~= its tournament margin. Most
+# windows should HOLD (CI spans 0); promotions should be rare and each a real win.
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_memmap\checkpoints\step_e000_b01250000.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_gated_greedy
+
+# Beat-BOTH pool gate WITH anchor-follow, GREEDY margin source. A promotion needs a
+# CI-validated GREEDY win over BOTH champion and BC. One mini-tournament per window
+# fills both opponents' windows at once (no per-iter alternation needed for the gate),
+# so window_games is derived as 2*greedy_n_deals internally and the config value is
+# ignored under greedy.
+promotion_gate:
+  enabled:             true
+  greedy:              true      # margin source = greedy mini-tournament (option A)
+  greedy_n_deals:      4096      # deals/opponent/window => 8192 seat-swapped obs/opp
+  greedy_every:        128       # run the eval every N iters (~16 min training/window)
+  greedy_workers:      10        # tournament worker procs (12-core box; rollout pool idle during eval)
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 256 }
+call_model:     { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: false
+
+kl:
+  play:     { coef: 1.0, target: 0.08,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
