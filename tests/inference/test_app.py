@@ -135,6 +135,28 @@ def test_health_returns_ok_with_all_agents_loaded(tmp_path):
     assert set(body["agents"]) == {"easy", "medium", "hard", "master"}
 
 
+def test_health_reports_featurizer_version(tmp_path):
+    # The client (tichu-nuxt) asserts this on startup to fail loud on a
+    # feature-space mismatch. Source from the live constant, not a literal,
+    # so /health can never disagree with what the process featurizes against.
+    from tichu_training.featurizer import FEATURIZER_VERSION
+
+    app = create_app(_make_config(tmp_path))
+    client = TestClient(app)
+    body = client.get("/health").json()
+    assert body["featurizer_version"] == FEATURIZER_VERSION
+
+
+def test_health_reports_action_space_version(tmp_path):
+    # Future-proofs the action head: same constant the serving path pins to.
+    from tichu_training.action_space import ACTION_SPACE_VERSION
+
+    app = create_app(_make_config(tmp_path))
+    client = TestClient(app)
+    body = client.get("/health").json()
+    assert body["action_space_version"] == ACTION_SPACE_VERSION
+
+
 def test_act_returns_legal_action_for_every_difficulty(tmp_path):
     app = create_app(_make_config(tmp_path))
     client = TestClient(app)

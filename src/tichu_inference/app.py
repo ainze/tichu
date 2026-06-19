@@ -30,6 +30,8 @@ from tichu_inference.codec import action_to_json, private_state_from_json
 from tichu_inference.ml_agent import MLAgent, load_policy_module, load_standalone_net
 from tichu_ml.agent import Agent
 from tichu_ml.rule_agent import RuleAgent
+from tichu_training.action_space import ACTION_SPACE_VERSION
+from tichu_training.featurizer import FEATURIZER_VERSION
 
 
 log = logging.getLogger(__name__)
@@ -95,7 +97,12 @@ def create_app(config: dict) -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "agents": sorted(state.agents.keys())}
+        return {
+            "status": "ok",
+            "agents": sorted(state.agents.keys()),
+            "featurizer_version": FEATURIZER_VERSION,
+            "action_space_version": ACTION_SPACE_VERSION,
+        }
 
     @app.post("/act")
     async def act(request: Request):
