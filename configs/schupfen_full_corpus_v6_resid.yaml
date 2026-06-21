@@ -1,0 +1,36 @@
+# Schupfen-Network config — FULL corpus, featurizer v6, RESIDUAL trunk.
+#
+# A/B sibling of configs/schupfen_full_corpus_v6.yaml. ONLY deltas: the model
+# block (residual 512x4 trunk instead of the 256x2 non-residual MLP) and the
+# added val_frac (held-out game-level fit, online estimate). Everything else —
+# bundle path, LR, batch, epochs, seed, shuffle — is byte-identical, so this is
+# a clean capacity A/B.
+#
+# Motivation: the BC-fit capacity probe (DEBUG-cap7e2, 8M-row held-out) showed
+# the 256x2 non-residual schupfen net is DEPTH-limited — a residual 512x4 trunk
+# lowered held-out NLL ~0.225 nats / +1.7pp exact-card top-1, saturating at
+# ~512x4 (1024x4 added nothing). This run confirms the gain at full-corpus scale.
+#
+# Run from the worktree with src first on PYTHONPATH so the v6 featurizer is
+# used (a sibling worktree shadows the import otherwise).
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v6\schupfen
+
+model:
+  hidden: 512
+  depth: 4
+  residual: true
+  skill_dim: 64
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 4
+seed: 0
+
+shuffle: true
+
+# Game-level holdout (whole games on one side; split by game_id hash). Per-epoch
+# held-out NLL/accuracy logged to val.csv. Online estimate (folded into the
+# train sweep) — early-epoch rows see a less-trained net.
+val_frac: 0.05

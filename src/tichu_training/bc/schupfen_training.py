@@ -394,6 +394,23 @@ def train_one_schupfen_epoch(
     return last_loss
 
 
+_VAL_BUCKETS = 10_000
+
+
+def _schupfen_val_bucket(game_id: np.ndarray, seed: int) -> np.ndarray:
+    """Vectorised game-level splitmix64 hash → bucket in [0, _VAL_BUCKETS).
+
+    Same family as `call_training._val_bucket`: a game's rows never straddle
+    the train/val boundary, so a seat's same-deal siblings can't leak. game_id
+    0 (synthetic / empty sentinel) all lands in one bucket."""
+    with np.errstate(over="ignore"):
+        z = game_id.astype(np.uint64) + np.uint64(seed) * np.uint64(0x9E3779B97F4A7C15)
+        z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        z = z ^ (z >> np.uint64(31))
+        return (z % np.uint64(_VAL_BUCKETS)).astype(np.int64)
+
+
 def train_one_schupfen_epoch_batched(
     network: SchupfenNetwork,
     batches: Iterable[dict],
@@ -402,57 +419,97 @@ def train_one_schupfen_epoch_batched(
     log_path: Path,
     desc: str | None = None,
     total_batches: int | None = None,
-) -> float:
+    val_frac: float = 0.0,
+    val_seed: int = 0,
+) -> tuple[float, dict[str, float] | None]:
     """Streaming epoch over pre-stacked numpy batch dicts (the memmap fast
-    path). Same loss/log contract as `train_one_schupfen_epoch` — three
-    hand-masked cross-entropies × sample_weight, batch-mean, one step.csv row
-    per batch — but never materialises the slice."""
+    path). Three hand-masked cross-entropies × sample_weight, batch-mean, one
+    step.csv row per batch — never materialises the slice.
+
+    Returns `(last_loss, val_metrics)`. When `val_frac > 0` a game-level
+    holdout (game_id hash fixed by `val_seed`, identical every epoch) is carved
+    per batch; held-out rows are forwarded in the SAME sweep (no grad) to
+    accumulate an ONLINE val estimate — `{"n", "loss" (unweighted 3-CE NLL),
+    "accuracy" (per-direction top-1)}`. `val_metrics` is None when val_frac<=0.
+    Early-epoch val rows see a less-trained net, so it is a monitoring signal
+    (mirrors `train_one_call_epoch_batched`)."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     new_file = not log_path.exists()
     step = _next_step(log_path)
     last_loss = float("inf")
     rows: list[dict[str, float]] = []
+    threshold = int(round(val_frac * _VAL_BUCKETS)) if val_frac > 0 else 0
 
     device = next(network.parameters()).device
     pbar = tqdm(batches, total=total_batches, desc=desc or "train", unit="batch")
     recent_loss: deque[float] = deque(maxlen=100)
     recent_acc: deque[float] = deque(maxlen=100)
     n_batches = 0
+    v_nll = 0.0
+    v_correct = 0
+    v_n = 0
     for batch in pbar:
-        feats = torch.from_numpy(np.ascontiguousarray(batch["features"])).to(device)
-        hand_mask = torch.from_numpy(np.ascontiguousarray(batch["hand_mask"])).to(device)
-        target = torch.from_numpy(np.ascontiguousarray(batch["target"])).long().to(device)
-        skill = torch.from_numpy(np.ascontiguousarray(batch["skill_decile"])).long().to(device)
-        sw = torch.from_numpy(np.ascontiguousarray(batch["sample_weight"])).float().to(device)
-        head_logits = network(feats, skill)
-        bsz = target.shape[0]
-        per_sample = torch.zeros(bsz, dtype=head_logits[0].dtype, device=device)
-        per_dir_correct = 0
-        for d, logits_d in enumerate(head_logits):
-            masked = _masked_logits(logits_d, hand_mask)
-            per_sample = per_sample + F.cross_entropy(
-                masked, target[:, d], reduction="none",
-            )
+        if threshold > 0 and "game_id" in batch:
+            buckets = _schupfen_val_bucket(batch["game_id"], val_seed)
+            train_np = buckets >= threshold
+            val_np = ~train_np
+        else:
+            train_np = np.ones(batch["target"].shape[0], dtype=bool)
+            val_np = np.zeros_like(train_np)
+
+        # ---- train step (train-side rows) ----
+        if train_np.any():
+            feats = torch.from_numpy(np.ascontiguousarray(batch["features"][train_np])).to(device)
+            hand_mask = torch.from_numpy(np.ascontiguousarray(batch["hand_mask"][train_np])).to(device)
+            target = torch.from_numpy(np.ascontiguousarray(batch["target"][train_np])).long().to(device)
+            skill = torch.from_numpy(np.ascontiguousarray(batch["skill_decile"][train_np])).long().to(device)
+            sw = torch.from_numpy(np.ascontiguousarray(batch["sample_weight"][train_np])).float().to(device)
+            head_logits = network(feats, skill)
+            bsz = target.shape[0]
+            per_sample = torch.zeros(bsz, dtype=head_logits[0].dtype, device=device)
+            per_dir_correct = 0
+            for d, logits_d in enumerate(head_logits):
+                masked = _masked_logits(logits_d, hand_mask)
+                per_sample = per_sample + F.cross_entropy(
+                    masked, target[:, d], reduction="none",
+                )
+                with torch.no_grad():
+                    per_dir_correct += (masked.argmax(dim=-1) == target[:, d]).float().sum().item()
+            loss = (per_sample * sw).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            acc = per_dir_correct / (3 * bsz)
+            batch_loss = float(loss.detach())
+            rows.append({"step": step, "loss": batch_loss, "accuracy": acc})
+            last_loss = batch_loss
+            step += 1
+            n_batches += 1
+            recent_loss.append(batch_loss)
+            recent_acc.append(acc)
+            if n_batches % 10 == 0:
+                pbar.set_postfix(
+                    loss=f"{sum(recent_loss) / len(recent_loss):.4f}",
+                    acc=f"{sum(recent_acc) / len(recent_acc):.3f}",
+                )
+
+        # ---- online val (held-out rows, no grad, same sweep) ----
+        if val_np.any():
             with torch.no_grad():
-                per_dir_correct += (masked.argmax(dim=-1) == target[:, d]).float().sum().item()
-        loss = (per_sample * sw).mean()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        acc = per_dir_correct / (3 * bsz)
-        batch_loss = float(loss.detach())
-        rows.append({"step": step, "loss": batch_loss, "accuracy": acc})
-        last_loss = batch_loss
-        step += 1
-        n_batches += 1
-        recent_loss.append(batch_loss)
-        recent_acc.append(acc)
-        if n_batches % 10 == 0:
-            pbar.set_postfix(
-                loss=f"{sum(recent_loss) / len(recent_loss):.4f}",
-                acc=f"{sum(recent_acc) / len(recent_acc):.3f}",
-            )
+                vfeats = torch.from_numpy(np.ascontiguousarray(batch["features"][val_np])).to(device)
+                vmask = torch.from_numpy(np.ascontiguousarray(batch["hand_mask"][val_np])).to(device)
+                vtarget = torch.from_numpy(np.ascontiguousarray(batch["target"][val_np])).long().to(device)
+                vskill = torch.from_numpy(np.ascontiguousarray(batch["skill_decile"][val_np])).long().to(device)
+                vlogits = network(vfeats, vskill)
+                vbsz = vtarget.shape[0]
+                vper = torch.zeros(vbsz, dtype=vlogits[0].dtype, device=device)
+                for d, logits_d in enumerate(vlogits):
+                    masked = _masked_logits(logits_d, vmask)
+                    vper = vper + F.cross_entropy(masked, vtarget[:, d], reduction="none")
+                    v_correct += int((masked.argmax(dim=-1) == vtarget[:, d]).sum().item())
+                v_nll += float(vper.sum().item())
+                v_n += vbsz
     pbar.close()
 
     with log_path.open("a", encoding="utf-8", newline="") as fh:
@@ -461,4 +518,11 @@ def train_one_schupfen_epoch_batched(
             writer.writeheader()
         for row in rows:
             writer.writerow(row)
-    return last_loss
+
+    if val_frac <= 0 or v_n == 0:
+        return last_loss, None
+    return last_loss, {
+        "n": float(v_n),
+        "loss": v_nll / v_n,
+        "accuracy": v_correct / (3 * v_n),
+    }

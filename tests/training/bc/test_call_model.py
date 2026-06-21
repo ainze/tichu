@@ -55,3 +55,23 @@ def test_module_classes_distinct():
     assert GrandTichuCallNetwork is not TichuCallNetwork
     assert issubclass(GrandTichuCallNetwork, CallNetwork)
     assert issubclass(TichuCallNetwork, CallNetwork)
+
+
+def test_default_is_non_residual_and_keys_unchanged():
+    """`residual=False` (default) keeps the original `net.*` layout so existing
+    checkpoints still load."""
+    net = CallNetwork(feature_dim=16, skill_dim=4, hidden=8)
+    assert net.residual is False
+    keys = set(net.state_dict())
+    assert any(k.startswith("net.") for k in keys)
+    assert not any(k.startswith("input_proj") or k.startswith("blocks") for k in keys)
+
+
+def test_residual_call_network_forward_and_depth():
+    net = CallNetwork(feature_dim=16, skill_dim=4, hidden=8, depth=4, residual=True)
+    assert net.residual is True and len(net.blocks) == 4
+    keys = set(net.state_dict())
+    assert any(k.startswith("input_proj") for k in keys)
+    assert not any(k.startswith("net.") for k in keys)
+    out = net(torch.randn(3, 16), torch.tensor([0, 5, 10], dtype=torch.long))
+    assert out.shape == (3, 2)
