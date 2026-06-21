@@ -1,0 +1,31 @@
+# Native serve spec for cotrain_v6_pbrs export iter_01200.
+#
+# Single checkpoint serves all ML tiers; Difficulty = the Skill Decile fed to
+# the Skill Embedding (ADR-0027). `easy` is the RuleAgent baseline (ADR-0003).
+# Tier -> Skill Decile: medium=3, hard=6, master=9 (ascending strength).
+
+_shared_nets: &shared_nets
+  schupfen:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\schupfen.pt
+  tichu_call: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\tichu_call.pt
+  grand_call: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\grand_tichu_call.pt
+
+agents:
+  easy:
+    factory: rule
+  medium:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\policy.pt
+    skill_decile: 3
+    <<: *shared_nets
+  hard:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\policy.pt
+    skill_decile: 6
+    <<: *shared_nets
+  master:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\policy.pt
+    skill_decile: 9
+    <<: *shared_nets
+
+port: 8000
