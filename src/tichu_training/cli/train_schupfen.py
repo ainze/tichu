@@ -8,6 +8,7 @@ production path consumes `ParquetSchupfenDataset` (play-shard manifest
 """
 
 import argparse
+import csv
 import logging
 import random
 import shutil
@@ -67,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         skill_buckets=10,
         skill_dim=int(m.get("skill_dim", 64)),
         hidden=int(m.get("hidden", 256)),
+        depth=int(m.get("depth", 4)),
+        residual=bool(m.get("residual", False)),
     ).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=float(config["learning_rate"]))
     log_path = run_dir / "step.csv"
@@ -80,24 +83,36 @@ def main(argv: list[str] | None = None) -> int:
     shuffle = bool(config.get("shuffle", False))
     n_epochs = int(config["epochs"])
     batch_size = int(config["batch_size"])
+    # Game-level held-out fraction (online estimate, folded into the train
+    # sweep). 0 keeps existing configs unchanged; full-corpus configs opt in.
+    val_frac = float(config.get("val_frac", 0.0))
+    val_log_path = run_dir / "val.csv"
 
     if hasattr(examples, "iter_batches") and not isinstance(examples, list):
         # Streaming memmap fast path — never materialise the slice (the
         # full-corpus schupfen slice is ~88M rows / ~100 GB as objects).
         if shuffle:
             log.info("per-epoch streaming shuffle enabled (seed=%d)", seed)
+        if val_frac > 0:
+            log.info("streaming %d rows, val_frac=%.3f (game_id hash split)",
+                     len(examples), val_frac)
         total_batches = (len(examples) + batch_size - 1) // batch_size
         for epoch in range(n_epochs):
             batches = examples.iter_batches(
                 batch_size, shuffle=shuffle, seed=seed + epoch,
             )
-            loss = train_one_schupfen_epoch_batched(
+            loss, metrics = train_one_schupfen_epoch_batched(
                 net, batches, optimizer,
                 log_path=log_path,
                 desc=f"epoch {epoch + 1}/{n_epochs}",
                 total_batches=total_batches,
+                val_frac=val_frac, val_seed=seed,
             )
             log.info("epoch %d final batch loss=%.4f", epoch, loss)
+            if metrics is not None:
+                log.info("epoch %d val: NLL=%.4f acc=%.4f (n=%d)",
+                         epoch, metrics["loss"], metrics["accuracy"], int(metrics["n"]))
+                _append_schupfen_val_row(val_log_path, epoch, metrics)
     else:
         # Legacy materialised path (synthetic / parquet smoke).
         rate_examples = examples if isinstance(examples, list) else list(examples)
@@ -118,6 +133,19 @@ def main(argv: list[str] | None = None) -> int:
                     path=ckpt_dir / "schupfen_final.bin")
     log.info("saved final checkpoint")
     return 0
+
+
+def _append_schupfen_val_row(path: Path, epoch: int, metrics: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["epoch", "n", "loss", "accuracy"])
+        if new_file:
+            writer.writeheader()
+        writer.writerow({
+            "epoch": epoch, "n": int(metrics["n"]),
+            "loss": metrics["loss"], "accuracy": metrics["accuracy"],
+        })
 
 
 def _resolve_device(choice: str) -> torch.device:

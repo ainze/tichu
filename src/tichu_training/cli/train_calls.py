@@ -92,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
             skill_buckets=10,
             skill_dim=int(m.get("skill_dim", 64)),
             hidden=int(m.get("hidden", 256)),
+            depth=int(m.get("depth", 4)),
+            residual=bool(m.get("residual", False)),
         ).to(device)
         optimizer = torch.optim.Adam(net.parameters(), lr=float(config["learning_rate"]))
         log_path = run_dir / f"{tag}_step.csv"

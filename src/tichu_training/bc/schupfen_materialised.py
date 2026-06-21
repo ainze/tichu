@@ -339,4 +339,5 @@ class MemmapSchupfenDataset(Iterable[SchupfenExample]):
             "target": target,
             "skill_decile": meta["skill_decile"].astype(np.int64),
             "sample_weight": meta["sample_weight"].astype(np.float32),
+            "game_id": meta["game_id"].astype(np.uint32),
         }
