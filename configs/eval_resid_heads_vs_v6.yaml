@@ -1,0 +1,42 @@
+# Head-to-head: NEW residual schupfen+tichu heads vs cotrain_v6_pbrs iter_01200.
+#
+# Controlled A/B. `v6_resid_heads` is byte-identical to `v6_pbrs_iter01200`
+# EXCEPT schupfen.pt + tichu_call.pt are swapped for the residual-512x4 exports
+# (export/iter_01200_resid_heads). Same policy.pt, same grand_tichu_call.pt, same
+# skill_decile (9 = master), same pool/seed/n_deals. So any delta is attributable
+# to the two new BC heads alone.
+#
+# Scale mirrors check_cotrain's cotrain_v6 eval (4000 deals -> 8000 obs after
+# seat-swap) so the CI is comparable to how cotrain snapshots are judged.
+# Run with the inspiring-wing worktree src FIRST on PYTHONPATH (v6 featurizer).
+#
+#   python -m tichu_training.cli.eval_matrix `
+#     --config configs/eval_resid_heads_vs_v6.yaml --mode tournament
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 4000
+bootstrap_iters: 1000
+seed: 0
+workers: 8
+
+agents:
+  - name: v6_pbrs_iter01200
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\grand_tichu_call.pt
+
+  - name: v6_resid_heads
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\grand_tichu_call.pt
+
+output: C:\workbench\tichu\data\runs\eval_resid_heads_vs_v6\matrix.parquet

@@ -1,0 +1,34 @@
+# Confirmation run of eval_resid_heads_vs_v6.yaml over the FULL 20k pool.
+#
+# Identical to eval_resid_heads_vs_v6.yaml EXCEPT n_deals 4000 -> 20000 (whole
+# pool) and a distinct output path. The seed-0 4000-deal run won +6.49/round
+# CI=[+1.94, +11.20]; this removes the position-subset question (20% -> 100% of
+# the pool) and tightens the CI for a ship decision. ~33 min at ~10 pos/s.
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 20000
+bootstrap_iters: 1000
+seed: 0
+workers: 8
+
+agents:
+  - name: v6_pbrs_iter01200
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\grand_tichu_call.pt
+
+  - name: v6_resid_heads
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200\grand_tichu_call.pt
+
+output: C:\workbench\tichu\data\runs\eval_resid_heads_vs_v6\matrix_full20k.parquet
