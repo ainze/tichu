@@ -57,6 +57,7 @@ class DecisionRecord:
     chosen_prob: float
     topk: list[tuple[str, float]]
     bomb_legal: bool
+    context: str = ""
 
 
 @dataclass
@@ -85,6 +86,7 @@ def build_record(agent, private_state, action, *, seat: int = 0,
         chosen_prob=chosen_prob,
         topk=[(_action_str(a), p) for a, p in ranked[:top_k]],
         bomb_legal=any(isinstance(a, _BOMB_TYPES) for a, _ in ranked),
+        context=render_public_context(private_state, seat=seat),
     )
 
 
@@ -93,8 +95,10 @@ def render_record(r: DecisionRecord, *, header: str | None = None) -> str:
     flag = " [BOMB legal]" if r.bomb_legal else ""
     unsure = " [unsure]" if r.chosen_prob == r.chosen_prob and r.chosen_prob < 0.5 else ""
     head = f"{header}\n" if header else ""
+    ctx = f"{r.context}\n" if r.context else ""
     return (
         f"{head}seat {r.seat}  top={r.top}{flag}{unsure}\n"
+        f"{ctx}"
         f"    hand: {' '.join(r.hand)}\n"
         f"    chose: {r.chosen}  (p={r.chosen_prob:.2f})\n"
         f"    top{len(r.topk)}: " + "   ".join(f"{a} {p:.2f}" for a, p in r.topk)
@@ -105,6 +109,37 @@ def _hand_line(private_state) -> str:
     return "    hand: " + " ".join(
         _card(c) for c in sorted(private_state.hand, key=_sort_key)
     )
+
+
+def render_public_context(private_state, *, seat: int) -> str:
+    """The shared, decision-type-agnostic public-state context for a tape block:
+    the game/round signals a human needs to judge whether a move is a blunder.
+    Absolute-seat tuples (hand sizes) mark the acting seat with `*`. Featurizer-
+    internal v6 accumulators are deliberately omitted — they live in the `replay:`
+    blob if ever needed."""
+    pub = private_state.public
+    hands = ",".join(f"*{n}" if i == seat else str(n)
+                     for i, n in enumerate(pub.hand_sizes))
+    out = ",".join(str(s) for s in pub.out_order)
+    wish = pub.mahjong_wish if pub.mahjong_wish is not None else "-"
+    rpts = ",".join(str(p) for p in pub.round_points_by_player)
+    return (
+        f"    public: scores={pub.scores[0]}/{pub.scores[1]}  hands=[{hands}]  "
+        f"out=[{out}]  wish={wish}  tichu={sorted(pub.tichu_callers)}  "
+        f"grand={sorted(pub.grand_tichu_callers)}  round_pts=[{rpts}]\n"
+        f"{_trick_line(pub)}"
+    )
+
+
+def _trick_line(pub) -> str:
+    """The current Trick as a sequence of plays (who → what) plus who has Passed —
+    the context for 'should I have beaten / ceded this?'."""
+    trick = pub.trick
+    if not trick.plays:
+        return "    trick: —(lead)"
+    seq = " -> ".join(f"seat{p.player} {_action_str(p.combination)}" for p in trick.plays)
+    passed = ",".join(str(s) for s in sorted(trick.passes))
+    return f"    trick: lead=seat{trick.leader}  {seq}  passed={{{passed}}}"
 
 
 def render_wish(agent, private_state, action, *, header: str | None = None) -> str | None:
@@ -120,6 +155,7 @@ def render_wish(agent, private_state, action, *, header: str | None = None) -> s
     top = "  ".join(f"{a.rank}:{p:.2f}" for a, p in ranked[:8])
     head = f"{header}\n" if header else ""
     return (f"{head}WISH  chose={chosen}  grand_callers={gt}  tichu_callers={ti}\n"
+            f"{render_public_context(private_state, seat=private_state.player)}\n"
             f"{_hand_line(private_state)}\n    ranks: {top}")
 
 
@@ -131,7 +167,8 @@ def render_dragon(agent, private_state, action, *, header: str | None = None) ->
     chosen = action.target if isinstance(action, DragonGive) else None
     top = "  ".join(f"seat{a.target}:{p:.2f}" for a, p in ranked)
     head = f"{header}\n" if header else ""
-    return f"{head}DRAGON  chose=seat{chosen}\n    targets: {top}"
+    ctx = render_public_context(private_state, seat=private_state.player)
+    return f"{head}DRAGON  chose=seat{chosen}\n{ctx}\n    targets: {top}"
 
 
 def render_schupfen(agent, private_state, action, *, header: str | None = None) -> str | None:
@@ -147,6 +184,7 @@ def render_schupfen(agent, private_state, action, *, header: str | None = None) 
                   "previous": action.to_previous}
     lines = [header] if header else []
     lines.append("SCHUPFEN")
+    lines.append(render_public_context(private_state, seat=private_state.player))
     lines.append(_hand_line(private_state))
     for d in ("next", "partner", "previous"):
         ch = chosen.get(d)

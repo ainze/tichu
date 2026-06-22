@@ -379,6 +379,28 @@ def test_tape_log_writes_decision_blocks_for_ml(tmp_path):
     assert "difficulty=master" in text and f"top{0}" not in text  # has a topN block
 
 
+def test_tape_log_records_verbatim_replay_request(tmp_path):
+    # The replay: line must carry the exact /act body the service received, on a
+    # single line, so a flagged blunder can be re-fed to /act verbatim later.
+    import json
+    cfg = _make_config(tmp_path)
+    tape = tmp_path / "tape.txt"
+    cfg["tape_log"] = str(tape)
+    app = create_app(cfg)
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    body = {"difficulty": "master", "private_state": private_state_to_json(ps)}
+    r = client.post("/act", json=body)
+    assert r.status_code == 200
+    text = tape.read_text(encoding="utf-8")
+    replay_lines = [ln for ln in text.splitlines() if ln.strip().startswith("replay:")]
+    assert len(replay_lines) == 1, text
+    payload = json.loads(replay_lines[0].split("replay:", 1)[1])
+    assert payload["difficulty"] == "master"
+    assert payload["private_state"] == body["private_state"]
+
+
 def test_tape_log_skips_baseline_agents(tmp_path):
     cfg = _make_config(tmp_path)
     tape = tmp_path / "tape.txt"

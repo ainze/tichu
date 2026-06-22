@@ -15,6 +15,7 @@ Prometheus-style metrics:
 """
 
 import collections
+import json
 import logging
 import time
 from collections import defaultdict, deque
@@ -133,7 +134,7 @@ def create_app(config: dict) -> FastAPI:
         # Live tape: every served Decision (Play / Wish / Dragon / Schupfen),
         # dispatched on the pending type by the logger.
         if tape is not None:
-            tape.log(agent, ps, action, difficulty)
+            tape.log(agent, ps, action, difficulty, request_body=body)
 
         return {
             "action": action_to_json(action),
@@ -232,8 +233,10 @@ def _build_agents(spec: dict) -> dict[str, Agent]:
 
 class _TapeLogger:
     """Appends a human-reviewable decision tape during live serving. One block
-    per served Play Decision (ML agents only): the hand, Trick top, chosen play,
-    and top-k ranked alternatives with policy probabilities. See
+    per served Decision (ML agents only): public-state context, the hand, chosen
+    action, and top-k ranked alternatives with policy probabilities, plus a
+    single-line `replay:` of the verbatim /act request body so a move a human
+    flags as a blunder can be re-fed to /act and fixed later. See
     `tichu_eval.decision_tape`. File is opened per-write (append) — simple and
     safe for single-user interactive play; not a high-throughput path."""
 
@@ -244,7 +247,8 @@ class _TapeLogger:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write("\n# --- live decision tape opened ---\n")
 
-    def log(self, agent: Agent, private_state, action, difficulty: str) -> None:
+    def log(self, agent: Agent, private_state, action, difficulty: str,
+            *, request_body: dict | None = None) -> None:
         # Lazy import keeps the eval dependency off the default serve path.
         from tichu_engine.state import (
             DragonGivePending, MahjongWishPending, SchupfenPending,
@@ -273,6 +277,10 @@ class _TapeLogger:
         if block is None:
             return  # forced / no ranked alternatives — don't burn a sequence number
         self._seq += 1
+        if request_body is not None:
+            # Verbatim, single-line: a flagged blunder is re-feedable to /act as-is,
+            # and `grep '^    replay: '` yields a clean JSONL stream of /act bodies.
+            block += "\n    replay: " + json.dumps(request_body, separators=(",", ":"))
         try:
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(block + "\n\n")
