@@ -1,0 +1,109 @@
+# Continued co-training FROM the shipped iter_01200_resid bundle, with the
+# greedy promotion gate + PBRS + WISH co-trained. (PR #64 follow-up.)
+#
+# Lineage: cotrain_v6_gated_greedy.yaml (greedy gate, the phantom-promotion-proof
+# harness) + the ppo.pbrs lever from cotrain_v6_pbrs.yaml + wish from
+# cotrain_wish_v5.yaml + the residual schupfen/tichu heads from PR #64.
+#
+# DELTAS vs cotrain_v6_gated_greedy.yaml:
+#   1) warm_start CONTINUES from iter_01200 (cotrained play+grand) instead of BC,
+#      with schupfen+tichu = the residual-512x4 BC retrains. So iter 0 == the
+#      shipped +4.81 head-swap bundle; the gate's frozen-BC anchor and also_beat_bc
+#      are therefore "beat the shipped bundle", and eval.master matches it.
+#   2) schupfen_model/call_model carry the residual 512x4 trunk; a NEW grand_model
+#      block keeps grand at the 256 non-residual MLP (capacity probe: grand gains
+#      nothing from depth). Requires the _build_models residual+grand_model support
+#      added in this PR — older cotrain code ignores depth/residual and would crash
+#      on the warm-start shape mismatch.
+#   3) cotrain_wish: true (+ kl.wish / entropy.wish) — the Mahjong-wish head rides
+#      the play trunk; first time it co-trains here (iter_01200 ran wish frozen).
+#   4) ppo.pbrs ON (potential = banked_points) — the critic regresses R - Phi.
+#
+# NOTE on PBRS + warm-start: PBRS reshapes the CRITIC target, and the critic here
+# starts FRESH (warmup_iters) under the frozen warm-started stack regardless of the
+# policy init — so warm-starting the POLICY from iter_01200 is consistent (this is a
+# fresh run at iter 0, not a Resume Bundle restore).
+#
+# Strength read is OUT OF LOOP (OOM): check_cotrain on a snapshot vs eval.master
+# (= the shipped iter_01200_resid bundle). Launch detached, poll {run_dir}/ppo_log.csv
+# and {run_dir}/gate_log.csv. Never two tournaments at once.
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v6_pbrs_resid_wish_gated.yaml
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6_pbrs_resid_wish_gated.yaml [--iter N]
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\cotrain_v6_pbrs\snapshots\iter_01200_play.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6_resid\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6_tichu_resid\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\cotrain_v6_pbrs\snapshots\iter_01200_grand.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated
+
+promotion_gate:
+  enabled:             true
+  greedy:              true      # margin source = greedy mini-tournament (deployed MLAgent)
+  greedy_n_deals:      4096      # deals/opponent/window => 8192 seat-swapped obs/opp
+  greedy_every:        128       # run the eval every N iters (~16 min training/window)
+  greedy_workers:      10        # tournament worker procs (rollout pool idle during eval)
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true      # must beat champion AND the frozen warm-start (= shipped bundle)
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # tichu — residual (PR #64)
+grand_model:    { skill_dim: 64, hidden: 256 }                              # grand — non-residual (irreducible)
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  play:     { coef: 1.0, target: 0.08,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:                 # the shipped iter_01200_resid bundle — beat THIS
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
+  pbrs:
+    enabled:   true
+    potential: banked_points

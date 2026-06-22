@@ -55,10 +55,26 @@ _BUNDLE_NAME = "train_state.bin"
 # columns appear only when `cotrain_wish` is on, keeping existing run logs unchanged.
 
 
+# The arch blocks `_build_models` reads. Every place that ships an arch sub-config
+# to a worker / gate / opponent rebuild MUST forward all of these — a partial copy
+# silently drops `grand_model` and rebuilds grand with the residual `call_model`
+# arch, crashing the warm-start load. Keep this the single source of truth.
+_ARCH_CFG_KEYS = ("model", "schupfen_model", "call_model", "grand_model")
+
+
+def _arch_cfg(config) -> dict:
+    return {k: config.get(k, {}) for k in _ARCH_CFG_KEYS}
+
+
 def _build_models(config) -> dict:
     m = config.get("model", {})
     sm = config.get("schupfen_model", {})
     cm = config.get("call_model", {})
+    # Grand defaults to the tichu/call arch (back-compat: configs with only
+    # `call_model` keep grand == tichu shape). An explicit `grand_model` block
+    # lets tichu carry a residual trunk (PR #64) while grand stays the small
+    # non-residual MLP its capacity probe showed is irreducible.
+    gm = config.get("grand_model", cm)
     return {
         "play": BCModel(
             feature_dim=FEATURIZER_OUTPUT_DIM, skill_buckets=10,
@@ -71,14 +87,20 @@ def _build_models(config) -> dict:
         "schupfen": SchupfenNetwork(
             FEATURIZER_OUTPUT_DIM, skill_dim=int(sm.get("skill_dim", 64)),
             hidden=int(sm.get("hidden", 256)),
+            depth=int(sm.get("depth", 4)),
+            residual=bool(sm.get("residual", False)),
         ),
         "tichu": TichuCallNetwork(
             FEATURIZER_OUTPUT_DIM, skill_dim=int(cm.get("skill_dim", 64)),
             hidden=int(cm.get("hidden", 256)),
+            depth=int(cm.get("depth", 4)),
+            residual=bool(cm.get("residual", False)),
         ),
         "grand": GrandTichuCallNetwork(
-            FEATURIZER_OUTPUT_DIM, skill_dim=int(cm.get("skill_dim", 64)),
-            hidden=int(cm.get("hidden", 256)),
+            FEATURIZER_OUTPUT_DIM, skill_dim=int(gm.get("skill_dim", 64)),
+            hidden=int(gm.get("hidden", 256)),
+            depth=int(gm.get("depth", 4)),
+            residual=bool(gm.get("residual", False)),
         ),
     }
 
@@ -340,7 +362,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             greedy_n_deals = int(gate_cfg.get("greedy_n_deals", 2048))
             greedy_every = int(gate_cfg.get("greedy_every", 64))
             greedy_workers = int(gate_cfg.get("greedy_workers", rollout_workers))
-            gate_arch_cfg = {k: config.get(k, {}) for k in ("model", "schupfen_model", "call_model")}
+            gate_arch_cfg = _arch_cfg(config)
             from tichu_training.ppo.promotion_gate import PromotionGate
             from tichu_training.ppo.rollout_parallel import save_rollout_weights as _save_champion
             champion_path = str(run_dir / "_champion.pt")
@@ -506,7 +528,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     rollout_collect = None
     if rollout_workers > 1:
         from tichu_training.ppo.rollout_parallel import ParallelRollout, save_rollout_weights
-        arch_cfg = {k: config.get(k, {}) for k in ("model", "schupfen_model", "call_model")}
+        arch_cfg = _arch_cfg(config)
         parallel = ParallelRollout(
             arch_cfg, critic_hidden=int(config.get("critic", {}).get("hidden", 512)),
             critic_depth=int(config.get("critic", {}).get("depth", 1)),

@@ -1,0 +1,35 @@
+# Export arch for `export_model` — RESIDUAL schupfen + tichu heads (PR #64).
+#
+# Used ONLY to trace the two newly BC-trained residual nets to TorchScript so
+# they can be dropped into a controlled cotrain_v6_pbrs A/B. The `policy` block
+# is required (export_model always traces a policy.pt) — we point --checkpoint
+# at the iter_01200 play snapshot purely to satisfy that; the resulting policy.pt
+# is a byproduct and is NOT used by the eval (which references the original
+# export/iter_01200/policy.pt). Grand is NOT re-exported (residual gives it zero
+# benefit — see memory project_head_capacity_probe), so no grand section here.
+#
+# feature_dim = FEATURIZER_OUTPUT_DIM = 591 (v6). policy arch mirrors
+# export_full_corpus_v6.yaml. schupfen/tichu_call carry the residual 512x4 trunk
+# from configs/schupfen_full_corpus_v6_resid.yaml + calls_full_corpus_v6_tichu_resid.yaml.
+
+policy:
+  feature_dim: 591
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+tichu_call:
+  feature_dim: 591
+  skill_dim: 64
+  hidden: 512
+  depth: 4
+  residual: true
+
+schupfen:
+  feature_dim: 591
+  skill_dim: 64
+  hidden: 512
+  depth: 4
+  residual: true
