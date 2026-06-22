@@ -1,0 +1,40 @@
+# Native serve spec for cotrain_v6_pbrs iter_01200 with RESIDUAL schupfen+tichu.
+#
+# Clone of serve_cotrain_v6_pbrs_iter01200.yaml. ONLY delta: schupfen.pt and
+# tichu_call.pt point at the residual-512x4 BC retrains (PR #64). policy.pt and
+# grand_tichu_call.pt are the SAME iter_01200 nets (copied into the bundle so the
+# served policy is byte-identical to the deployed one).
+#
+# Controlled head-swap A/B vs the original beat it by +4.81 pts/round
+# (CI=[+2.58, +7.17], n=40000 full 20k pool): call-bonus +3.8 (tichu head),
+# base +1.0 (schupfen). See eval_resid_heads_vs_v6_full.yaml.
+#
+# Single checkpoint serves all ML tiers; Difficulty = the Skill Decile fed to
+# the Skill Embedding (ADR-0027). `easy` is the RuleAgent baseline (ADR-0003).
+# Tier -> Skill Decile: medium=3, hard=6, master=9 (ascending strength).
+
+_shared_nets: &shared_nets
+  schupfen:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\schupfen.pt
+  tichu_call: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\tichu_call.pt
+  grand_call: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\grand_tichu_call.pt
+
+agents:
+  easy:
+    factory: rule
+  medium:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\policy.pt
+    skill_decile: 3
+    <<: *shared_nets
+  hard:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\policy.pt
+    skill_decile: 6
+    <<: *shared_nets
+  master:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs\export\iter_01200_resid_heads\policy.pt
+    skill_decile: 9
+    <<: *shared_nets
+
+port: 8000
