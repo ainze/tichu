@@ -1,9 +1,12 @@
 """Write a human-reviewable decision tape for an Agent's Play Decisions.
 
 Plays N self-play Rounds (the chosen agent in all four seats) over a seeded
-Full-strength Starting-Position Pool and dumps, per Play Decision, the hand, the
-Trick top, the chosen play, and the top-k ranked legal alternatives with policy
-probabilities. Review the tape to localise concrete tactical weaknesses.
+Full-strength Starting-Position Pool and dumps, per Play Decision, the public-state
+context (scores, hand sizes, callers, wish, trick sequence), the hand, the chosen
+play, and the top-k ranked legal alternatives with policy probabilities. Review the
+tape to localise concrete tactical weaknesses. (The live `serve --tape-log` tape
+additionally carries a `replay:` of each /act request; this offline tape has no
+wire request to replay.)
 
 Usage (reuses any eval config's `agents:` block; defaults to the first agent):
   py -3.14 scripts/decision_tape.py --config configs/eval_behavioral_v5.yaml `
