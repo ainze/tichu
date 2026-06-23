@@ -1,0 +1,30 @@
+# Smoke of eval_schupfen_cpfix_vs_champion.yaml — wiring check only.
+# 40 deals on the 2k pool; NOT a strength signal. Confirms both agents build,
+# both schupfen .pt load (v6 stamp), and the tournament writes output.
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 40
+bootstrap_iters: 100
+seed: 0
+workers: 4
+
+agents:
+  - name: champion
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\grand_tichu_call.pt
+
+  - name: champion_schupfen_cpfix
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6_resid_cpfix\export\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\grand_tichu_call.pt
+
+output: C:\workbench\tichu\data\runs\eval_schupfen_cpfix_vs_champion\smoke.parquet

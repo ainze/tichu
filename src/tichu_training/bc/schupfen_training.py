@@ -262,13 +262,15 @@ def _schupfen_examples_for_round(
     pipeline times Tichu calls at first-non-pass-play per ADR-0018,
     so no Tichu calls are recorded in this featurise moment).
     """
+    import dataclasses
+
     from tichu_engine.state import GameState, PublicState, SchupfenPending, Trick
     from tichu_training.card_slots import card_slot
     from tichu_training.featurizer import featurize
 
     out: list[SchupfenExample] = []
     public = PublicState(
-        current_player=0,
+        current_player=0,  # overridden per acting seat below; see loop comment.
         hand_sizes=(14, 14, 14, 14),
         scores=(0, 0),
         trick=Trick.empty(),
@@ -282,7 +284,19 @@ def _schupfen_examples_for_round(
         action = schupfen_by_seat.get(seat)
         if action is None:
             continue   # malformed round; skip
-        private = state.private_view(seat)
+        # current_player MUST equal the acting seat to match inference. The
+        # featurizer one-hots current_player AND grand_tichu_callers at ABSOLUTE
+        # slots, so the head can only localise the caller relative to itself via
+        # (grand_caller - current_player) % 4 — e.g. to learn "the caller is my
+        # partner". The engine advances current_player through the seats during
+        # schupfen (engine._apply_schupfen), so the served state at seat S's turn
+        # has current_player == S. Pinning it to 0 here made that relationship
+        # unlearnable for seats 1..3 (3/4 of examples): the head could not tell
+        # "partner called" from "opponent called" and collapsed to "any grand
+        # call -> give Dog to partner". See tests/.../test_schupfen_training.py.
+        seat_public = dataclasses.replace(public, current_player=seat)
+        seat_state = dataclasses.replace(state, public=seat_public)
+        private = seat_state.private_view(seat)
         features = featurize(private)
         hand_mask = np.zeros(CARD_SLOTS, dtype=np.float32)
         for c in parsed_round.start_hands[seat]:

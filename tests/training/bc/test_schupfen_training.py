@@ -109,6 +109,17 @@ def _build_parsed_round(*, grand_callers, tichu_callers, seat0_pass):
     )
 
 
+def _current_player_section(features):
+    """Extract the 4-dim current_player one-hot section from a feature vector."""
+    offset = sum(
+        v for k, v in SECTION_DIMS.items()
+        if k in ("own_hand", "hand_sizes", "team_scores", "round_points",
+                 "out_order", "tichu_callers", "grand_tichu_callers",
+                 "mahjong_wish")
+    )
+    return features[offset:offset + 4]
+
+
 def _grand_tichu_callers_section(features):
     """Extract the 4-dim grand_tichu_callers section from a feature vector."""
     offset = sum(
@@ -174,4 +185,31 @@ def test_per_round_features_encode_grand_tichu_callers_and_leave_tichu_callers_e
         # tichu callers ALL zero — empty by design
         assert (tichu_sec == 0.0).all(), (
             "tichu_callers must be empty at schupfen time (ADR-0018)"
+        )
+
+
+def test_per_round_current_player_matches_acting_seat():
+    """Regression: current_player MUST equal the acting seat in each emitted
+    example. The featurizer one-hots current_player and grand_tichu_callers at
+    ABSOLUTE slots, so the head can only localise the caller relative to itself
+    via (grand_caller - current_player) % 4. The engine advances current_player
+    through the seats during schupfen, so at seat S's turn the served state has
+    current_player == S. Pinning it to 0 (the original bug) made "is the caller
+    my partner?" unlearnable for seats 1..3, collapsing the head to "any grand
+    call -> give the Dog to partner" regardless of who actually called."""
+    parsed = _build_parsed_round(
+        grand_callers={0},   # partner of seat 2; an opponent of seats 1 and 3
+        tichu_callers=set(),
+        seat0_pass=(Card(Suit.JADE, 14), Card(Suit.JADE, 13), Card(Suit.JADE, 12)),
+    )
+    examples = _schupfen_examples_for_round(parsed, skill_lookup={}, neutral_decile=10,
+                                            sample_weight=1.0)
+    assert len(examples) == 4
+    for seat, ex in enumerate(examples):  # seat ordering preserved by the emitter
+        cp_sec = _current_player_section(ex.features)
+        expected = np.zeros(4, dtype=np.float32)
+        expected[seat] = 1.0
+        assert (cp_sec == expected).all(), (
+            f"seat {seat}: current_player one-hot {cp_sec} != expected {expected}; "
+            "training/inference skew on current_player would return"
         )

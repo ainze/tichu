@@ -22,6 +22,7 @@ throws / produces non-finite logits, the agent falls back: pending decisions to
 declining. The game never stalls.
 """
 
+import dataclasses
 import logging
 import random
 from pathlib import Path
@@ -474,6 +475,7 @@ class MLAgent(Agent):
     # ------------------------------------------------------------
 
     def _inputs(self, private_state: PrivateState) -> tuple[torch.Tensor, torch.Tensor]:
+        private_state = _with_round_local_scores(private_state)
         features = torch.from_numpy(self._fz.featurize(private_state)).unsqueeze(0)
         skill = torch.tensor([self._skill_decile], dtype=torch.long)
         return features, skill
@@ -492,6 +494,29 @@ class MLAgent(Agent):
         if not legal:
             raise RuntimeError("no legal actions for fallback")
         return self._rng.choice(legal)
+
+
+def round_local_team_scores(public) -> tuple[int, int]:
+    """The within-round team scores the nets were trained on.
+
+    Every training round (BC replay, co-train rollout, the position pool) starts
+    at `scores=(0, 0)`, and the engine credits each trick's points to BOTH
+    `scores` and `round_points_by_player` from zero (engine.py). So the per-team
+    sum of `round_points_by_player` IS the round-local team score — whereas the
+    `scores` field arriving over /act is the GAME-cumulative total (0..1000+),
+    which the nets never saw and react to spuriously. Team 0 = seats {0, 2},
+    team 1 = seats {1, 3} (`_team_of` = seat % 2)."""
+    rp = public.round_points_by_player
+    return (rp[0] + rp[2], rp[1] + rp[3])
+
+
+def _with_round_local_scores(private_state: PrivateState) -> PrivateState:
+    """Return `private_state` with `public.scores` replaced by the round-local
+    team score, so featurization matches the training regime (see
+    `round_local_team_scores`)."""
+    pub = private_state.public
+    pub = dataclasses.replace(pub, scores=round_local_team_scores(pub))
+    return dataclasses.replace(private_state, public=pub)
 
 
 def _best_slot(logits_row: np.ndarray, allowed_slots: list[int], used: set[int]) -> int | None:
