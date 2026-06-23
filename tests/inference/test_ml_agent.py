@@ -292,3 +292,62 @@ def test_rank_actions_returns_legal_actions(tmp_path):
     legal = legal_actions_for(ps)
     for a in ranked:
         assert a in legal
+
+
+# --- team_scores round-local normalisation (inference-side fix) --------------
+# The nets train on round-local scores (every round starts at 0; trick points
+# accrue to both `scores` and `round_points_by_player`), but /act carries the
+# GAME-cumulative score. MLAgent must feed the round-local team score —
+# (rp[0]+rp[2], rp[1]+rp[3]) — so served decisions match the training regime.
+
+def _play_state_with(scores, round_points):
+    """A real post-schupfen play state with the given team scores + per-player
+    round points (only those two public fields vary)."""
+    import dataclasses
+    state = deal_initial_state(seed=0)
+    pub = dataclasses.replace(
+        state.public, scores=scores, round_points_by_player=round_points,
+    )
+    return dataclasses.replace(state, public=pub).private_view(pub.current_player)
+
+
+def _build_dummy_agent(tmp_path):
+    from tichu_training.action_space import ACTION_SPACE_SIZE
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    return MLAgent(artifact)
+
+
+def test_decisions_invariant_to_cumulative_score_offset(tmp_path):
+    agent = _build_dummy_agent(tmp_path)
+    rp = (10, 5, 20, 5)  # team0 round-local = 30, team1 = 10
+    round_local = _play_state_with((30, 10), rp)
+    cumulative = _play_state_with((630, 410), rp)   # same round, +600/+400 banked earlier
+    assert agent.play_action_scores(round_local) == agent.play_action_scores(cumulative)
+
+
+def test_agent_feeds_round_local_team_scores(tmp_path):
+    # The team_scores section the model actually receives must be the round-local
+    # value (team-summed round_points / 1000) — NOT the cumulative /act scores and
+    # NOT a crude zero. Reading the fed feature slice isolates team_scores (#3)
+    # from the separate round_points section (#4).
+    from tichu_training.featurizer import SECTION_OFFSETS
+    agent = _build_dummy_agent(tmp_path)
+    ps = _play_state_with((900, 50), (10, 5, 20, 5))  # round-local (30, 10)
+    feats, _ = agent._inputs(ps)
+    off = SECTION_OFFSETS["team_scores"]
+    assert feats[0, off:off + 2].tolist() == pytest.approx([0.030, 0.010])
+
+
+def test_round_local_team_scores_pairs_teams_0_2_and_1_3():
+    # Pure arithmetic + team pairing (seats {0,2} vs {1,3}); independent of scores.
+    from tichu_inference.ml_agent import round_local_team_scores
+    from tichu_engine.state import deal_initial_state
+    import dataclasses
+    pub = dataclasses.replace(
+        deal_initial_state(seed=0).public,
+        scores=(777, 0),  # cumulative — must be ignored
+        round_points_by_player=(10, 5, 20, 7),
+    )
+    assert round_local_team_scores(pub) == (30, 12)

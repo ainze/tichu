@@ -1,0 +1,43 @@
+# Head-swap A/B: gated co-train CHAMPION vs the SAME champion with ONLY the
+# schupfen head replaced by the current_player-FIXED retrain.
+#
+# Motivation: the deployed schupfen head can't localise the Grand-Tichu caller
+# relative to the acting seat (training pinned current_player=0; absolute
+# featurizer encoding). _schupfen_examples_for_round was fixed (current_player=
+# seat), the bundle re-materialised, and the residual 512x4 net retrained
+# (runs/schupfen_full_corpus_v6_resid_cpfix). Behavioural check confirms the new
+# head now varies with current_player and stops giving the Dog to a grand-calling
+# partner. This measures whether that BC fix is a strength change.
+#
+# CONTROLLED: both agents share champion policy.pt / tichu_call.pt /
+# grand_tichu_call.pt; ONLY schupfen_path differs, so the per-round delta is
+# purely the schupfen head. full_strength + the pre-schupfen full pool means the
+# schupfen exchange IS exercised. ~33 min at ~10 pos/s.
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 20000
+bootstrap_iters: 1000
+seed: 0
+workers: 8
+
+agents:
+  - name: champion
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\grand_tichu_call.pt
+
+  - name: champion_schupfen_cpfix
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\policy.pt
+      skill_decile: 9
+      schupfen_path: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6_resid_cpfix\export\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated\export\champion\grand_tichu_call.pt
+
+output: C:\workbench\tichu\data\runs\eval_schupfen_cpfix_vs_champion\matrix_full20k.parquet
