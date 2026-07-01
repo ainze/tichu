@@ -154,11 +154,26 @@ def replay_round(
         # state. (Dragon-give is the opposite case: the passes between the
         # Dragon-trick and the "Drache an:" line ARE phantom and should be
         # filtered out first — handled below after the phantom-pass check.)
+        #
+        # The decline is a genuine strategic Decision: the wisher played the
+        # Mahjong and chose not to wish (BSW records this as the *absence* of a
+        # "Wunsch:" line — ~20% of Mahjong plays). Record it as a real `wish`
+        # Decision so BC trains the no-wish target (wish-head index 0) instead
+        # of only ever seeing rank wishes. The wisher still had the choice here
+        # because more plays follow; the end-of-round decline below is NOT
+        # recorded — there the round is ending and the wish is moot.
         if (
             isinstance(state.public.pending_decision, MahjongWishPending)
             and parsed_action.kind != "wish"
         ):
-            state, _, _, _ = step(state, MahjongWish(rank=None))
+            wisher = state.public.pending_decision.player
+            decline = MahjongWish(rank=None)
+            result.pre_decision_states.append(state)
+            result.legal_actions_at.append(legal(state))
+            result.decisions.append(
+                (ParsedAction(player=wisher, kind="wish", wish_rank=None), decline)
+            )
+            state, _, _, _ = step(state, decline)
             result.steps_taken += 1
 
         # BSW emits liberal `passt.` lines that don't correspond to engine

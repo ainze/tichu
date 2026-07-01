@@ -1,0 +1,68 @@
+# BC training on the FULL corpus packed bundle, featurizer v6 (ADR-0038) +
+# the Mahjong-wish DECLINE fix (no-wish / wish-head index 0 now a real label).
+#
+# IDENTICAL to configs/bc_full_corpus_v6_memmap.yaml in arch/LR/batch/seed/
+# shuffle — the ONLY delta is the bundle path: this points at the rebuilt
+# `materialised_full_v6_wishfix` bundle, which records mid-round Mahjong-wish
+# declines that the old replay dropped. Holding everything else fixed lets a
+# quality delta attribute cleanly to the wish-label fix, not to scale/arch.
+#
+# Row counts (from the wishfix bundle manifest — only `wish` changed):
+#   play   1,248,160,023   (unchanged)
+#   wish      21,489,724   (+3,352,042 vs old 18,137,682 = the no-wish examples)
+#   dragon    19,887,678   (unchanged)
+# ~458 B/row; budget ~2.5-3 h/epoch (a touch more for I/O) on the memmap fast path.
+#
+# Prereq (DONE) — re-materialised bc bundle. MUST run with this worktree's src
+# first on PYTHONPATH so the editable install doesn't shadow the v6 featurizer:
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\epic-dubinsky-b29c6c\src"
+#   python -c "import tichu_training.featurizer as f; print(f.FEATURIZER_VERSION)"   # must print v6
+#   python -m tichu_training.cli.parse_bsw `
+#     --archive        C:\workbench\tichu\data\archive.zst `
+#     --output         C:\workbench\tichu\data\parquet_full_v6_wishfix `
+#     --bundle-out-dir C:\workbench\tichu\data\materialised_full_v6_wishfix `
+#     --bundle-tasks   bc `
+#     --trueskill      C:\workbench\tichu\data\ratings_full.parquet `
+#     --workers        10
+#
+# Use (same PYTHONPATH requirement — the train job reads FEATURIZER_VERSION and
+# the bundle's manifest pin, and will hard-error on a v5/v6 mismatch):
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs\bc_full_corpus_v6_wishfix_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_corpus_v6_wishfix_memmap `
+#     --device  cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v6_wishfix\bc
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+# REQUIRED at full-corpus scale (NOT optional). The bundle is emitted in game_id
+# order and sample_weight is a recency weight that flips 0.5 -> 1.0 at game_id
+# 1,855,844 (parse_bsw --recency-cutoff-game-id). Unshuffled, training crosses
+# that boundary mid-epoch: the weighted loss + effective LR double and the final
+# 1-epoch checkpoint is biased toward last-seen games. Shuffling interleaves
+# old/recent into weight-mixed, ~i.i.d. batches. Two-level knobs: large block
+# keeps order.dat reads near-sequential; buffer controls within-batch mixing.
+shuffle: true
+shuffle_buffer: 1048576           # rows held per drain (within-batch mixing)
+shuffle_block: 65536              # contiguous order.dat rows per read (I/O locality)
+
+checkpoint_every: 100000           # won't fire — epochs=1
+checkpoint_every_batches: 50000    # ~51M ex per save (~6-7 min on the fast path),
+                                   # ~25 mid-epoch checkpoints for resume / AWR targets
+seed: 0

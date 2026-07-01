@@ -376,6 +376,25 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                     _save_champion(bc_opp_path, bc_models, critic)  # frozen BC opponent
                 gate_opp_cycle.append(("bc", bc_opp_path))
                 opponents.append("bc")
+            # extra_opponents: additional FIXED external models the candidate must
+            # ALSO beat to promote (e.g. the current shipped champion). Each entry is
+            # `{name, path}` where path is a rollout-weights .pt ({"models": {net:
+            # state_dict}}) whose arch matches THIS run's _arch_cfg (so both the rollout
+            # worker's _league_opponent and the greedy gate's export_opponent rebuild it
+            # with _build_models(gate_arch_cfg)). They join the cycle exactly like
+            # champion/bc: the rollout best-responds to each in turn and the gate scores
+            # the candidate against every one — promotion needs a CI-validated win over
+            # ALL. Unlike `bc`, these never advance (fixed reference points).
+            for spec in gate_cfg.get("extra_opponents", []) or []:
+                name = str(spec["name"])
+                path = str(spec["path"])
+                if name in opponents:
+                    raise ValueError(f"duplicate gate opponent name {name!r}")
+                if not Path(path).exists():
+                    raise FileNotFoundError(
+                        f"extra_opponent {name!r} weights not found: {path}")
+                gate_opp_cycle.append((name, path))
+                opponents.append(name)
             # A greedy window is ONE mini-tournament => 2*n_deals seat-swapped obs per
             # opponent, filled in a single eval (so gate.ready() trips immediately after
             # it); the sampled window instead accumulates positions_per_iter per iter.
