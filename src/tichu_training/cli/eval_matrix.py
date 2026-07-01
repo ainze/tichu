@@ -210,23 +210,57 @@ def _run_tournament_mode(
 
 
 def _run_move_prediction_mode(agent_builders, held_out_dir: Path, config, output_path: Path) -> int:
+    # Accept EITHER a directory of `.tch` files OR the zstd `.tch` archive
+    # (`data/archive.zst`, deterministic strided sample). `max_games` caps the
+    # (otherwise corpus-sized) archive. Skip the occasional truncated/unparseable
+    # log rather than aborting the whole eval (mirrors the BC pipeline).
     agents = {name: build() for name, build in agent_builders.items()}
-    games = []
-    for path in sorted(held_out_dir.glob("*.tch")):
-        games.append(parse_tch(path.read_text(encoding="utf-8"), game_id=path.stem))
+    max_games = config.get("max_games")
+    max_games = int(max_games) if max_games is not None else 5000
+
+    held = Path(held_out_dir)
+    if held.suffix == ".zst":
+        from tichu_training.bsw.archive import iter_archive, list_game_ids
+        ids = list_game_ids(held)
+        if max_games and len(ids) > max_games:
+            step = max(1, len(ids) // max_games)
+            ids = ids[::step][:max_games]
+        sources = ((gid, text) for gid, text in iter_archive(held, game_ids=set(ids)))
+    else:
+        paths = sorted(held.glob("*.tch"))
+        if max_games:
+            paths = paths[:max_games]
+        sources = ((p.stem, p.read_text(encoding="utf-8")) for p in paths)
+
+    games, n_bad = [], 0
+    for gid, text in sources:
+        try:
+            games.append(parse_tch(text, game_id=gid))
+        except Exception:  # noqa: BLE001 — truncated/malformed BSW log; skip it
+            n_bad += 1
+    if n_bad:
+        log.warning("skipped %d unparseable games", n_bad)
     if not games:
-        log.warning("no .tch files found in %s", held_out_dir)
+        log.warning("no games loaded from %s", held)
 
     max_decisions = config.get("max_decisions")
     if max_decisions is not None:
         max_decisions = int(max_decisions)
 
+    # Build the decision set ONCE (identical across agents for a fair compare) and
+    # drop decisions with no legal action — out-of-turn bomb-interrupt plays whose
+    # non-current-player view makes `agent.act` raise. Wish / schupfen / dragon /
+    # in-turn play all keep a non-empty legal set, so this only sheds the unactable.
+    from tichu_engine.legality import legal_actions_for
+
+    all_decisions = [
+        d for game in games for d in decisions_from_game(game)
+        if legal_actions_for(d.private_state)
+    ]
+
     rows: list[dict] = []
     for name, agent in agents.items():
-        decisions: list = []
-        for game in games:
-            decisions.extend(decisions_from_game(game))
-        out = evaluate_move_prediction(agent, decisions, max_decisions=max_decisions)
+        out = evaluate_move_prediction(agent, all_decisions, max_decisions=max_decisions)
         for decision_type, stats in sorted(out.items()):
             rows.append({
                 "agent": name,

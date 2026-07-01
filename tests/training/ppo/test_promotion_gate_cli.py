@@ -221,3 +221,66 @@ def test_greedy_gate_fills_both_opponents_in_a_single_eval(tmp_path):
     assert rows and {r["opponent"] for r in rows} == {"champion", "bc"}
     assert all(r["promoted"] == "1" for r in rows)
     assert (run_dir / "_bc_opponent.pt").exists()
+
+
+# --- extra_opponents: FIXED external models the candidate must ALSO beat -------------
+
+def _write_rollout_opponent(path):
+    """A fixed external opponent in rollout-weights format ({"models": {net: sd}}),
+    test arch — what `extra_opponents[*].path` points at (e.g. a shipped champion)."""
+    models = {
+        "play": BCModel(_D, skill_buckets=10, **_MODEL),
+        "schupfen": SchupfenNetwork(_D, skill_dim=8, hidden=16),
+        "tichu": TichuCallNetwork(_D, skill_dim=8, hidden=16),
+        "grand": GrandTichuCallNetwork(_D, skill_dim=8, hidden=16),
+    }
+    torch.save({"models": {k: m.state_dict() for k, m in models.items()}}, str(path))
+
+
+def test_extra_opponents_adds_a_third_fixed_opponent_to_the_beat_all_gate(tmp_path):
+    # A third FIXED opponent (e.g. the shipped champion) joins the {champion, bc} pool
+    # via extra_opponents. The greedy eval scores all THREE in one mini-tournament; at a
+    # pass-everything threshold the candidate beats all three and promotes — and the
+    # per-opponent CSV records the third stream by its configured name.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=-1e9, also_beat_bc=True)
+    opp_path = tmp_path / "cpfix_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [{"name": "cpfix", "path": str(opp_path)}]
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc", "cpfix"}
+    assert all(r["promoted"] == "1" for r in rows)
+
+
+def test_extra_opponents_gate_holds_when_threshold_unreachable(tmp_path):
+    # Beat-ALL semantics through the wiring: with a pass-nothing threshold the gate
+    # holds even though all three streams are scored — promotion needs every opponent
+    # (champion, bc, AND the fixed cpfix) to clear.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=1e9, also_beat_bc=True)
+    opp_path = tmp_path / "cpfix_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [{"name": "cpfix", "path": str(opp_path)}]
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc", "cpfix"}
+    assert all(r["promoted"] == "0" for r in rows)
+
+
+def test_extra_opponents_missing_file_raises(tmp_path):
+    # A typo'd / missing opponent file is caught at setup, not mid-run.
+    import pytest
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=-1e9)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "cpfix", "path": str(tmp_path / "does_not_exist.pt")}
+    ]
+    with pytest.raises(FileNotFoundError):
+        run_cotrain_training(config, progress=False)

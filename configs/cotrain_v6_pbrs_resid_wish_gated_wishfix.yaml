@@ -1,0 +1,120 @@
+# Co-training FROM the wish-decline-fixed BC (bc_full_corpus_v6_wishfix), with a
+# THREE-opponent beat-all greedy gate. (Follow-up to the Mahjong-wish decline fix:
+# the wish head now trains the no-wish label, so iter 0 is the corrected BC.)
+#
+# Lineage: cotrain_v6_pbrs_resid_wish_gated.yaml (greedy gate + PBRS + co-trained
+# wish + residual schupfen/tichu heads). DELTAS:
+#   1) warm_start.play = the wishfix BC final checkpoint (NOT iter_01200). So this
+#      is a FRESH-from-BC run; the gate's frozen-BC opponent + the rolling champion
+#      both START as the corrected BC. schupfen/tichu/grand keep the residual /
+#      256 warm-starts (the wish fix only touched the play policy's wish head).
+#   2) promotion_gate.extra_opponents adds the SHIPPED champion (iter 3328 of
+#      cotrain_v6_pbrs_resid_wish_gated_cpfix, +8.81 vs master) as a THIRD fixed
+#      gate/rollout opponent. A promotion now needs a CI-validated greedy win over
+#      ALL THREE every window:
+#         * bc        — the wishfix BC (also_beat_bc; the fixed human reference)
+#         * champion  — this run's rolling best (reanchor_on_promote; starts = BC)
+#         * cpfix3328 — the current shipped champion (fixed external reference)
+#      Build the cpfix3328 opponent file first:  python scripts/build_cpfix_opponent.py
+#
+# PREREQ: the wishfix BC must have finished (warm_start.play below must exist) and
+# data/runs/cotrain_v6_pbrs_resid_wish_gated_cpfix/iter03328_opponent.pt must exist.
+#
+# Cost note: the greedy gate now runs THREE mini-tournaments per window (4096 deals
+# x2 each) every 128 iters — ~50% more eval/window than the 2-opponent run. Lower
+# greedy_n_deals if windows stall the loop. Parallel-only; one tournament at a time
+# (OOM, ADR-0034). Launch detached; poll {run_dir}/ppo_log.csv + promotion_gate.csv.
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v6_pbrs_resid_wish_gated_wishfix.yaml
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6_pbrs_resid_wish_gated_wishfix.yaml [--iter N]
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_wishfix_memmap\checkpoints\step_000001.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6_resid\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6_tichu_resid\checkpoints\tichu_final.bin
+  # Was cotrain_v6_pbrs\snapshots\iter_01200_grand.bin (deleted to save disk). On
+  # RESUME this only seeds the FROZEN-BC reference grand (gate "bc" opponent + grand
+  # KL anchor) — the learner's grand comes from the resume bundle — so the canonical
+  # BC grand is a negligible-impact stand-in (grand is a rare near-deterministic call;
+  # the "bc" opponent is the always-cleared floor).
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix
+
+promotion_gate:
+  enabled:             true
+  greedy:              true      # margin source = greedy mini-tournament (deployed MLAgent)
+  greedy_n_deals:      4096      # deals/opponent/window => 8192 seat-swapped obs/opp
+  greedy_every:        128       # run the eval every N iters
+  greedy_workers:      10        # tournament worker procs (rollout pool idle during eval)
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true      # opponent "bc" = the wishfix BC (fixed human reference)
+  # Third fixed opponent (the shipped champion) is TEMPORARILY DISABLED. At iter 512
+  # the learner was -9.9 vs cpfix3328 (CI [-14.6,-5.2]) — well out of range — so
+  # requiring it would hard-block every promotion. Gate on {champion, bc} only until
+  # the champion+bc ratchet climbs the learner into range, THEN re-enable this block
+  # (stop + resume with the same command; the gate rebuilds from config). Build the
+  # file with scripts/build_cpfix_opponent.py (already done).
+  # extra_opponents:
+  #   - name: cpfix3328
+  #     path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\iter03328_opponent.pt
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # tichu — residual (PR #64)
+grand_model:    { skill_dim: 64, hidden: 256 }                              # grand — non-residual (irreducible)
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  play:     { coef: 1.0, target: 0.12,  factor: 2.0 }   # was 0.08; loosened to search a bigger ball around the champion (plateau escape attempt @ ~iter 18.5k). Watch for critic-noise degradation vs cpfix3328; revert if it oscillates.
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:                 # out-of-loop check_cotrain target = the current shipped champion
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
+  pbrs:
+    enabled:   true
+    potential: banked_points

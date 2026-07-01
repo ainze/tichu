@@ -1,0 +1,56 @@
+# Head-to-head A/B: the wish-decline-fixed BC vs the original v6 BC.
+#
+# Question: does training the Mahjong-wish DECLINE label (no-wish / wish-head
+# index 0, ~20.7% of human Mahjong plays — previously never a BC target) make the
+# deployed BC stronger? See the wish-decline diagnosis + the wishfix corpus rebuild.
+#
+# CONTROLLED so the delta is attributable to the play-policy retrain (and within
+# it, the wish head — the ONLY decision type whose training DATA changed; play /
+# dragon saw identical rows, only reshuffled): BOTH agents share the v6 BC's
+# schupfen_path / tichu_call_path / grand_call_path. ONLY checkpoint_path
+# (policy.pt = play+wish+dragon heads) differs.
+#
+# full_strength + the pre-schupfen full pool means the Mahjong + its wish ARE
+# exercised. The wish effect is DILUTE, though — the agent is the wisher only when
+# it holds the Mahjong (~1/4 of rounds) and the decline only swings EV in a subset
+# of those — so budget a large n_deals and don't be surprised by a tight CI near 0.
+# Complementary direct check: `--mode move_prediction` on the wish head (agreement
+# with human declines) isolates the head without the per-round dilution.
+#
+# PREREQ: export the wishfix BC policy first (after BC training finishes):
+#   python -m tichu_training.cli.export_model `
+#     --checkpoint   C:\workbench\tichu\data\runs\bc_full_corpus_v6_wishfix_memmap\checkpoints\step_e000_b01250000.bin `
+#     --model-config configs\export_full_corpus_v6.yaml `
+#     --output       C:\workbench\tichu\data\export\bc_full_corpus_v6_wishfix_memmap
+#
+# Run (~33 min at ~10 pos/s for 20k; do NOT run a second tournament concurrently — OOM, ADR-0034):
+#   python -m tichu_training.cli.eval_matrix --config configs/eval_bc_wishfix_vs_v6.yaml
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 20000
+bootstrap_iters: 1000
+seed: 0
+workers: 8
+
+agents:
+  - name: bc_v6
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\policy.pt
+      skill_decile: 9
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+  - name: bc_v6_wishfix
+    factory: ml
+    kwargs:
+      # ONLY this line differs from bc_v6 — the wishfix policy (play+wish+dragon).
+      checkpoint_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_wishfix_memmap\policy.pt
+      skill_decile: 9
+      schupfen_path:   C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_full_corpus_v6_memmap\grand_tichu_call.pt
+
+output: C:\workbench\tichu\data\runs\eval_bc_wishfix_vs_v6\matrix_full20k.parquet
