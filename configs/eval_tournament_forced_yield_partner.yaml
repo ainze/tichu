@@ -1,0 +1,29 @@
+# EV cost of the partner-overtake blunder (2026-07-03). forced_yield_partner_caller =
+# the champion forced to PASS in exactly the states where it would beat (non-bomb) a
+# winning partner who has CALLED — vs the bare champion. Head-to-head paired EV.
+#   forced_yield EV > champion  -> ceding is +EV: the overtakes are real blunders (by the margin)
+#   forced_yield EV <= champion -> the overtakes are fine: not a net blunder (mis-measured)
+# Champion = shipped cpfix iter_03328 (v6). No search either side, so the pool is cheap.
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
+n_deals: 1200
+bootstrap_iters: 1000
+seed: 0
+workers: 6
+
+_champion: &champion
+  checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+  schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+  tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+  grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+  skill_decile: 9
+
+agents:
+  - name: forced_yield_partner_caller
+    factory: forced_yield_partner_caller
+    kwargs: *champion
+  - name: champion
+    factory: ml
+    kwargs: *champion
+
+output: C:\workbench\tichu\data\runs\forced_yield_partner\tournament.parquet

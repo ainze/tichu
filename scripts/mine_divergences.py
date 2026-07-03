@@ -46,7 +46,7 @@ from tichu_engine.combinations import (
     StraightFlushBomb,
     Triple,
 )
-from tichu_engine.engine import _trick_points
+from tichu_engine.engine import trick_point_value
 from tichu_engine.legality import Pass, _cards_in
 
 _BOMBS = (FourOfAKindBomb, StraightFlushBomb)
@@ -121,7 +121,7 @@ def following(pv) -> bool:
 
 
 def points_bucket(pv) -> str:
-    pts = _trick_points(pv.public.trick)
+    pts = trick_point_value(pv.public.trick)
     return "0" if pts == 0 else ("1-9" if pts < 10 else "10+")
 
 

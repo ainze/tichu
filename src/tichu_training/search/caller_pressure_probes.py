@@ -84,3 +84,37 @@ class ForcedYieldOppCallerAgent(_MasterProbe):
             self.interventions += 1
             return PASS
         return action
+
+
+def _following_partner_caller(pv) -> bool:
+    """True iff the actor is following its own PARTNER's trick while that winning partner
+    has called Tichu/Grand. `Trick.leader` IS the current winner, so `leader` here is the
+    partner currently holding the trick — the seat a beat would overtake."""
+    pub = pv.public
+    if pub.pending_decision is not None:
+        return False
+    leader = pub.trick.leader
+    me = pv.player
+    if leader is None or leader == me or (leader % 2) != (me % 2):
+        return False  # leading, self, or following an opponent — not the partner's trick
+    return leader in (pub.tichu_callers | pub.grand_tichu_callers)
+
+
+@register_agent("forced_yield_partner_caller")
+class ForcedYieldPartnerCallerAgent(_MasterProbe):
+    """contest->pass: where the master would beat (non-bomb) a winning partner who has
+    CALLED, force a Pass — cede the trick to the calling partner. Measures the EV cost of
+    the observed 'overtake a calling, winning partner' blunder (the non-bomb case the
+    shipped `suppress_partner_trick_bomb` guard does not cover). Bombs are left alone — the
+    bomb-guard is the separate lever for those."""
+
+    def act(self, private_state):
+        action = self._policy.act(private_state)
+        if (
+            not isinstance(action, (Pass, *_BOMB_TYPES))
+            and _following_partner_caller(private_state)
+            and any(isinstance(a, Pass) for a in legal_actions_for(private_state))
+        ):
+            self.interventions += 1
+            return PASS
+        return action

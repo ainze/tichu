@@ -55,6 +55,17 @@ class RoundTelemetry(NamedTuple):
     # (almost never a reason to cede). Defaulted so older constructions still build.
     caller_pass_bomb_opportunities: tuple[int, int, int, int] = (0, 0, 0, 0)
     caller_pass_bomb_events: tuple[int, int, int, int] = (0, 0, 0, 0)
+    # Partner steal: this seat is following its own PARTNER's top (same team, the
+    # partner currently holds the Trick — recall `Trick.leader` IS the current
+    # winner) with a legal beating play available. `_opportunities` counts those
+    # situations; `_events` counts how many it OVERTOOK (played a non-Pass beat)
+    # rather than ceding to let the partner win. The `_caller_` subset restricts to
+    # partner having called Tichu/Grand — the near-pure blunder of stealing a
+    # calling partner's winning Trick.
+    partner_steal_opportunities: tuple[int, int, int, int] = (0, 0, 0, 0)
+    partner_steal_events: tuple[int, int, int, int] = (0, 0, 0, 0)
+    partner_steal_caller_opportunities: tuple[int, int, int, int] = (0, 0, 0, 0)
+    partner_steal_caller_events: tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
 class FullRoundResult(NamedTuple):
@@ -99,6 +110,10 @@ def play_full_round(
     caller_pass_events = [0, 0, 0, 0]
     caller_pass_bomb_opportunities = [0, 0, 0, 0]
     caller_pass_bomb_events = [0, 0, 0, 0]
+    partner_steal_opportunities = [0, 0, 0, 0]
+    partner_steal_events = [0, 0, 0, 0]
+    partner_steal_caller_opportunities = [0, 0, 0, 0]
+    partner_steal_caller_events = [0, 0, 0, 0]
     last_out_order: tuple[int, ...] = ()
 
     asked_tichu: set[int] = set()
@@ -129,26 +144,39 @@ def play_full_round(
         # shared by both). Only on a normal Play decision (no pending).
         passivity_opp = False
         passivity_bomb = False
+        steal_opp = False
+        steal_caller = False
         if collect_telemetry and state.public.pending_decision is None:
             legal = legal_actions(state)
             has_bomb = any(isinstance(a, _BOMB_TYPES) for a in legal)
             if has_bomb:
                 bomb_legal_decisions[current] += 1
+            has_beat = any(not isinstance(a, Pass) for a in legal)
+            # `Trick.leader` IS the current winner (reassigned on every play), so
+            # `leader` below is whoever currently holds the Trick.
+            leader = state.public.trick.leader
+            following = leader is not None and leader != current
             # Caller passivity: this seat called Tichu/Grand, is FOLLOWING an
             # opponent's top (different team), and has a legal beating play.
-            leader = state.public.trick.leader
             if (
                 (current in grand_callers or current in tichu_callers)
-                and leader is not None
-                and leader != current
+                and following
                 and (leader % 2) != (current % 2)
-                and any(not isinstance(a, Pass) for a in legal)
+                and has_beat
             ):
                 caller_pass_opportunities[current] += 1
                 passivity_opp = True
                 if has_bomb:
                     caller_pass_bomb_opportunities[current] += 1
                     passivity_bomb = True
+            # Partner steal (mirror): following the PARTNER's top (same team) with
+            # a legal beat — the chance to wrongly overtake a winning partner.
+            if following and (leader % 2) == (current % 2) and has_beat:
+                partner_steal_opportunities[current] += 1
+                steal_opp = True
+                if leader in grand_callers or leader in tichu_callers:
+                    partner_steal_caller_opportunities[current] += 1
+                    steal_caller = True
         action = agents[current].act(private)
         if collect_telemetry:
             if isinstance(action, _BOMB_TYPES):
@@ -158,6 +186,11 @@ def play_full_round(
                     caller_pass_events[current] += 1
                 if passivity_bomb:
                     caller_pass_bomb_events[current] += 1
+            else:  # a non-Pass beat == overtaking whoever currently holds the Trick
+                if steal_opp:
+                    partner_steal_events[current] += 1
+                if steal_caller:
+                    partner_steal_caller_events[current] += 1
         if observer is not None and state.public.pending_decision is None:
             observer(current, private, action)
         if state_observer is not None and state.public.pending_decision is None:
@@ -209,6 +242,10 @@ def play_full_round(
             caller_pass_events=tuple(caller_pass_events),  # type: ignore[arg-type]
             caller_pass_bomb_opportunities=tuple(caller_pass_bomb_opportunities),  # type: ignore[arg-type]
             caller_pass_bomb_events=tuple(caller_pass_bomb_events),  # type: ignore[arg-type]
+            partner_steal_opportunities=tuple(partner_steal_opportunities),  # type: ignore[arg-type]
+            partner_steal_events=tuple(partner_steal_events),  # type: ignore[arg-type]
+            partner_steal_caller_opportunities=tuple(partner_steal_caller_opportunities),  # type: ignore[arg-type]
+            partner_steal_caller_events=tuple(partner_steal_caller_events),  # type: ignore[arg-type]
         )
     return FullRoundResult(total=total, call_bonus=call_bonus, telemetry=telemetry)
 

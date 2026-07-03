@@ -48,6 +48,10 @@ class BehavioralProfile:
     caller_pass_events: int = 0
     caller_pass_bomb_opportunities: int = 0
     caller_pass_bomb_events: int = 0
+    partner_steal_opportunities: int = 0
+    partner_steal_events: int = 0
+    partner_steal_caller_opportunities: int = 0
+    partner_steal_caller_events: int = 0
 
     def _safe(self, num: int, den: int) -> float:
         return num / den if den else 0.0
@@ -107,6 +111,20 @@ class BehavioralProfile:
         never a reason to do this — a near-pure error rate."""
         return self._safe(self.caller_pass_bomb_events, self.caller_pass_bomb_opportunities)
 
+    @property
+    def partner_steal_rate(self) -> float:
+        """When the partner currently holds the Trick and a legal beat is
+        available, the fraction of those the seat OVERTOOK instead of ceding to
+        let the partner win. High = stealing partner tricks."""
+        return self._safe(self.partner_steal_events, self.partner_steal_opportunities)
+
+    @property
+    def partner_steal_caller_rate(self) -> float:
+        """The near-pure blunder subset: partner is a Tichu/Grand caller (wants to
+        win the Trick / go out), yet the seat overtook it. The metric that targets
+        the observed 'bombs/overtakes a calling, winning partner' pathology."""
+        return self._safe(self.partner_steal_caller_events, self.partner_steal_caller_opportunities)
+
     def as_row(self) -> dict[str, float | int]:
         return {
             "seat_rounds": self.seat_rounds,
@@ -125,6 +143,10 @@ class BehavioralProfile:
             "caller_pass_opportunities": self.caller_pass_opportunities,
             "caller_bomb_passivity_rate": round(self.caller_bomb_passivity_rate, 5),
             "caller_pass_bomb_opportunities": self.caller_pass_bomb_opportunities,
+            "partner_steal_rate": round(self.partner_steal_rate, 5),
+            "partner_steal_opportunities": self.partner_steal_opportunities,
+            "partner_steal_caller_rate": round(self.partner_steal_caller_rate, 5),
+            "partner_steal_caller_opportunities": self.partner_steal_caller_opportunities,
         }
 
 
@@ -145,6 +167,10 @@ def _fold_round(profile: BehavioralProfile, tel, seat: int) -> None:
     profile.caller_pass_events += tel.caller_pass_events[seat]
     profile.caller_pass_bomb_opportunities += tel.caller_pass_bomb_opportunities[seat]
     profile.caller_pass_bomb_events += tel.caller_pass_bomb_events[seat]
+    profile.partner_steal_opportunities += tel.partner_steal_opportunities[seat]
+    profile.partner_steal_events += tel.partner_steal_events[seat]
+    profile.partner_steal_caller_opportunities += tel.partner_steal_caller_opportunities[seat]
+    profile.partner_steal_caller_events += tel.partner_steal_caller_events[seat]
     # Doppelsieg: the first two players out are partners; both seats of the
     # winning team are credited.
     if (
