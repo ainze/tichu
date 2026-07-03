@@ -16,7 +16,9 @@ from tichu_engine.state import (
 from tichu_training.search.caller_pressure_probes import (
     ForcedPressOppCallerAgent,
     ForcedYieldOppCallerAgent,
+    ForcedYieldPartnerCallerAgent,
     _following_opp_caller,
+    _following_partner_caller,
 )
 
 
@@ -116,4 +118,43 @@ def test_yield_leaves_a_bomb_alone():
              leader=1, top=Single(K), callers=frozenset({1}))
     agent = ForcedYieldOppCallerAgent.from_policy(_Stub(BOMB))
     assert agent.act(pv) is BOMB
+    assert agent.interventions == 0
+
+
+# --- forced_yield_partner_caller (the blunder EV probe) ----------------------
+
+def test_following_partner_caller_true_only_for_calling_partner_trick():
+    # following partner (seat 2) who has called -> True (partner of seat 0 is seat 2)
+    assert _following_partner_caller(_pv(0, {A}, leader=2, top=Single(K), callers=frozenset({2})))
+
+
+def test_following_partner_caller_false_cases():
+    assert not _following_partner_caller(_pv(0, {A}, callers=frozenset({2})))          # leading
+    assert not _following_partner_caller(_pv(0, {A}, leader=1, top=Single(K), callers=frozenset({1})))  # opponent's trick
+    assert not _following_partner_caller(_pv(0, {A}, leader=2, top=Single(K)))          # partner leads but no caller
+    assert not _following_partner_caller(_pv(0, {A}, leader=2, top=Single(K), callers=frozenset({0})))  # caller is self, not partner
+    assert not _following_partner_caller(
+        _pv(0, {A}, leader=2, top=Single(K), callers=frozenset({2}), pending=MahjongWishPending(player=0)))
+
+
+def test_partner_yield_forces_pass_over_a_calling_winning_partner():
+    pv = _pv(0, {A}, leader=2, top=Single(K), callers=frozenset({2}))
+    agent = ForcedYieldPartnerCallerAgent.from_policy(_Stub(Single(A)))
+    assert isinstance(agent.act(pv), Pass)
+    assert agent.interventions == 1
+
+
+def test_partner_yield_leaves_a_bomb_alone():
+    pv = _pv(0, {_c(Suit.JADE, 7), _c(Suit.SWORD, 7), _c(Suit.PAGODA, 7), _c(Suit.STAR, 7)},
+             leader=2, top=Single(K), callers=frozenset({2}))
+    agent = ForcedYieldPartnerCallerAgent.from_policy(_Stub(BOMB))
+    assert agent.act(pv) is BOMB
+    assert agent.interventions == 0
+
+
+def test_partner_yield_leaves_action_alone_when_partner_did_not_call():
+    pv = _pv(0, {A}, leader=2, top=Single(K))  # partner winning but no call
+    ace = Single(A)
+    agent = ForcedYieldPartnerCallerAgent.from_policy(_Stub(ace))
+    assert agent.act(pv) is ace
     assert agent.interventions == 0
