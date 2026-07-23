@@ -17,7 +17,7 @@ per-net columns:
     {play, schupfen, tichu, grand}  (+ wish when cotrain_wish is on)
 
 The nets are auto-detected from the `*_policy_loss` columns, so a wish-enabled run
-plots its extra net with no flag. Five panels, one line per net:
+plots its extra net with no flag. Six panels in a 3x2 grid, one line per net:
 
   1. Critic value_loss (log) + total loss — the warm-up / under-fit signal. With a
      deeper/wider Perfect-Info Critic (ADR-0038), this is THE panel: value_loss
@@ -31,9 +31,12 @@ plots its extra net with no flag. Five panels, one line per net:
   4. Per-net beta_KL (kl_coef, log) — the adaptive controller's response. Pinned
      high ⇒ the anchor can't hold; floored ⇒ the policy isn't moving (loosen).
   5. Per-net entropy — should sit modest/stable; a collapse ⇒ no exploration.
+  6. Greedy-gate tournament margin (from the sibling `promotion_gate.csv`): per-
+     opponent mean score margin per gate window with its bootstrap 95% CI band,
+     promotions marked. Empty panel for non-gated runs.
 
-Behavioral dials + strength vs master are OUT OF LOOP: `check_cotrain` (tournament)
-and `eval_matrix --mode behavioral`. This tool follows training health only.
+Behavioral dials + strength vs the SHIPPED master stay OUT OF LOOP: `check_cotrain`
+and `eval_matrix --mode behavioral`. Panel 6 shows the in-run gate opponents only.
 
 Usage:
     ./plot_cotrain_csv.py path/to/run-dir                 # auto-finds ppo_log.csv
@@ -91,6 +94,56 @@ def _promotion_iters(csv_path: Path) -> list[int]:
     if not {"iter", "promoted"} <= set(g.columns):
         return []
     return sorted({int(i) for i in g.loc[g["promoted"] == 1, "iter"]})
+
+
+def _gate_frame(csv_path: Path) -> pd.DataFrame | None:
+    """The sibling `promotion_gate.csv` as a DataFrame, or None when absent/empty.
+    One row per opponent per gate window: iter, opponent, n, mean, ci_lo, ci_hi,
+    promoted."""
+    gate = csv_path.parent / "promotion_gate.csv"
+    if not gate.is_file():
+        return None
+    try:
+        g = pd.read_csv(gate)
+    except (pd.errors.EmptyDataError, OSError):
+        return None
+    need = {"iter", "opponent", "mean", "ci_lo", "ci_hi", "promoted"}
+    if g.empty or not need <= set(g.columns):
+        return None
+    return g
+
+
+# Stable per-opponent colour in the gate panel (extras fall back to the cycle).
+_OPP_COLORS = {"bc": "C0", "champion": "C1", "cpfix3328": "C3"}
+
+
+def _plot_gate(ax, csv_path: Path) -> None:
+    """Panel 6: greedy-gate tournament margin per opponent, CI-banded, promotions
+    marked. The gate records seat-swapped greedy mini-tournament margins every
+    `greedy_every` iters — the deployed-strength trajectory the negative-control /
+    plateau reads come from."""
+    g = _gate_frame(csv_path)
+    ax.set_title("Greedy-gate tournament margin (learner − opponent, per window)")
+    ax.set_ylabel("score margin / round")
+    ax.grid(True, alpha=0.3, which="both")
+    if g is None:
+        ax.text(0.5, 0.5, "no promotion_gate.csv (non-gated run)",
+                ha="center", va="center", transform=ax.transAxes, alpha=0.6)
+        return
+    ax.axhline(0.0, color="k", linestyle="--", alpha=0.4, linewidth=1.0)
+    for i, (opp, rows) in enumerate(g.groupby("opponent", sort=False)):
+        rows = rows.sort_values("iter")
+        color = _OPP_COLORS.get(str(opp), f"C{(4 + i) % 10}")
+        ax.plot(rows["iter"], rows["mean"], color=color, linewidth=1.5, marker="o",
+                markersize=3, label=f"vs {opp} (last {rows['mean'].iloc[-1]:+.2f})")
+        ax.fill_between(rows["iter"], rows["ci_lo"], rows["ci_hi"],
+                        color=color, alpha=0.15, linewidth=0)
+    promo = g.loc[g["promoted"] == 1]
+    if not promo.empty:
+        for k, it in enumerate(sorted({int(i) for i in promo["iter"]})):
+            ax.axvline(it, color="C3", linestyle="--", alpha=0.55, linewidth=1.0,
+                       label="champion promoted" if k == 0 else None)
+    ax.legend(loc="best", fontsize=8)
 
 
 def _plot_critic(ax, df: pd.DataFrame, window: int, promo_iters=()) -> None:
@@ -185,6 +238,7 @@ def _draw(fig, axes, csv_path: Path, window: int, kl_target: float, positions_pe
                   logy=True)
     _plot_per_net(axes[4], df, window, "_entropy", ylabel="entropy",
                   title="Per-net entropy")
+    _plot_gate(axes[5], csv_path)
 
     for ax in axes:
         ax.twinx = orig_twinx[ax]
@@ -197,7 +251,8 @@ def _draw(fig, axes, csv_path: Path, window: int, kl_target: float, positions_pe
 
 def _plot(csv_path: Path, window: int, out: Path | None, kl_target: float,
           positions_per_iter: int, watch: float | None) -> None:
-    fig, axes = plt.subplots(5, 1, figsize=(11, 16))
+    fig, axes = plt.subplots(3, 2, figsize=(18, 12))
+    axes = axes.flatten()
     for ax in axes:
         ax._twins = []
 

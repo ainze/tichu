@@ -1,0 +1,48 @@
+# Trunk-capacity probe, FUNNEL arm: trunk_out 512 -> 1024, head_hidden 256 -> 512.
+#
+# Tests whether the bottleneck is not the trunk blocks but the funnel AFTER
+# them: 512-dim trunk output -> 256-hidden head -> 1809-way play softmax is the
+# narrowest path in the network. If THIS arm wins and the depth/width arms
+# don't, the fix is nearly free at inference (no extra trunk FLOPs).
+# Pre-registered design, bar, and closing rule:
+# docs/notes/2026-07-03-trunk-capacity-probe-v6-preregistration.md
+#
+# IDENTICAL to configs/bc_full_corpus_v6_wishfix_memmap.yaml in bundle / LR /
+# batch / seed / shuffle / head_weights — the ONLY deltas are trunk_out_dim and
+# head_hidden. Trunk blocks stay 1024 x 4. Paired with the baseline run via
+# same seed + shuffle.
+#
+# Run (foreground; sequential with the other arms):
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\epic-golick-b8678d\src"
+#   python -c "import tichu_training.featurizer as f; print(f.FEATURIZER_VERSION)"   # must print v6
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs\bc_full_corpus_v6_wishfix_trunk_funnel_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_corpus_v6_wishfix_trunk_funnel_memmap `
+#     --device  cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v6_wishfix\bc
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 1024       # <-- delta vs baseline (512)
+  skill_dim: 64
+  head_hidden: 512          # <-- delta vs baseline (256)
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+shuffle: true
+shuffle_buffer: 1048576
+shuffle_block: 65536
+
+checkpoint_every: 100000
+checkpoint_every_batches: 50000
+seed: 0

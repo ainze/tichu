@@ -1,0 +1,111 @@
+# Cotrain NEGATIVE CONTROL: 2048x8 play trunk, otherwise the wishfix gated run.
+#
+# Purpose (pre-registered in docs/notes/2026-07-03-trunk-capacity-probe-v6-
+# preregistration.md §negative control): verify that a ~4x-trunk play policy
+# does NOT improve over time against the current shipped champion — i.e. that
+# trunk capacity is not the cotrain bottleneck either. The instrument is the
+# out-of-loop check_cotrain vs `eval.master` (cpfix3328 export) trajectory,
+# compared window-for-window against the 1024x4 wishfix run's.
+#
+# Lineage: cotrain_v6_pbrs_resid_wish_gated_wishfix.yaml. DELTAS:
+#   1) model: trunk 1024x4 -> 2048x8 (the ONLY arch delta; heads/out_dim same).
+#   2) warm_start.play = the 2048x8 wishfix BC (arch must match the learner —
+#      the KL anchor and the gate's frozen "bc" opponent are built from it).
+#      PREREQ: bc_full_corpus_v6_wishfix_trunk_2048x8_memmap must have finished;
+#      VERIFY the final-checkpoint filename below matches what train_bc wrote.
+#   3) run_dir.
+# Everything else — gate, KL targets, PBRS, entropy, ppo block — byte-identical,
+# so a trajectory delta attributes to the trunk, not the recipe.
+#
+# Cost note: ~4x trunk FLOPs in every rollout AND in the greedy-gate mini-
+# tournaments — expect materially slower iterations and eval windows than the
+# 1024x4 run. Compare trajectories per-ITERATION, not per-wall-clock-hour.
+# One heavy job at a time (OOM, ADR-0034). Launch detached; poll
+# {run_dir}/ppo_log.csv + promotion_gate.csv.
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v6_pbrs_resid_wish_gated_wishfix_trunk2048x8.yaml
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6_pbrs_resid_wish_gated_wishfix_trunk2048x8.yaml [--iter N]
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v6_wishfix_trunk_2048x8_memmap\checkpoints\step_000001.bin
+  schupfen: C:\workbench\tichu\data\runs\schupfen_full_corpus_v6_resid\checkpoints\schupfen_final.bin
+  tichu:    C:\workbench\tichu\data\runs\calls_full_corpus_v6_tichu_resid\checkpoints\tichu_final.bin
+  grand:    C:\workbench\tichu\data\runs\calls_full_corpus_v6\checkpoints\grand_final.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix_trunk2048x8
+
+promotion_gate:
+  enabled:             true
+  greedy:              true
+  greedy_n_deals:      4096
+  greedy_every:        128
+  greedy_workers:      6       # lowered from 10: at 2048x8 each gate worker loads ~285MB
+                               # TorchScript nets while the idle rollout pool stays
+                               # resident — 10+10 procs exhausted the 64GB box's commit
+                               # limit (112/112GB) at first launch
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true      # opponent "bc" = the 2048x8 wishfix BC (arch-matched anchor)
+
+model:          { skill_dim: 64, trunk_hidden: 2048, trunk_depth: 8, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }
+grand_model:    { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 6   # lowered from 10: each spawn worker privately holds TWO full net
+                     # sets (learner + league opponent) = ~570MB of play nets at 2048x8
+                     # vs ~50MB at 1024x4, plus a ~300MB transient torch.load per task.
+                     # 10 workers pushed the box to 57GB in-use / commit-limit at launch.
+                     # Slower per iter; the negative control compares per-ITERATION.
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  play:     { coef: 1.0, target: 0.12,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8
+  master:                 # the falsification target: the current shipped champion
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                0.95
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
+  pbrs:
+    enabled:   true
+    potential: banked_points
