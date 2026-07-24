@@ -103,9 +103,13 @@ in principle use capacity BC can't).
   per-wall-clock-hour (the big trunk's iterations are ~4× more expensive —
   that cost asymmetry is itself part of the verdict).
 - **Running record** (2048×8 vs master, greedy seat-swapped, n=8000):
-  iter 1408 → **−11.66 [−16.61, −6.65]** — in the same band as the 1024×4 run's
-  early trajectory (−15.9 @ 128, −10.4 @ 256, −9.9 @ 512); no capacity signal
-  so far.
+  - iter 1408 → **−11.66 [−16.61, −6.65]**
+  - iter 2432 → **−9.27 [−14.29, −4.44]** (promotion snapshot)
+  - iter 3450 → **−9.63 [−14.68, −4.82]**
+  Flat within noise over 2000+ iterations, sitting exactly on the 1024×4 run's
+  early band (−15.9 @ 128, −10.4 @ 256, −9.9 @ 512 — the 2048×8 @ 3450 matches
+  the 1024×4 @ 512). Champion axis stalled since 2432 (7 straight holds) while
+  vs-BC holds ~+10. No capacity signal.
 - **"Does not improve" (the expected null):** at matched iteration counts the
   2048×8 trajectory vs master is never CI-above the 1024×4 run's trajectory
   vs master. If that holds through the point where the 1024×4 run had clearly

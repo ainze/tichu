@@ -37,12 +37,22 @@ REL_BAR = 0.01              # pre-registered: >= 1% relative NLL improvement
 
 
 def load_play_loss(run_dir: Path) -> pd.Series:
-    """loss_play indexed by step, play-head rows only, step-aligned."""
+    """loss_play indexed by step, play-head rows only.
+
+    A killed-and-resumed run re-processes batches since its last checkpoint and
+    APPENDS duplicate step rows to step.csv — under positional pairing that
+    shifts the series and poisons every downstream number. Dedupe on the step
+    index (keep the last occurrence = the resumed pass) and sort, so runs are
+    aligned by step id, never by row position."""
     df = pd.read_csv(run_dir / "step.csv", usecols=["step", "loss_play"])
     s = df.dropna(subset=["loss_play"]).set_index("step")["loss_play"]
     if s.empty:
         raise SystemExit(f"{run_dir}: no loss_play rows in step.csv")
-    return s
+    dups = int(s.index.duplicated().sum())
+    if dups:
+        print(f"  NOTE {run_dir.name}: {dups:,} duplicate step rows "
+              f"(resume overlap) — deduped keep-last")
+    return s[~s.index.duplicated(keep="last")].sort_index()
 
 
 def trailing_mean(s: pd.Series, n: int) -> float:
@@ -75,13 +85,16 @@ def main() -> int:
             print(f"{arm}: step.csv not found — skipped\n")
             continue
         s = load_play_loss(run_dir)
-        # Paired comparison only over steps both runs completed.
-        n = min(len(s), len(base))
-        trail = trailing_mean(s.iloc[:n], TRAIL_WINDOW)
-        b_trail = trailing_mean(base.iloc[:n], TRAIL_WINDOW)
+        # Paired comparison strictly on steps PRESENT IN BOTH runs (same shuffle
+        # + seed => same example at the same step id), never by row position.
+        common = s.index.intersection(base.index)
+        s_c, b_c = s.loc[common], base.loc[common]
+        n = len(common)
+        trail = trailing_mean(s_c, TRAIL_WINDOW)
+        b_trail = trailing_mean(b_c, TRAIL_WINDOW)
         rel = (b_trail - trail) / b_trail
-        buckets = bucket_means(s.iloc[:n], CURVE_SPAN, BUCKET)
-        b_buckets = bucket_means(base.iloc[:n], CURVE_SPAN, BUCKET)
+        buckets = bucket_means(s_c, CURVE_SPAN, BUCKET)
+        b_buckets = bucket_means(b_c, CURVE_SPAN, BUCKET)
         k = min(len(buckets), len(b_buckets))
         gaps = (b_buckets.values[:k] - buckets.values[:k]) / b_buckets.values[:k]
         holds = bool((gaps > 0).all())
@@ -89,7 +102,7 @@ def main() -> int:
         any_clear |= clears
 
         print(f"{arm}")
-        print(f"  rows={len(s):,} (paired over {n:,})")
+        print(f"  steps={len(s):,} (paired on {n:,} common steps)")
         print(f"  trailing loss_play={trail:.5f}  rel-improvement={rel * 100:+.3f}%"
               f"  (bar {REL_BAR * 100:.0f}%)")
         print(f"  per-{BUCKET // 1000}k-bucket gaps over final "
