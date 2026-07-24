@@ -153,6 +153,27 @@ def _append_gate_row(path: Path, iteration: int, v: dict) -> None:
                         f"{s['ci_hi']:.4f}", int(v["promote"])])
 
 
+def _gate_logged_iters(path: Path) -> set[int]:
+    """Iters that already have verdict rows in `promotion_gate.csv`. Used on resume to
+    detect a greedy-gate window killed mid-tournament: the Resume Bundle is saved
+    BEFORE the gate runs, so on restart the boundary is already behind the loop and
+    its window would silently be skipped."""
+    if not path.exists():
+        return set()
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            rows = list(csv.reader(fh))
+    except OSError:
+        return set()
+    out: set[int] = set()
+    for row in rows[1:]:
+        try:
+            out.add(int(row[0]))
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
 def _kl_controllers(config, decision_types) -> dict:
     kl = config.get("kl", {})
     out = {}
@@ -432,6 +453,69 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     snapshot_every = int(config.get("snapshot_every", 5))
     log_state = {"writer": None, "fh": None, "last_t": time.perf_counter()}
 
+    def _run_greedy_window(boundary: int) -> None:
+        """One greedy-gate mini-tournament for the window ending at iter `boundary`
+        (deals seeded by the boundary, so a re-run reproduces the same window)."""
+        from tichu_training.ppo.greedy_gate import record_greedy_window
+        eval_idx = boundary // greedy_every
+        eval_positions = generate_full_position_pool(
+            seed=1_000_000_000 + eval_idx * greedy_n_deals, n=greedy_n_deals
+        )
+        if progress:
+            print(f"  greedy gate eval @ iter {boundary}: starting {greedy_n_deals} "
+                  f"deals x2 vs {[o for o, _ in gate_opp_cycle]} ({greedy_workers}w)...",
+                  flush=True)
+        record_greedy_window(
+            gate, models, gate_opp_cycle, arch_cfg=gate_arch_cfg,
+            positions=eval_positions, skill_decile=skill_decile,
+            workers=greedy_workers, export_root=run_dir / "_gate_export",
+        )
+        if progress:
+            print(f"  greedy gate eval @ iter {boundary}: done", flush=True)
+
+    def _gate_verdict(boundary: int) -> None:
+        """Draw the promotion verdict for the window ending at iter `boundary` once
+        full, log it, and on a CI-validated win promote (champion file + serving
+        snapshot + optional play re-anchor)."""
+        if not gate.ready():
+            return
+        v = gate.verdict()
+        _append_gate_row(gate_log_path, boundary, v)
+        if v["promote"]:
+            _save_champion(champion_path, models, critic)
+            # Serving snapshot AT the promotion iter so the champion is directly
+            # check_cotrain-able: the regular periodic snapshots are the LEARNER,
+            # which wanders after a promotion, so the nearest one understates the
+            # champion. Same naming, so it coincides cleanly with a periodic save.
+            for dt in _NET_TYPES:
+                save_checkpoint(models[dt], optimizer, step=boundary,
+                                path=str(snapshots_dir / f"iter_{boundary:05d}_{dt}.bin"))
+            if reanchor_on_promote:
+                # Validated escape: the KL anchor follows the new champion, so the
+                # learner can move further from the original BC next window.
+                bc_models["play"].load_state_dict(models["play"].state_dict())
+        if progress:
+            opp_str = "  ".join(
+                f"{o} {s['mean']:+.1f}[{s['ci_lo']:+.1f},{s['ci_hi']:+.1f}]"
+                for o, s in v["opponents"].items())
+            print(f"  gate {'PROMOTE' if v['promote'] else 'hold'} @ iter {boundary}: "
+                  f"{opp_str}", flush=True)
+        gate.reset()
+
+    # Resume catch-up: the Resume Bundle is written BEFORE the gate window runs, so
+    # a kill DURING the greedy mini-tournament resumes with start_iter already at the
+    # boundary — the in-loop modulo check never re-fires and the window would be
+    # silently skipped. Detect the hole (boundary reached, no verdict rows for it in
+    # promotion_gate.csv) and re-run that window first: same learner weights (the
+    # bundle at the boundary) and same deal seed, so it reproduces the killed eval.
+    if (resumed and gate is not None and gate_greedy and start_iter > 0
+            and start_iter % greedy_every == 0
+            and start_iter not in _gate_logged_iters(gate_log_path)):
+        print(f"resume: greedy gate window @ iter {start_iter} was interrupted by the "
+              f"shutdown — running it first, then resuming training", flush=True)
+        _run_greedy_window(start_iter)
+        _gate_verdict(start_iter)
+
     def _on_iteration(iteration: int, stats: dict) -> None:
         now = time.perf_counter()
         row = {"iter": iteration, "wall_s": round(now - log_state["last_t"], 3),
@@ -475,47 +559,14 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         # below fires right after. Fresh, unseen deals each window (base 1e9, far above
         # the rollout/vine seed streams) so the gate can't overfit a fixed eval set.
         if gate is not None and gate_greedy and (iteration + 1) % greedy_every == 0:
-            from tichu_training.ppo.greedy_gate import record_greedy_window
-            eval_idx = (iteration + 1) // greedy_every
-            eval_positions = generate_full_position_pool(
-                seed=1_000_000_000 + eval_idx * greedy_n_deals, n=greedy_n_deals
-            )
-            record_greedy_window(
-                gate, models, gate_opp_cycle, arch_cfg=gate_arch_cfg,
-                positions=eval_positions, skill_decile=skill_decile,
-                workers=greedy_workers, export_root=run_dir / "_gate_export",
-            )
-            if progress:
-                print(f"  greedy gate eval @ iter {iteration + 1}: {greedy_n_deals} deals x2 "
-                      f"vs {[o for o, _ in gate_opp_cycle]} ({greedy_workers}w)", flush=True)
+            _run_greedy_window(iteration + 1)
 
         # Champion promotion gate verdict: this iter's per-game margins were recorded
         # in rollout_collect (sampled) or by the greedy eval above; once a full window
         # has accumulated, draw a verdict and — on a CI-validated win — overwrite the
         # champion file with the current nets, then reset for the next window.
-        if gate is not None and gate.ready():
-            v = gate.verdict()
-            _append_gate_row(gate_log_path, iteration + 1, v)
-            if v["promote"]:
-                _save_champion(champion_path, models, critic)
-                # Serving snapshot AT the promotion iter so the champion is directly
-                # check_cotrain-able: the regular periodic snapshots are the LEARNER,
-                # which wanders after a promotion, so the nearest one understates the
-                # champion. Same naming, so it coincides cleanly with a periodic save.
-                for dt in _NET_TYPES:
-                    save_checkpoint(models[dt], optimizer, step=iteration + 1,
-                                    path=str(snapshots_dir / f"iter_{iteration + 1:05d}_{dt}.bin"))
-                if reanchor_on_promote:
-                    # Validated escape: the KL anchor follows the new champion, so the
-                    # learner can move further from the original BC next window.
-                    bc_models["play"].load_state_dict(models["play"].state_dict())
-            if progress:
-                opp_str = "  ".join(
-                    f"{o} {s['mean']:+.1f}[{s['ci_lo']:+.1f},{s['ci_hi']:+.1f}]"
-                    for o, s in v["opponents"].items())
-                print(f"  gate {'PROMOTE' if v['promote'] else 'hold'} @ iter {iteration + 1}: "
-                      f"{opp_str}", flush=True)
-            gate.reset()
+        if gate is not None:
+            _gate_verdict(iteration + 1)
 
         if progress:
             print(

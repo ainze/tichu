@@ -1,0 +1,53 @@
+# Trunk-capacity probe, BOTH-AXES arm: 2048 x 8 (~4x trunk params vs 1024 x 4).
+#
+# Dual purpose:
+#   1) Fourth arm of the BC-fit probe (depth+width together — bounds what any
+#      single-axis arm could reach).
+#   2) The warm-start + KL-anchor for the cotrain NEGATIVE CONTROL
+#      (configs/cotrain_v6_pbrs_resid_wish_gated_wishfix_trunk2048x8.yaml):
+#      verify a much bigger trunk does NOT improve over time vs the shipped
+#      champion. Cotrain requires an arch-matched BC, hence this run even if
+#      the BC bar is not cleared.
+# Pre-registered design, bar, and closing rule:
+# docs/notes/2026-07-03-trunk-capacity-probe-v6-preregistration.md
+#
+# IDENTICAL to configs/bc_full_corpus_v6_wishfix_memmap.yaml in bundle / LR /
+# batch / seed / shuffle / head_weights — the ONLY deltas are trunk_hidden
+# 1024 -> 2048 and trunk_depth 4 -> 8. Paired with the baseline run via same
+# seed + shuffle. ~68M trunk params; watch the first minutes for OOM at batch
+# 1024 (if it OOMs, drop the arm — changing batch size would break pairing).
+#
+# Run (foreground; sequential with the other arms):
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\epic-golick-b8678d\src"
+#   python -c "import tichu_training.featurizer as f; print(f.FEATURIZER_VERSION)"   # must print v6
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs\bc_full_corpus_v6_wishfix_trunk_2048x8_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_corpus_v6_wishfix_trunk_2048x8_memmap `
+#     --device  cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v6_wishfix\bc
+
+model:
+  trunk_hidden: 2048        # <-- delta vs baseline (1024)
+  trunk_depth: 8            # <-- delta vs baseline (4)
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+shuffle: true
+shuffle_buffer: 1048576
+shuffle_block: 65536
+
+checkpoint_every: 100000
+checkpoint_every_batches: 50000
+seed: 0

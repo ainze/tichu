@@ -1,0 +1,45 @@
+# Trunk-capacity probe, WIDTH arm: 2048 x 4 (vs the 1024 x 4 baseline).
+#
+# Param-matched (~) to the 1024x8 depth arm — both add ~8-9M trunk params — so
+# if exactly one wins, the SHAPE (depth vs width) is the finding, not the count.
+# See the depth arm's header + the pre-registration note for the full design:
+# docs/notes/2026-07-03-trunk-capacity-probe-v6-preregistration.md
+#
+# IDENTICAL to configs/bc_full_corpus_v6_wishfix_memmap.yaml in bundle / LR /
+# batch / seed / shuffle / head_weights — the ONLY delta is trunk_hidden
+# 1024 -> 2048. Paired with the baseline run via same seed + shuffle.
+#
+# Run (foreground; sequential with the other arms):
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\epic-golick-b8678d\src"
+#   python -c "import tichu_training.featurizer as f; print(f.FEATURIZER_VERSION)"   # must print v6
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs\bc_full_corpus_v6_wishfix_trunk_2048x4_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_corpus_v6_wishfix_trunk_2048x4_memmap `
+#     --device  cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v6_wishfix\bc
+
+model:
+  trunk_hidden: 2048        # <-- the ONLY arch delta vs baseline
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+shuffle: true
+shuffle_buffer: 1048576
+shuffle_block: 65536
+
+checkpoint_every: 100000
+checkpoint_every_batches: 50000
+seed: 0
