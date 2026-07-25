@@ -346,6 +346,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     gate = None
     champion_path = None
     gate_opp_cycle = None   # [(opponent_name, weights_path)] the rollout alternates over
+    gate_eval_cycle = None  # gate_opp_cycle + observe-only extras — what the greedy eval scores
     gate_log_path = run_dir / "promotion_gate.csv"
     _save_champion = None
     reanchor_on_promote = False
@@ -397,15 +398,24 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                     _save_champion(bc_opp_path, bc_models, critic)  # frozen BC opponent
                 gate_opp_cycle.append(("bc", bc_opp_path))
                 opponents.append("bc")
-            # extra_opponents: additional FIXED external models the candidate must
-            # ALSO beat to promote (e.g. the current shipped champion). Each entry is
-            # `{name, path}` where path is a rollout-weights .pt ({"models": {net:
-            # state_dict}}) whose arch matches THIS run's _arch_cfg (so both the rollout
-            # worker's _league_opponent and the greedy gate's export_opponent rebuild it
-            # with _build_models(gate_arch_cfg)). They join the cycle exactly like
-            # champion/bc: the rollout best-responds to each in turn and the gate scores
-            # the candidate against every one — promotion needs a CI-validated win over
-            # ALL. Unlike `bc`, these never advance (fixed reference points).
+            # extra_opponents: additional FIXED external models (e.g. the current
+            # shipped champion). Each entry is `{name, path[, require]}` where path is
+            # a rollout-weights .pt ({"models": {net: state_dict}}) whose arch matches
+            # THIS run's _arch_cfg (so both the rollout worker's _league_opponent and
+            # the greedy gate's export_opponent rebuild it with
+            # _build_models(gate_arch_cfg)). Unlike `bc`, these never advance (fixed
+            # reference points). Two modes per entry:
+            #   require: true (default) — joins the cycle exactly like champion/bc:
+            #     the rollout best-responds to it in turn AND promotion needs a
+            #     CI-validated win over it (beat-ALL).
+            #   require: false — OBSERVE-ONLY: the greedy gate scores it every window
+            #     (its margin lands in promotion_gate.csv → plot panel 6) but it is
+            #     excluded from the promote decision AND from the rollout opponent
+            #     cycle, so it never hard-blocks the ratchet and never shifts the
+            #     training distribution. Greedy gate only (a sampled window would
+            #     never fill an un-rolled-out stream).
+            gate_observe_only: list[str] = []
+            gate_eval_extras: list[tuple[str, str]] = []
             for spec in gate_cfg.get("extra_opponents", []) or []:
                 name = str(spec["name"])
                 path = str(spec["path"])
@@ -414,8 +424,20 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 if not Path(path).exists():
                     raise FileNotFoundError(
                         f"extra_opponent {name!r} weights not found: {path}")
-                gate_opp_cycle.append((name, path))
+                gate_eval_extras.append((name, path))
                 opponents.append(name)
+                if bool(spec.get("require", True)):
+                    gate_opp_cycle.append((name, path))
+                else:
+                    gate_observe_only.append(name)
+            if gate_observe_only and not gate_greedy:
+                raise ValueError(
+                    "extra_opponents with require:false need the greedy gate "
+                    f"(sampled windows never fill an observe-only stream): {gate_observe_only}")
+            # The greedy eval scores EVERY opponent (required + observe-only); the
+            # rollout alternates over gate_opp_cycle (required only).
+            gate_eval_cycle = gate_opp_cycle + [
+                e for e in gate_eval_extras if e[0] in gate_observe_only]
             # A greedy window is ONE mini-tournament => 2*n_deals seat-swapped obs per
             # opponent, filled in a single eval (so gate.ready() trips immediately after
             # it); the sampled window instead accumulates positions_per_iter per iter.
@@ -427,11 +449,14 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 threshold=float(gate_cfg.get("threshold", 0.0)),
                 bootstrap_iters=int(gate_cfg.get("bootstrap_iters", 1000)),
                 seed=pool_seed,
+                observe_only=tuple(gate_observe_only),
             )
             if progress:
                 src = (f"GREEDY mini-tournament ({greedy_n_deals} deals/opp every "
                        f"{greedy_every} iters, {greedy_workers}w)" if gate_greedy
                        else "sampled rollout reward")
+                if gate_observe_only:
+                    src += f", observe-only (never required): {gate_observe_only}"
                 print(f"  promotion_gate ON: opponents={opponents}, window {gate.window_games} games/opp, "
                       f"threshold {gate.threshold:+g}, reanchor_on_promote={reanchor_on_promote}, "
                       f"margin source = {src}"
@@ -463,10 +488,10 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
         )
         if progress:
             print(f"  greedy gate eval @ iter {boundary}: starting {greedy_n_deals} "
-                  f"deals x2 vs {[o for o, _ in gate_opp_cycle]} ({greedy_workers}w)...",
+                  f"deals x2 vs {[o for o, _ in gate_eval_cycle]} ({greedy_workers}w)...",
                   flush=True)
         record_greedy_window(
-            gate, models, gate_opp_cycle, arch_cfg=gate_arch_cfg,
+            gate, models, gate_eval_cycle, arch_cfg=gate_arch_cfg,
             positions=eval_positions, skill_decile=skill_decile,
             workers=greedy_workers, export_root=run_dir / "_gate_export",
         )

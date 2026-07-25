@@ -51,15 +51,18 @@ promotion_gate:
   bootstrap_iters:     1000
   reanchor_on_promote: true
   also_beat_bc:        true      # opponent "bc" = the wishfix BC (fixed human reference)
-  # Third fixed opponent (the shipped champion) is TEMPORARILY DISABLED. At iter 512
-  # the learner was -9.9 vs cpfix3328 (CI [-14.6,-5.2]) — well out of range — so
-  # requiring it would hard-block every promotion. Gate on {champion, bc} only until
-  # the champion+bc ratchet climbs the learner into range, THEN re-enable this block
-  # (stop + resume with the same command; the gate rebuilds from config). Build the
-  # file with scripts/build_cpfix_opponent.py (already done).
-  # extra_opponents:
-  #   - name: cpfix3328
-  #     path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\iter03328_opponent.pt
+  # Third fixed opponent (the shipped champion), OBSERVE-ONLY (2026-07-24, λ=1 arm):
+  # scored by the greedy eval every window so its margin lands in promotion_gate.csv
+  # (plot_cotrain_csv panel 6 picks the stream up automatically), but require:false
+  # keeps it OUT of the promote decision (still beat-{champion,bc} like before) and
+  # OUT of the rollout opponent cycle (training distribution unchanged — the λ=1 arm
+  # stays single-variable). Costs one extra 4096-deal mini-tournament per window.
+  # It was previously fully disabled because as a REQUIRED opponent it hard-blocked
+  # every promotion (learner −9.9 vs cpfix3328 at iter 512, out of range).
+  extra_opponents:
+    - name: cpfix3328
+      path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\iter03328_opponent.pt
+      require: false
 
 model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
 schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
@@ -107,7 +110,16 @@ ppo:
   positions_per_iter: 512
   pool_seed:          0
   gamma:              1.0
-  lam:                0.95
+  lam:                1.0    # was 0.95; λ=1 arm @ resume ~iter 22.46k (2026-07-24 advantage-SNR note):
+                             # at λ=1 the advantage is exactly R − V(s), so the critic's ±100-300
+                             # call-hinge/endgame misvaluations (measured 54-77% of its residual)
+                             # become a pure baseline and CANNOT bias the gradient. Expect value_loss
+                             # to JUMP to ~Var(R|s)≈30-40k (the target becomes raw R) — that is the
+                             # arm working, not a regression; read the greedy gate windows instead.
+                             # Bar (pre-registered): ≥2 honest promotions in ~40 windows (pooled
+                             # post-promotion margin stays >0) or pooled champion-margin CI-above
+                             # the λ=0.95 stall band (−0.48±0.21, iters 10368-22462). Revert to 0.95
+                             # if the gate reads match the old stall at matched window count.
   clip_eps:           0.1
   vf_coef:            0.5
   ppo_epochs:         3

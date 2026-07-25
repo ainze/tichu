@@ -284,3 +284,60 @@ def test_extra_opponents_missing_file_raises(tmp_path):
     ]
     with pytest.raises(FileNotFoundError):
         run_cotrain_training(config, progress=False)
+
+
+def test_extra_opponent_require_false_is_scored_but_never_required(tmp_path):
+    # require:false = observe-only visibility stream (e.g. the shipped champion):
+    # the greedy eval scores it every window and its rows land in the CSV (that is
+    # what plot panel 6 reads), but it is excluded from the promote decision and
+    # from the rollout opponent cycle. At a pass-everything threshold the gate
+    # promotes with the watch stream present; the decision semantics themselves
+    # (a decisively LOSING observe-only stream not blocking) are pinned by the
+    # PromotionGate unit tests.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=-1e9, also_beat_bc=True)
+    opp_path = tmp_path / "watch_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "watch", "path": str(opp_path), "require": False}]
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc", "watch"}
+    assert all(r["promoted"] == "1" for r in rows)
+    assert all(int(r["n"]) == 2 * _GREEDY_N_DEALS for r in rows), \
+        "observe-only stream must be scored by the same mini-tournament window"
+
+
+def test_extra_opponent_require_false_still_logged_on_hold(tmp_path):
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=1e9, also_beat_bc=True)
+    opp_path = tmp_path / "watch_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "watch", "path": str(opp_path), "require": False}]
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc", "watch"}
+    assert all(r["promoted"] == "0" for r in rows)
+
+
+def test_extra_opponent_require_false_needs_the_greedy_gate(tmp_path):
+    # The sampled gate reads margins off the rollout stream; an observe-only
+    # opponent is never rolled out, so its window could never fill — reject the
+    # config loudly instead of logging n=0 rows forever.
+    import pytest
+    torch.manual_seed(0)
+    config = _config(tmp_path, threshold=0.0)  # sampled gate (greedy absent)
+    opp_path = tmp_path / "watch_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "watch", "path": str(opp_path), "require": False}]
+
+    with pytest.raises(ValueError, match="require:false"):
+        run_cotrain_training(config, progress=False)
