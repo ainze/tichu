@@ -467,6 +467,20 @@ _Avoid_: Q-value (bare), value, advantage (bare — those collide with critic/AW
 The **Agent** whose `act` runs **piKL** over the frozen **BC Anchor** — the strategy v1 measures against `master` in the **Tournament**. A latency-bearing offline strength experiment first (like the **Search Agent**), not a served **Difficulty** tier in v1.
 _Avoid_: piKL bot, anchored agent.
 
+### Vine / paired-advantage terms
+
+**Vine**:
+The play-head advantage estimator of [ADR-0035](docs/adr/0035-vine-paired-advantage-ppo.md): dedicated deterministic games in which, at sampled Play Decisions, candidate actions are forced and played out to round end **in the same world**, the advantage being each branch's return relative to the per-decision branch mean — luck-free across branches, zero estimator variance given the world. Vine rows REPLACE the play head's GAE group. Fixed-anchor vine was safe-but-ball-capped; blind re-anchoring died of self-play co-drift (−23.59).
+_Avoid_: paired PPO, branch PPO, counterfactual PPO.
+
+**Reference Field**:
+The **frozen** policy that plays **all four seats** of every Vine branch continuation (v3, the frozen-reference successor — [ADR-0040](docs/adr/0040-frozen-reference-vine-pooled-ratchet.md)). It is the rolling gate champion: frozen between promotions, and advanced **atomically with the champion and the play KL-anchor** when — and only when — the greedy gate promotes on a CI-validated win. **Invariant: the Reference Field may only ever be set to weights that have passed the greedy gate — never advanced on a timer, never the live learner.** That invariant is the entire difference between v3 and the co-drift death of ADR-0035's re-anchoring escalation.
+_Avoid_: field (bare), sparring partner, evaluator (bare), frozen policy (bare).
+
+**Pooled Verdict**:
+The greedy gate's cumulative promotion mode ([ADR-0040](docs/adr/0040-frozen-reference-vine-pooled-ratchet.md)): per-window margins **accumulate across consecutive windows against the unchanged champion** (fresh deals each window make pooling valid), the verdict is drawn on the pooled sample each window, promotion fires on pooled CI_lo > 0, and the pool resets on promotion. Exists because the per-window gate needs a true +~5 edge at n=8,192 while a KL-ball step of real improvement is +0.5–2 — without pooling, the ratchet's minimum bankable step exceeds the mechanism's natural step size and provable-but-small gains can never bank (the measured λ=1-arm stall signature).
+_Avoid_: cumulative gate (bare), window pooling (bare), rolling verdict.
+
 ### Endgame / claim terms
 
 These are **deterministic, card-counted certainties**, categorically distinct from the Monte-Carlo **PIMC** vocabulary (**Determinized World**, **Leaf Rollout**) — never describe a claim-solver result as a "search" or a "rollout". Proposed in the grilling session of 2026-06-05 as the direction after the entire Phase-2 search / search+learning line was empirically falsified (see [ADR-0031](docs/adr/0031-search-and-learning-loop.md) "Final synthesis").

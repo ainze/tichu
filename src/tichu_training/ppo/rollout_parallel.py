@@ -81,19 +81,29 @@ def _league_opponent(opp_weights_path: str, *, skill_decile, seed: int, train_wi
 def _vine_chunk(task):
     """Collect vine play-head rows for a chunk of dedicated vine games (ADR-0035).
     Loads the live weights like `_rollout_chunk`, then runs the deterministic
-    branch-and-compare collection on this worker's positions."""
+    branch-and-compare collection on this worker's positions. With a Reference
+    Field path (ADR-0040) the frozen reference nets load into the worker's
+    second skeleton set (the league-opponent mechanism) and play every branch
+    continuation."""
     from tichu_training.ppo.vine import collect_vine_rows
 
     (positions, weights_path, decisions_per_game, branches, skill_decile, seed,
-     emit_branches, min_abs_advantage) = task
+     emit_branches, min_abs_advantage, ref_weights_path, stratify) = task
     state = torch.load(weights_path, map_location="cpu", weights_only=False)
     models = _WORKER["models"]
     for key, module in models.items():
         module.load_state_dict(state["models"][key])
+    reference_models = None
+    if ref_weights_path is not None:
+        ref_state = torch.load(ref_weights_path, map_location="cpu", weights_only=False)
+        reference_models = _opponent_models()
+        for key, module in reference_models.items():
+            module.load_state_dict(ref_state["models"][key])
     return collect_vine_rows(
         models, positions, decisions_per_game=decisions_per_game,
         branches=branches, skill_decile=skill_decile, seed=seed,
         emit_branches=emit_branches, min_abs_advantage=min_abs_advantage,
+        reference_models=reference_models, stratify=stratify,
     )
 
 
@@ -165,16 +175,20 @@ class ParallelRollout:
 
     def collect_vine(self, positions, weights_path: str, *, decisions_per_game: int,
                      branches: int, base_seed: int, emit_branches: bool = False,
-                     min_abs_advantage: float = 0.0) -> list[dict]:
+                     min_abs_advantage: float = 0.0,
+                     ref_weights_path: str | None = None,
+                     stratify: bool = False) -> list[dict]:
         """Vine play-head rows (ADR-0035) for dedicated vine games, fanned across
-        the same worker pool. Deterministic per (positions, weights, base_seed)."""
+        the same worker pool. Deterministic per (positions, weights, base_seed).
+        `ref_weights_path` (ADR-0040) is the Reference Field weights file — the
+        gate's champion — whose nets play every branch continuation."""
         positions = list(positions)
         w = max(1, min(self._workers, len(positions)))
         chunks = [positions[i::w] for i in range(w)]
         tasks = [
             (chunk, weights_path, int(decisions_per_game), int(branches),
              self._skill_decile, base_seed + i, bool(emit_branches),
-             float(min_abs_advantage))
+             float(min_abs_advantage), ref_weights_path, bool(stratify))
             for i, chunk in enumerate(chunks) if chunk
         ]
         results = self._pool.map(_vine_chunk, tasks)

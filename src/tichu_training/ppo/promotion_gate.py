@@ -33,18 +33,40 @@ class PromotionGate:
     every opponent has a full window AND its 95% bootstrap CI lower bound exceeds
     `threshold` (default 0 = any positive). Non-overlapping windows: `reset()` after
     each verdict.
+
+    `observe_only` names a subset of `opponents` that are scored and reported in
+    every verdict (so their margin lands in `promotion_gate.csv` and the plot) but
+    are excluded from BOTH `ready()` and the promote decision — fixed visibility
+    references (e.g. the shipped champion) that must never hard-block the ratchet.
+
+    `pooled` is the **Pooled Verdict** mode (ADR-0040): margins accumulate across
+    consecutive windows against the unchanged champion (fresh deals per window make
+    pooling valid) and `conclude()` clears the pool only on a promotion — so a true
+    +1-2 edge, invisible to any single window's CI, banks once the pooled CI
+    resolves. Off (default) = the original one-window-per-verdict ratchet.
     """
 
     def __init__(self, *, opponents=("champion",), window_games: int,
-                 threshold: float = 0.0, bootstrap_iters: int = 1000, seed: int = 0) -> None:
+                 threshold: float = 0.0, bootstrap_iters: int = 1000, seed: int = 0,
+                 observe_only=(), pooled: bool = False) -> None:
         if window_games < 1:
             raise ValueError(f"window_games must be >= 1, got {window_games}")
         if not opponents:
             raise ValueError("need at least one opponent")
         self.opponents = tuple(opponents)
+        self.observe_only = frozenset(observe_only)
+        unknown = self.observe_only - set(self.opponents)
+        if unknown:
+            raise ValueError(
+                f"observe_only names not in opponents: {sorted(unknown)}")
+        self.required = tuple(o for o in self.opponents if o not in self.observe_only)
+        if not self.required:
+            raise ValueError(
+                "every opponent is observe_only — need at least one required opponent")
         self.window_games = int(window_games)
         self.threshold = float(threshold)
         self.bootstrap_iters = int(bootstrap_iters)
+        self.pooled = bool(pooled)
         self._rng = np.random.default_rng(seed)
         self._margins: dict[str, list[float]] = {o: [] for o in self.opponents}
 
@@ -59,8 +81,9 @@ class PromotionGate:
         return len(self._margins[opponent])
 
     def ready(self) -> bool:
-        """True once EVERY opponent has accumulated a full window."""
-        return all(len(self._margins[o]) >= self.window_games for o in self.opponents)
+        """True once every REQUIRED opponent has accumulated a full window
+        (observe-only streams never gate readiness)."""
+        return all(len(self._margins[o]) >= self.window_games for o in self.required)
 
     def _ci(self, x: list[float]) -> tuple[float, float, float]:
         arr = np.asarray(x, dtype=float)
@@ -74,13 +97,22 @@ class PromotionGate:
 
     def verdict(self) -> dict:
         """`{promote, opponents: {name: {n, mean, ci_lo, ci_hi}}}`. `promote` requires
-        a full window for EVERY opponent AND every CI lower bound above `threshold`."""
+        a full window for every REQUIRED opponent AND each of their CI lower bounds
+        above `threshold`; observe-only streams are reported but never consulted."""
         opp = {}
         for o in self.opponents:
             mean, lo, hi = self._ci(self._margins[o])
             opp[o] = {"n": len(self._margins[o]), "mean": mean, "ci_lo": lo, "ci_hi": hi}
-        promote = self.ready() and all(opp[o]["ci_lo"] > self.threshold for o in self.opponents)
+        promote = self.ready() and all(opp[o]["ci_lo"] > self.threshold for o in self.required)
         return {"promote": promote, "opponents": opp}
+
+    def conclude(self, verdict: dict) -> None:
+        """Close out a drawn verdict: clear the accumulated margins, EXCEPT in
+        pooled mode after a hold — there the pool keeps accumulating until a
+        promotion resolves it (the Pooled Verdict ratchet)."""
+        if self.pooled and not verdict["promote"]:
+            return
+        self.reset()
 
     def reset(self) -> None:
         """Drop the accumulated windows for all opponents (call after each verdict)."""

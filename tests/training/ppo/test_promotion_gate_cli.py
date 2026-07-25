@@ -284,3 +284,92 @@ def test_extra_opponents_missing_file_raises(tmp_path):
     ]
     with pytest.raises(FileNotFoundError):
         run_cotrain_training(config, progress=False)
+
+
+def test_extra_opponent_require_false_is_scored_but_never_required(tmp_path):
+    # require:false = observe-only visibility stream (e.g. the shipped champion):
+    # the greedy eval scores it every window and its rows land in the CSV (that is
+    # what plot panel 6 reads), but it is excluded from the promote decision and
+    # from the rollout opponent cycle. At a pass-everything threshold the gate
+    # promotes with the watch stream present; the decision semantics themselves
+    # (a decisively LOSING observe-only stream not blocking) are pinned by the
+    # PromotionGate unit tests.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=-1e9, also_beat_bc=True)
+    opp_path = tmp_path / "watch_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "watch", "path": str(opp_path), "require": False}]
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc", "watch"}
+    assert all(r["promoted"] == "1" for r in rows)
+    assert all(int(r["n"]) == 2 * _GREEDY_N_DEALS for r in rows), \
+        "observe-only stream must be scored by the same mini-tournament window"
+
+
+def test_extra_opponent_require_false_still_logged_on_hold(tmp_path):
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=1e9, also_beat_bc=True)
+    opp_path = tmp_path / "watch_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "watch", "path": str(opp_path), "require": False}]
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc", "watch"}
+    assert all(r["promoted"] == "0" for r in rows)
+
+
+def test_extra_opponent_require_false_needs_the_greedy_gate(tmp_path):
+    # The sampled gate reads margins off the rollout stream; an observe-only
+    # opponent is never rolled out, so its window could never fill — reject the
+    # config loudly instead of logging n=0 rows forever.
+    import pytest
+    torch.manual_seed(0)
+    config = _config(tmp_path, threshold=0.0)  # sampled gate (greedy absent)
+    opp_path = tmp_path / "watch_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "watch", "path": str(opp_path), "require": False}]
+
+    with pytest.raises(ValueError, match="require:false"):
+        run_cotrain_training(config, progress=False)
+
+
+def test_pooled_gate_accumulates_across_greedy_windows_in_the_csv(tmp_path):
+    # Pooled Verdict wiring (ADR-0040): with an unreachable threshold every window
+    # HOLDS, and in pooled mode the recorded n must GROW across evals (the pool
+    # survives conclude()) instead of resetting to one window's worth.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=1e9)
+    config["promotion_gate"]["pooled"] = True
+    config["ppo"]["iterations"] = 3  # greedy_every=1 -> >= 2 gate evals
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = [r for r in _gate_rows(run_dir) if r["opponent"] == "champion"]
+    ns = [int(r["n"]) for r in rows]
+    assert len(ns) >= 2 and ns[1] == ns[0] + 2 * _GREEDY_N_DEALS, \
+        f"pooled window must accumulate across evals, got n sequence {ns}"
+    assert all(r["promoted"] == "0" for r in rows)
+
+
+def test_vine_reference_requires_the_promotion_gate(tmp_path):
+    # vine.reference: champion makes the gate's champion file the Reference Field
+    # (ADR-0040) — without the gate there is no champion file and no promotion to
+    # advance it, so the config must be rejected loudly at startup.
+    import pytest
+    config = _config(tmp_path, threshold=0.0)
+    config["promotion_gate"]["enabled"] = False
+    config["vine"] = {"enabled": True, "reference": "champion"}
+
+    with pytest.raises(ValueError, match="vine.reference"):
+        run_cotrain_training(config, progress=False)
