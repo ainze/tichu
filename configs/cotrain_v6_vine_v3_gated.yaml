@@ -1,0 +1,124 @@
+# Vine v3 — frozen-reference vine + Pooled Verdict ratchet (ADR-0040).
+#
+# The funded strength bet after the 2026-07-24/25 diagnosis: play-head advantages
+# come from deterministic paired branch playouts under a frozen REFERENCE FIELD
+# (the rolling champion; all four seats; advanced only on gate-proven promotions),
+# replacing the GAE/critic path entirely for play. The gate runs in POOLED mode so
+# provable-but-small steps (+0.5-2/ball) can bank across windows. Everything
+# non-play is byte-identical to the wishfix recipe (single-variable discipline).
+#
+# Lineage: cotrain_v6_pbrs_resid_wish_gated_wishfix.yaml. DELTAS:
+#   1) vine: enabled, reference: champion, stratify: true (ADR-0040 §2-3)
+#   2) promotion_gate.pooled: true (Pooled Verdict, ADR-0040 §4)
+#   3) kl.play target 0.02 (best-track-record leash; 0.12 was a plateau-escape
+#      attempt under the now-convicted biased gradient)
+#   4) warm_start = the wishfix run's rolling champion (last CI-proven weights),
+#      converted by scripts/setup_vine_v3.py — which ALSO pre-seeds
+#      _bc_opponent.pt from the wishfix run (else the "bc" gate axis silently
+#      becomes a second champion axis; the trainer only writes it if missing).
+#
+# LAUNCH SEQUENCE (one heavy job per box — stop the lambda=1 wishfix run first):
+#   1. py scripts/setup_vine_v3.py --source-run C:/workbench/tichu/data/runs/cotrain_v6_pbrs_resid_wish_gated_wishfix --config configs/cotrain_v6_vine_v3_gated.yaml
+#   2. py -m tichu_training.cli.train_cotrain --config configs/cotrain_v6_vine_v3_gated.yaml
+#
+# Pre-registered dials + bars (ADR-0040 — read before interpreting ANY number):
+#   valid: pooled champion margin + promotions; cpfix3328 observe stream;
+#          check_cotrain vs cpfix3328 at promotions.
+#   invalid: correction fix-rate, sampled rollout margins, value_loss.
+#   stall = pooled champion CI < +1 for 16 straight windows -> ONE escalation
+#   (games_per_iter 64->128) -> second stall = permanent family kill.
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\cotrain_v6_vine_v3_gated\warm\play.bin
+  schupfen: C:\workbench\tichu\data\runs\cotrain_v6_vine_v3_gated\warm\schupfen.bin
+  tichu:    C:\workbench\tichu\data\runs\cotrain_v6_vine_v3_gated\warm\tichu.bin
+  grand:    C:\workbench\tichu\data\runs\cotrain_v6_vine_v3_gated\warm\grand.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_vine_v3_gated
+
+vine:
+  enabled:           true
+  reference:         champion   # Reference Field = the gate's _champion.pt (ADR-0040 invariant:
+                                # advanced ONLY by promotions; never a timer, never the learner)
+  stratify:          true       # spend rows where the pool lives: hand<=10 or caller-live
+  games_per_iter:    64
+  decisions_per_game: 4
+  branches:          4          # chosen (replayed under the field) + top-3 learner alternatives
+  pool_seed:         900000000  # own stream; v1's 555000 collides with rollout seeds ~iter 1084
+  emit_branches:     true       # positive-advantage alternatives only (v2 NaN fix)
+  min_abs_advantage: 5
+
+promotion_gate:
+  enabled:             true
+  greedy:              true
+  pooled:              true      # Pooled Verdict: margins accumulate across windows vs the
+                                 # unchanged champion; promote on pooled CI_lo>0; reset on promote
+  greedy_n_deals:      4096
+  greedy_every:        128
+  greedy_workers:      10
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true      # champion + play anchor + Reference Field advance atomically
+  also_beat_bc:        true      # "bc" = the TRUE wishfix BC via the setup script's pre-seed
+  extra_opponents:
+    - name: cpfix3328
+      path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\iter03328_opponent.pt
+      require: false             # observe-only: plotted every window, never gates, never rolls out
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }
+grand_model:    { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }   # small proven steps; the ball re-bases on promotion
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8
+  master:                 # out-of-loop check_cotrain target = the shipped champion
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; the ADR-0040 ladder decides long before (hard stop ~10k)
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                1.0      # ADR-0040 §6: the remaining GAE consumers (one-shot early
+                               # decisions) are maximally exposed to the proven-unfixable
+                               # critic bias at lam<1; unbiased-and-parked beats biased-and-
+                               # nudged under their tight leashes. Play does not use GAE at all.
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0

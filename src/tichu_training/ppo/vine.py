@@ -68,12 +68,29 @@ from tichu_training.search.blunder_miner import (
 def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
                       branches: int, skill_decile: int, seed: int,
                       emit_branches: bool = False,
-                      min_abs_advantage: float = 0.0) -> list[dict]:
+                      min_abs_advantage: float = 0.0,
+                      reference_models: dict | None = None,
+                      stratify: bool = False) -> list[dict]:
     """Play `positions` as vine games with the current nets in argmax mode and
     return rows `{features, action, mask, old_logp, advantage}` (all picklable):
     one per sampled play decision, plus one per POSITIVE-advantage alternative
     branch when `emit_branches` (same playouts, denser corrective signal). Rows
-    with `|advantage| < min_abs_advantage` are dropped."""
+    with `|advantage| < min_abs_advantage` are dropped.
+
+    `reference_models` (ADR-0040, vine v3) is the **Reference Field**: a frozen
+    second net set that plays ALL FOUR seats of every branch continuation —
+    including a replay of the chosen action, because the v2 parity trick
+    (chosen return := trunk result) is only valid when field == trunk policy.
+    The field agent keeps the partner-trick guard ON (the greedy gate scores
+    deployed `MLAgent` semantics, and the field must be the same object the
+    gate promotes). The trunk game and the branch RANKING stay the learner's:
+    states are where the learner actually goes, `old_logp` is the learner's
+    logprob (containment unchanged). `None` = v2 behavior, byte-identical.
+
+    `stratify` (ADR-0040) spends the row budget where the recoverable pool
+    lives: decisions with hand <= 10 or a live Tichu/Grand caller are picked
+    first (shuffled), the rest fill any remaining budget — v1's uniform
+    sampling burned ~3/4 of its rows on near-tie open states."""
     from tichu_inference.ml_agent import MLAgent
 
     agent = MLAgent.from_loaded(
@@ -85,6 +102,18 @@ def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
         partner_trick_guard=False,  # train the NET; the guard rides at serving only
     )
     agents = [agent] * 4
+    if reference_models is not None:
+        ref_agent = MLAgent.from_loaded(
+            reference_models["play"],
+            schupfen=reference_models["schupfen"],
+            tichu_call=reference_models["tichu"],
+            grand_call=reference_models["grand"],
+            skill_decile=skill_decile,
+            partner_trick_guard=True,  # deployed semantics — mirror the gate
+        )
+        field_agents = [ref_agent] * 4
+    else:
+        field_agents = None  # v2: branches continue with the learner itself
     rng = random.Random(seed)
     rows: list[dict] = []
     for position in positions:
@@ -93,18 +122,38 @@ def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
             d for d in decisions
             if len(legal_actions_for(d.state.private_view(d.seat))) > 1
         ]
-        rng.shuffle(eligible)
+        if stratify:
+            preferred = [d for d in eligible if _is_pool_state(d)]
+            rest = [d for d in eligible if not _is_pool_state(d)]
+            rng.shuffle(preferred)
+            rng.shuffle(rest)
+            eligible = preferred + rest
+        else:
+            rng.shuffle(eligible)
         for d in eligible[:decisions_per_game]:
             rows.extend(_vine_rows(models, agents, agent, d, result,
                                    branches=branches, skill_decile=skill_decile,
-                                   emit_branches=emit_branches))
+                                   emit_branches=emit_branches,
+                                   field_agents=field_agents))
     if min_abs_advantage > 0.0:
         rows = [r for r in rows if abs(r["advantage"]) >= min_abs_advantage]
     return rows
 
 
+def _is_pool_state(decision) -> bool:
+    """True iff this decision sits where the recoverable pool lives (ADR-0040):
+    the actor holds <= 10 cards, or any Tichu/Grand call is live."""
+    pub = decision.state.public
+    return (
+        len(decision.state.hands[decision.seat]) <= 10
+        or bool(pub.tichu_callers)
+        or bool(pub.grand_tichu_callers)
+    )
+
+
 def _vine_rows(models, agents, agent, decision, result, *, branches: int,
-               skill_decile: int, emit_branches: bool) -> list[dict]:
+               skill_decile: int, emit_branches: bool,
+               field_agents=None) -> list[dict]:
     pv = decision.state.private_view(decision.seat)
     action_idx = _combination_to_action_index(decision.chosen)
     mask = legal_mask("play", decision.state, decision.seat)
@@ -115,18 +164,24 @@ def _vine_rows(models, agents, agent, decision, result, *, branches: int,
     if not alts:
         return []
 
-    # The chosen branch IS the recorded game (deterministic agents — the
-    # blunder-miner's parity invariant), so only alternatives need playouts.
-    chosen_rel = team_relative(result.total, decision.seat)
-    alt_rels = [
-        team_relative(
-            playout_from(agents, decision.state, forced_action=alt,
+    def _branch_rel(forced) -> float:
+        return team_relative(
+            playout_from(field_agents or agents, decision.state,
+                         forced_action=forced,
                          asked_tichu=decision.asked_tichu,
                          initial_scores=decision.initial_scores),
             decision.seat,
         )
-        for alt in alts
-    ]
+
+    # v2 (no Reference Field): the chosen branch IS the recorded game
+    # (deterministic agents — the blunder-miner's parity invariant), so only
+    # alternatives need playouts. v3: field != trunk policy, so the chosen
+    # action is REPLAYED under the field like every other branch.
+    if field_agents is None:
+        chosen_rel = team_relative(result.total, decision.seat)
+    else:
+        chosen_rel = _branch_rel(decision.chosen)
+    alt_rels = [_branch_rel(alt) for alt in alts]
     baseline = (chosen_rel + sum(alt_rels)) / (1 + len(alt_rels))
 
     features = featurize(pv)

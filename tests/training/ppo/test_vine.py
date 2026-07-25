@@ -151,3 +151,74 @@ def test_vine_batch_drives_the_play_subupdate():
     assert "play_kl" in stats and "play_policy_loss" in stats
     assert all(torch.isfinite(torch.tensor(v)) for k, v in stats.items()
                if isinstance(v, float))
+
+
+# --- Reference Field (ADR-0040, vine v3): a FROZEN second policy plays all four
+# seats of every branch continuation — including a replay of the chosen action
+# (the trunk-result parity trick is only valid when field == trunk policy).
+
+def test_reference_field_identical_to_learner_reproduces_v2_exactly():
+    # With reference weights == learner weights the chosen replay retraces the
+    # deterministic trunk continuation (the miner parity invariant), so v3 must
+    # be byte-equal to v2 — the reference split changes nothing but the field.
+    # (Caveat pinned by seed: the field agent carries the partner-trick guard ON
+    # — deployed/gate semantics — so exact parity holds only when the guard
+    # never fires in these games, which these seeded rounds satisfy.)
+    models = _models()
+    reference = _models()  # same seed => identical weights, separate modules
+    base = _rows(models)
+    same = _rows(models, reference_models=reference)
+    assert [r["advantage"] for r in same] == [r["advantage"] for r in base]
+    assert [r["action"] for r in same] == [r["action"] for r in base]
+
+
+def test_reference_field_changes_returns_but_not_states_or_logprobs():
+    # A DIFFERENT reference changes branch continuations (returns/advantages),
+    # but the probed states come from the learner's trunk game and old_logp
+    # stays the LEARNER's logprob of the action — containment semantics.
+    models = _models()
+    torch.manual_seed(123)
+    reference = _build_models(_ARCH)  # different weights
+    base = _rows(models)
+    refd = _rows(models, reference_models=reference)
+    assert [r["features"].tobytes() for r in refd] == \
+           [r["features"].tobytes() for r in base]      # same trunk states
+    assert [r["action"] for r in refd] == [r["action"] for r in base]
+    assert [r["old_logp"] for r in refd] == [r["old_logp"] for r in base]
+    assert [r["advantage"] for r in refd] != [r["advantage"] for r in base]
+
+
+# --- Stratified decision selection (ADR-0040): the row budget prefers the states
+# where the recoverable pool lives — hand <= 10 or a live caller — with uniform
+# fallback (v1's near-tie dilution burned 3/4 of the budget on ~zero rows).
+
+def _hand_size(features) -> int:
+    return int(features[:56].round().sum())  # own_hand section
+
+
+def _caller_live(features) -> bool:
+    from tichu_training.featurizer import SECTION_OFFSETS
+    t = SECTION_OFFSETS["tichu_callers"]
+    g = SECTION_OFFSETS["grand_tichu_callers"]
+    return float(features[t:t + 4].sum() + features[g:g + 4].sum()) > 0
+
+
+def test_stratified_selection_prefers_pool_states():
+    rows = _rows(_models(), stratify=True)
+    assert rows
+    assert all(_hand_size(r["features"]) <= 10 or _caller_live(r["features"])
+               for r in rows), "with enough pool states, all picks must be pool states"
+
+
+def test_stratified_budget_beyond_the_pool_falls_back_instead_of_truncating():
+    # With a budget covering every eligible decision, stratify must merely
+    # REORDER the picks (pool states first) — the probed set is identical to
+    # uniform selection, proving nothing is dropped when the pool runs out.
+    positions = generate_full_position_pool(seed=31, n=1)
+    uni = collect_vine_rows(_models(), positions, decisions_per_game=50,
+                            branches=3, skill_decile=9, seed=5)
+    strat = collect_vine_rows(_models(), positions, decisions_per_game=50,
+                              branches=3, skill_decile=9, seed=5, stratify=True)
+    assert len(strat) == len(uni) > 0
+    assert {r["features"].tobytes() for r in strat} == \
+           {r["features"].tobytes() for r in uni}

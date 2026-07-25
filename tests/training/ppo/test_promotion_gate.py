@@ -130,3 +130,49 @@ def test_observe_only_must_name_a_known_opponent():
 def test_observe_only_cannot_swallow_every_opponent():
     with pytest.raises(ValueError):
         PromotionGate(opponents=("champion",), observe_only=("champion",), window_games=10)
+
+
+# --- Pooled Verdict (ADR-0040): margins accumulate across windows until a pooled
+# CI decides; the pool survives holds and resets only on promotion. Exists because
+# a per-window gate needs a true +~5 edge at n=8192 while a real KL-ball step is
+# +0.5-2 — without pooling, provable-but-small gains can never bank.
+
+def _edge(mean, sd, n):
+    """Deterministic alternating margins with the given mean/sd (no RNG flake)."""
+    return [mean + sd, mean - sd] * (n // 2)
+
+
+def test_pooled_gate_banks_a_small_edge_that_no_single_window_could():
+    gate = PromotionGate(window_games=2000, pooled=True)
+    gate.record("champion", _edge(1.5, 50, 2000))   # SE ~1.1 -> CI_lo < 0
+    v = gate.verdict()
+    assert v["promote"] is False                     # one window can never bank +1.5
+    gate.conclude(v)                                 # HOLD: pool must survive
+    n_at_promote = None
+    for _ in range(5):
+        gate.record("champion", _edge(1.5, 50, 2000))
+        v = gate.verdict()
+        if v["promote"]:
+            n_at_promote = v["opponents"]["champion"]["n"]
+            break
+        gate.conclude(v)
+    # the pooled CI resolves after a few windows (SE shrinks ~1/sqrt(W))
+    assert n_at_promote is not None and n_at_promote >= 4000
+
+
+def test_pooled_gate_resets_only_on_promotion():
+    gate = PromotionGate(window_games=100, pooled=True)
+    gate.record("champion", _edge(50, 10, 100))      # decisive win
+    v = gate.verdict()
+    assert v["promote"] is True
+    gate.conclude(v)
+    assert gate.n("champion") == 0                   # promotion clears the pool
+
+
+def test_unpooled_gate_conclude_resets_after_every_verdict():
+    gate = PromotionGate(window_games=100)           # pooled defaults off
+    gate.record("champion", _edge(0.0, 50, 100))
+    v = gate.verdict()
+    assert v["promote"] is False
+    gate.conclude(v)
+    assert gate.n("champion") == 0                   # old per-window behavior

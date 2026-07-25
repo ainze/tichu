@@ -341,3 +341,35 @@ def test_extra_opponent_require_false_needs_the_greedy_gate(tmp_path):
 
     with pytest.raises(ValueError, match="require:false"):
         run_cotrain_training(config, progress=False)
+
+
+def test_pooled_gate_accumulates_across_greedy_windows_in_the_csv(tmp_path):
+    # Pooled Verdict wiring (ADR-0040): with an unreachable threshold every window
+    # HOLDS, and in pooled mode the recorded n must GROW across evals (the pool
+    # survives conclude()) instead of resetting to one window's worth.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=1e9)
+    config["promotion_gate"]["pooled"] = True
+    config["ppo"]["iterations"] = 3  # greedy_every=1 -> >= 2 gate evals
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = [r for r in _gate_rows(run_dir) if r["opponent"] == "champion"]
+    ns = [int(r["n"]) for r in rows]
+    assert len(ns) >= 2 and ns[1] == ns[0] + 2 * _GREEDY_N_DEALS, \
+        f"pooled window must accumulate across evals, got n sequence {ns}"
+    assert all(r["promoted"] == "0" for r in rows)
+
+
+def test_vine_reference_requires_the_promotion_gate(tmp_path):
+    # vine.reference: champion makes the gate's champion file the Reference Field
+    # (ADR-0040) — without the gate there is no champion file and no promotion to
+    # advance it, so the config must be rejected loudly at startup.
+    import pytest
+    config = _config(tmp_path, threshold=0.0)
+    config["promotion_gate"]["enabled"] = False
+    config["vine"] = {"enabled": True, "reference": "champion"}
+
+    with pytest.raises(ValueError, match="vine.reference"):
+        run_cotrain_training(config, progress=False)

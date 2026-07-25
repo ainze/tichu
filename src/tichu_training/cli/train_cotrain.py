@@ -450,6 +450,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 bootstrap_iters=int(gate_cfg.get("bootstrap_iters", 1000)),
                 seed=pool_seed,
                 observe_only=tuple(gate_observe_only),
+                pooled=bool(gate_cfg.get("pooled", False)),
             )
             if progress:
                 src = (f"GREEDY mini-tournament ({greedy_n_deals} deals/opp every "
@@ -461,6 +462,18 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                       f"threshold {gate.threshold:+g}, reanchor_on_promote={reanchor_on_promote}, "
                       f"margin source = {src}"
                       + (" (league opponent ignored)" if league is not None else ""), flush=True)
+
+    # ADR-0040 early validation (before the worker pool spins up): the Reference
+    # Field is the gate's champion file, so a vine reference without the gate has
+    # neither a file to read nor a promotion to ever advance it.
+    _vine_reference = str(config.get("vine", {}).get("reference", "") or "")
+    if _vine_reference and _vine_reference != "champion":
+        raise ValueError(
+            f"vine.reference must be 'champion' or absent, got {_vine_reference!r}")
+    if _vine_reference == "champion" and gate is None:
+        raise ValueError(
+            "vine.reference: champion requires promotion_gate.enabled — the gate's "
+            "champion file IS the Reference Field and only promotions advance it")
 
     warmup_iters = int(config.get("critic", {}).get("warmup_iters", 0))
     if warmup_iters > 0 and not resumed:
@@ -525,7 +538,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 for o, s in v["opponents"].items())
             print(f"  gate {'PROMOTE' if v['promote'] else 'hold'} @ iter {boundary}: "
                   f"{opp_str}", flush=True)
-        gate.reset()
+        gate.conclude(v)  # Pooled Verdict: the pool survives holds, clears on promotion
 
     # Resume catch-up: the Resume Bundle is written BEFORE the gate window runs, so
     # a kill DURING the greedy mini-tournament resumes with start_iter already at the
@@ -676,6 +689,12 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             # near-tie rows that only dilute the play batch's normalization.
             vine_emit_branches = bool(vine_cfg.get("emit_branches", False))
             vine_min_abs_adv = float(vine_cfg.get("min_abs_advantage", 0.0))
+            vine_stratify = bool(vine_cfg.get("stratify", False))
+            # Reference Field (ADR-0040): branch continuations play under the
+            # gate's champion file — frozen between promotions, advanced only
+            # when a promotion rewrites the file (validated above).
+            vine_ref_path = (str(run_dir / "_champion.pt")
+                             if _vine_reference == "champion" else None)
 
             def vine_collect(iteration: int):
                 # rollout_collect already saved this iteration's weights to
@@ -689,6 +708,8 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                     base_seed=vine_seed + iteration * vine_games,
                     emit_branches=vine_emit_branches,
                     min_abs_advantage=vine_min_abs_adv,
+                    ref_weights_path=vine_ref_path,
+                    stratify=vine_stratify,
                 )
 
     try:
