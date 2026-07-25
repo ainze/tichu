@@ -176,3 +176,19 @@ def test_unpooled_gate_conclude_resets_after_every_verdict():
     assert v["promote"] is False
     gate.conclude(v)
     assert gate.n("champion") == 0                   # old per-window behavior
+
+
+def test_pooled_hold_does_not_redraw_until_new_margins_arrive():
+    # Regression (live vine v3, iter 128-134): the trainer polls ready() every
+    # iteration; historically reset() emptied the pool after each verdict, but a
+    # pooled HOLD keeps the margins — without a new-data latch the same verdict
+    # re-draws (and re-logs) every iteration until the next greedy window.
+    gate = PromotionGate(window_games=100, pooled=True)
+    gate.record("champion", _edge(0.0, 50, 100))
+    v = gate.verdict()
+    assert v["promote"] is False
+    gate.conclude(v)
+    assert not gate.ready(), "concluded hold must not re-arm without new margins"
+    gate.record("champion", _edge(0.0, 50, 100))  # the next window's data arrives
+    assert gate.ready()
+    assert gate.verdict()["opponents"]["champion"]["n"] == 200  # still pooled
