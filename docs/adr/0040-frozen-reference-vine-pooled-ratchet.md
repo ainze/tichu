@@ -124,3 +124,48 @@ steps can bank.
   outside the self-play-gradient family entirely (human-measurement loop /
   accept the plateau) — that closure statement is deliberate and part of the
   bar.
+
+## Outcome (2026-07-26) — KILLED: permanent paired-playout family kill, owner-confirmed
+
+The run (iters 0→1791, 13 gate windows, ~19 h) was **safety-stopped in
+CI-clean regression**, not stalled: pooled champion-axis margin −2.19
+[−3.48, −0.84] at n=98,304 — the learner losing to its own frozen warm-start
+anchor — with zero promotions; the cpfix3328 observe stream (−3.73 [−5.05,
+−2.36]) touched its −2.4 kill line at windows 1152 and 1280. The machinery
+itself validated cleanly (pooled accumulation 8192→98k across held windows,
+one verdict per window after the 0c8f38d latch fix, ~32 s/iter): the machine
+worked; the gradient was the defect.
+
+Three-round autopsy, no fixable bug found:
+
+1. **KL-support hole refuted** (`scripts/diag_vine_v3_kl_support.py`): the
+   leash is measured on the vine batch only (`update.py` kl_anchor_loss), but
+   early states drift no more than pool states (KL 0.052 vs 0.041; argmax
+   agreement 97.6% vs 94.4%). Root cause of the non-effect: `_is_pool_state`
+   covers **94.6% of visited decisions** (callers live in most decile-9
+   rounds) — §2's stratification premise was a near no-op in practice.
+2. **Continuation flip refuted at sign level**
+   (`scripts/diag_vine_v3_disagreement_replay.py`, 767 learner-vs-anchor
+   disagreement states, both actions played out under field and self
+   continuations): 84% sign agreement, flips symmetric (7.1%/8.8%). The harm
+   itself is unresolvable at decision level — per-state paired-Δ sd ≈ 140,
+   so confirming −2.2/round would need ~30k games (the ADR-0034/0035/piKL
+   variance wall, met again).
+3. **Chimera head-swap localization convicted the trunk**
+   (`scripts/diag_vine_v3_chimera_gate.py`, three arms × 16,384 shared deals
+   vs the champion; offline harness replicated the run's gate level):
+   learner −2.32 [−4.71, +0.04]; **learner-trunk-only −2.53 [−4.80, −0.20]**;
+   learner-standalones-only **+0.36 [−1.99, +2.75]**; paired contrasts
+   additive (interaction −0.15). The deficit lives entirely in the trunk
+   net — the vine-trained territory. (Wish rides the same trunk, but its
+   0.008 leash and the λ=1 arm's 35 drift-free windows on the identical wish
+   recipe make play the carrier.)
+
+Verdict: the vine gradient produces a small, stable, trunk-local regression
+via a mechanism below the resolution of every decision-level instrument
+available. With v2 (self-continuation) flat and v3 (frozen-field) negative,
+the family's best observed gradient value is zero — and a pooled ratchet
+cannot bank zeros. Per the pre-registered bar: **no vine variant returns
+without qualitatively new evidence.** As §Consequences committed, the
+strength program's remaining paths lie outside the self-play-gradient
+family (human-measurement loop) or in accepting the plateau.
