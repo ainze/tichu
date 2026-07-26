@@ -69,6 +69,11 @@ class PromotionGate:
         self.pooled = bool(pooled)
         self._rng = np.random.default_rng(seed)
         self._margins: dict[str, list[float]] = {o: [] for o in self.opponents}
+        # New-data latch: one verdict per batch of recorded margins. Historically
+        # reset() enforced this implicitly (empty pool => not ready); a pooled HOLD
+        # keeps the pool, so without the latch a caller polling ready() every
+        # iteration would re-draw and re-log the same verdict until the next window.
+        self._dirty = False
 
     def record(self, opponent: str, margins) -> None:
         """Add this iteration's per-game learner margins (one value per game) for the
@@ -76,14 +81,17 @@ class PromotionGate:
         if opponent not in self._margins:
             raise KeyError(f"unknown opponent {opponent!r}; expected one of {self.opponents}")
         self._margins[opponent].extend(float(m) for m in margins)
+        self._dirty = True
 
     def n(self, opponent: str) -> int:
         return len(self._margins[opponent])
 
     def ready(self) -> bool:
-        """True once every REQUIRED opponent has accumulated a full window
-        (observe-only streams never gate readiness)."""
-        return all(len(self._margins[o]) >= self.window_games for o in self.required)
+        """True once every REQUIRED opponent has a full window AND new margins
+        arrived since the last concluded verdict (observe-only streams never gate
+        readiness; the new-data latch stops a pooled hold from re-drawing)."""
+        return self._dirty and all(
+            len(self._margins[o]) >= self.window_games for o in self.required)
 
     def _ci(self, x: list[float]) -> tuple[float, float, float]:
         arr = np.asarray(x, dtype=float)
@@ -109,7 +117,9 @@ class PromotionGate:
     def conclude(self, verdict: dict) -> None:
         """Close out a drawn verdict: clear the accumulated margins, EXCEPT in
         pooled mode after a hold — there the pool keeps accumulating until a
-        promotion resolves it (the Pooled Verdict ratchet)."""
+        promotion resolves it (the Pooled Verdict ratchet). Either way the
+        new-data latch drops, so no second verdict is drawn from the same data."""
+        self._dirty = False
         if self.pooled and not verdict["promote"]:
             return
         self.reset()
@@ -117,3 +127,4 @@ class PromotionGate:
     def reset(self) -> None:
         """Drop the accumulated windows for all opponents (call after each verdict)."""
         self._margins = {o: [] for o in self.opponents}
+        self._dirty = False
