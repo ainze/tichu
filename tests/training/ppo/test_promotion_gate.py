@@ -272,3 +272,68 @@ def test_paired_rejects_an_odd_number_of_margins():
     gate.record("champion", [1.0, 2.0, 3.0])
     with pytest.raises(ValueError, match="even number of seat-swap deltas"):
         gate.verdict()
+
+
+def test_pooled_paired_accumulates_independently_per_opponent():
+    # Each opponent is a DIFFERENT comparison (learner-vs-champion, learner-vs-bc),
+    # so their pools must never mix: pooling them into one stream would average two
+    # unrelated questions. Drive one opponent at a real edge and one at zero — if the
+    # pools leaked, both means would drift toward the average of the two.
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    for w in range(3):
+        gate.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w))
+        gate.record("bc", _swapped(edge=40.0, luck_sd=200.0, n_deals=500, seed=100 + w))
+        v = gate.verdict()
+        assert v["promote"] is False, "champion sits at 0 — beat-ALL must hold"
+        gate.conclude(v)
+
+    assert gate.n("champion") == 3000
+    assert gate.n("bc") == 3000
+    opp = gate.verdict()["opponents"]
+    assert opp["champion"]["mean"] == pytest.approx(0.0, abs=2.0)
+    assert opp["bc"]["mean"] == pytest.approx(40.0, abs=2.0)
+    assert opp["champion"]["ci_lo"] < 0.0 < opp["champion"]["ci_hi"]
+    assert opp["bc"]["ci_lo"] > 0.0
+
+
+def test_promotion_clears_every_opponents_pool_not_just_the_deciding_one():
+    # The champion changes on promotion, so its pool is stale — but so is every other
+    # stream's, because they all measured a learner that has now been elevated. A
+    # partial clear would carry pre-promotion margins into the next window.
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    gate.record("champion", _swapped(edge=30.0, luck_sd=200.0, n_deals=500, seed=1))
+    gate.record("bc", _swapped(edge=30.0, luck_sd=200.0, n_deals=500, seed=2))
+    v = gate.verdict()
+    assert v["promote"] is True
+    gate.conclude(v)
+    assert gate.n("champion") == 0
+    assert gate.n("bc") == 0
+
+
+def test_pooled_is_not_ready_until_every_required_opponent_has_a_window():
+    # Opponents can accumulate at different rates (the SAMPLED path alternates the
+    # rollout opponent per iteration). A full pool on one stream must not arm the
+    # verdict while another is still short.
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    gate.record("champion", _swapped(edge=30.0, luck_sd=50.0, n_deals=1000, seed=1))
+    assert gate.n("champion") == 2000
+    assert not gate.ready(), "bc has no margins yet — cannot draw a beat-ALL verdict"
+    assert gate.verdict()["promote"] is False
+    gate.record("bc", _swapped(edge=30.0, luck_sd=50.0, n_deals=500, seed=2))
+    assert gate.ready()
+
+
+def test_observe_only_pool_never_blocks_a_pooled_promotion():
+    # cpfix3328 is observe-only and currently NEGATIVE (-1.50 live). Its pool must
+    # accumulate and report, but never gate readiness or the promote decision.
+    gate = PromotionGate(opponents=("champion", "cpfix3328"), window_games=1000,
+                         observe_only=("cpfix3328",), paired=True, pooled=True)
+    gate.record("champion", _swapped(edge=30.0, luck_sd=200.0, n_deals=500, seed=1))
+    gate.record("cpfix3328", _swapped(edge=-20.0, luck_sd=200.0, n_deals=500, seed=2))
+    v = gate.verdict()
+    assert v["opponents"]["cpfix3328"]["mean"] == pytest.approx(-20.0, abs=3.0)
+    assert v["opponents"]["cpfix3328"]["ci_hi"] < 0.0, "observe stream is clearly negative"
+    assert v["promote"] is True, "observe-only must not veto"
