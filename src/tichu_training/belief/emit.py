@@ -2,9 +2,17 @@
 
 For each Play Decision in a validated round, build one `BeliefExample` from
 the acting player's view: features = `featurize(private_view(seat))` (the same
-224-dim vector the BC `play` example uses), labels = the three opponents'
-actual Hands at that engine state in relative-seat order (next / partner /
-previous), mask = the card-level "unknown" set (cards held by some opponent).
+vector the BC `play` example uses), labels = the three opponents' actual Hands
+at that engine state in relative-seat order (next / partner / previous),
+mask = the card-level "unknown" set (cards held by some opponent).
+
+The features are the policy Feature Vector *unextended*. ADR-0028's History
+block used to be appended here; v6 folded its surviving channels (B-core:
+declined_top / lead_summary / pass_pressure) into the featurizer itself, so
+appending them again was pure duplication — see `input_spec.py`. Reading them
+off the live engine accumulators is also strictly more faithful than the old
+replay-side accumulation, which missed the synthetic PASSes `replay._sync_for`
+steps through the engine without recording in `replay.decisions`.
 
 The labels are *free here*: the replay already holds every seat's Hand at each
 `pre_decision_state`. This is the share-not-mirror emit the consolidated parse
@@ -39,10 +47,7 @@ def belief_examples_for_round(
     from tichu_training.card_slots import card_slot
     from tichu_training.featurizer import featurize
 
-    from tichu_training.belief.history import HistoryAccumulator, extend_features
-
     out: list[BeliefExample] = []
-    acc = HistoryAccumulator()
     for (parsed_action, _concrete), pre_state in zip(
         replay.decisions, replay.pre_decision_states,
     ):
@@ -52,11 +57,10 @@ def belief_examples_for_round(
             continue
         seat = parsed_action.player
         if 0 <= seat < 4:
-            # Features carry the History block accumulated from decisions BEFORE
-            # this one (the acting seat's own current action is not yet folded in;
-            # opponents' prior declines/leads already are). See ADR-0028.
-            policy_features = featurize(pre_state.private_view(seat))
-            features = extend_features(policy_features, acc, seat)
+            # `pre_state` is the state BEFORE this action, so its cross-Trick
+            # decline / lead / pressure accumulators carry every earlier
+            # decision but not this one — the ADR-0028 read-out convention.
+            features = featurize(pre_state.private_view(seat))
             hands = pre_state.hands
             cards_played = _NUM_CARDS - sum(len(h) for h in hands)
             # Opponents in relative-seat order: next / partner / previous.
@@ -76,6 +80,4 @@ def belief_examples_for_round(
                 game_id=game_id,
                 round_id=round_id,
             ))
-        # Fold this decision into the History for later seats' examples.
-        acc.update(parsed_action, pre_state)
     return out

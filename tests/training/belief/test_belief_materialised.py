@@ -19,7 +19,7 @@ from tichu_training.belief.belief_materialised import (
     materialise_belief,
 )
 from tichu_training.belief.dataset import BeliefExample, SyntheticBeliefDataset
-from tichu_training.belief.history import BELIEF_FEATURE_DIM
+from tichu_training.belief.input_spec import BELIEF_FEATURE_DIM
 from tichu_training.checkpoint import VersionMismatchError
 
 

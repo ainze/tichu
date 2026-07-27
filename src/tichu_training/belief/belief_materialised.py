@@ -1,21 +1,27 @@
 """Disk-backed Belief dataset: writer + reader for the materialised Belief
 bundle (ADR-0021).
 
-Belief reuses the same 224-dim `featurize()` vector as the other tasks, so it
-shares the `bc.packing` machinery. Its labels are a `(3 opponents, 56 cards)`
-multi-hot grid (opponents in relative-seat order next/partner/previous); its
-mask is a `(56,)` card-level "unknown" vector (every unplayed non-own card is
-in *some* opponent's hand) stored once and broadcast to `(3,56)` on read.
+Belief reuses the same `featurize()` vector as the other tasks (see
+`input_spec.py`), so it shares the `bc.packing` machinery. Its labels are a
+`(3 opponents, 56 cards)` multi-hot grid (opponents in relative-seat order
+next/partner/previous); its mask is a `(56,)` card-level "unknown" vector
+(every unplayed non-own card is in *some* opponent's hand) stored once and
+broadcast to `(3,56)` on read.
 
-On-disk layout for a slice of N examples:
+On-disk layout for a slice of N examples (byte widths shown at v6: 591 feature
+columns, 37 of them continuous):
 
   <out_dir>/
     manifest.json
-    belief_feat_bits.dat   (N, 27)   uint8   (packbits of the 214 policy indicator cols)
-    belief_feat_cont.dat   (N, 93)   float32 (10 policy continuous + 83 History cols; ADR-0028)
+    belief_feat_bits.dat   (N, 70)   uint8   (packbits of the 554 indicator cols)
+    belief_feat_cont.dat   (N, 37)   float32 (the policy's continuous cols)
     belief_labels.dat      (N, 21)   uint8   (packbits of the 3*56=168 label bits)
     belief_mask.dat        (N, 7)    uint8   (packbits of the 56-card mask)
     belief_meta.dat        (N,)      structured (cards_played u1, game_id u4, round_id u1)
+
+The exact split is self-describing: the writer records `feature_dim` and
+`continuous_feature_columns` into the manifest and the reader rebuilds the
+dense vector from them.
 
 `cards_played` (= 56 - sum(hand_sizes)) lets the belief trainer filter out the
 low-information opening of each round at read time, no re-materialise needed.
@@ -34,7 +40,7 @@ import numpy as np
 from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bc.packing import FeatureCodec, check_pin, pack_bool_rows, unpack_bool_rows
 from tichu_training.belief.dataset import BeliefExample
-from tichu_training.belief.history import (
+from tichu_training.belief.input_spec import (
     BELIEF_FEATURE_DIM,
     BELIEF_INPUT_VERSION,
     belief_continuous_columns,
@@ -45,9 +51,11 @@ from tichu_training.featurizer import FEATURIZER_VERSION
 log = logging.getLogger("tichu_training.belief.belief_materialised")
 
 
-# v2: the belief input is the policy Feature Vector + the History block
-# (ADR-0028), no longer the bare 224-dim policy vector. Versioned independently
-# via `belief_input_version` in the manifest.
+# v2: the belief bundle's on-disk *layout* — packed feature bits + continuous
+# floats, packed labels, a stored card-level mask, and the meta record. What
+# goes into the feature columns is versioned separately by
+# `belief_input_version` (see input_spec.py), so a belief-input change does not
+# need a layout bump.
 BELIEF_SCHEMA_VERSION = 2
 
 _NUM_OPPONENTS = 3

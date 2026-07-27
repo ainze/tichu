@@ -11,13 +11,13 @@ Three comparable metrics over masked positions:
   * which-opponent top-1 — for each unseen card, argmax over 3 opponents vs the
                           true holder (chance 0.333). The discriminating metric.
 
-With --checkpoint/--tier it also scores a trained Belief Checkpoint on the SAME
-examples, so naive vs A vs B-core line up apples-to-apples.
+With --checkpoint it also scores a trained Belief Checkpoint on the SAME
+examples, so naive vs trained lines up apples-to-apples.
 
 Usage:
   py -3.14 scripts/belief_naive_baseline.py --bundle <belief_dir> [--max-examples N]
   py -3.14 scripts/belief_naive_baseline.py --bundle <belief_dir> `
-      --checkpoint <run>/checkpoints/belief_final.bin --tier B_core
+      --checkpoint <run>/checkpoints/belief_final.bin
 """
 
 from __future__ import annotations
@@ -80,23 +80,22 @@ class _Metrics:
               f"top1={self.top1 / max(1, self.cards):.4f}   [by round: {by}]")
 
 
-def _load_model(checkpoint: Path, tier: str):
+def _load_model(checkpoint: Path):
     import torch
 
-    from tichu_training.belief.history import TIER_DIMS
     from tichu_training.belief.model import BeliefModel
     from tichu_training.checkpoint import Checkpoint
     from tichu_training.featurizer import FEATURIZER_VERSION
 
-    if tier not in TIER_DIMS:
-        raise SystemExit(f"--tier must be one of {sorted(TIER_DIMS)}")
     ckpt = Checkpoint.load(checkpoint, expected_featurizer_version=FEATURIZER_VERSION)
     state = torch.load(io.BytesIO(ckpt.payload), weights_only=True)["model"]
-    hidden = int(state["fc1.weight"].shape[0])   # infer width from the checkpoint
-    model = BeliefModel(feature_dim=TIER_DIMS[tier], hidden=hidden)
+    # Both dims come off the checkpoint's first layer — no tier argument needed
+    # now that the belief input is just the policy Feature Vector (ADR-0038).
+    hidden, feature_dim = (int(d) for d in state["fc1.weight"].shape)
+    model = BeliefModel(feature_dim=feature_dim, hidden=hidden)
     model.load_state_dict(state)
     model.eval()
-    return model, TIER_DIMS[tier]
+    return model, feature_dim
 
 
 def main() -> int:
@@ -104,14 +103,11 @@ def main() -> int:
     p.add_argument("--bundle", required=True, type=Path)
     p.add_argument("--max-examples", type=int, default=500_000)
     p.add_argument("--checkpoint", type=Path, default=None)
-    p.add_argument("--tier", default=None, help="A | B_core | B_full (with --checkpoint)")
     args = p.parse_args()
 
     model = None
     if args.checkpoint is not None:
-        if args.tier is None:
-            raise SystemExit("--checkpoint requires --tier")
-        model, input_dim = _load_model(args.checkpoint, args.tier)
+        model, input_dim = _load_model(args.checkpoint)
 
     ds = MemmapBeliefDataset(args.bundle)
     naive = _Metrics()
@@ -140,7 +136,7 @@ def main() -> int:
     print(f"examples scanned: {n}  (chance top1 ~0.333)")
     naive.report("naive")
     if trained is not None:
-        trained.report(args.tier)
+        trained.report("trained")
     return 0
 
 
