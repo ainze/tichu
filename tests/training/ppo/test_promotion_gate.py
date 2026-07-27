@@ -337,3 +337,93 @@ def test_observe_only_pool_never_blocks_a_pooled_promotion():
     assert v["opponents"]["cpfix3328"]["mean"] == pytest.approx(-20.0, abs=3.0)
     assert v["opponents"]["cpfix3328"]["ci_hi"] < 0.0, "observe stream is clearly negative"
     assert v["promote"] is True, "observe-only must not veto"
+
+
+# --- pool survives a restart (Resume Bundle round-trip) ----------------------
+# Load-bearing only under `pooled`: an unpooled gate resets every window, so a
+# restart loses at most a partial window. A pooled gate accumulates over 5-20
+# windows (640-2560 iters at greedy_every=128) — rebuilding it empty on resume
+# silently discards exactly the accumulation pooling exists to build.
+
+
+def _rebuild(gate) -> PromotionGate:
+    """A fresh gate with the same config, as the trainer builds one on resume."""
+    return PromotionGate(opponents=gate.opponents, window_games=gate.window_games,
+                         threshold=gate.threshold, observe_only=tuple(gate.observe_only),
+                         pooled=gate.pooled, paired=gate.paired)
+
+
+def test_pool_survives_a_restart_via_state_round_trip():
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    for w in range(3):
+        # edge 0 => every window HOLDS, so the pool is still there to be persisted
+        # (a promotion would legitimately clear it, which is the other test).
+        gate.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w))
+        gate.record("bc", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=50 + w))
+        v = gate.verdict()
+        assert v["promote"] is False
+        gate.conclude(v)
+    # Snapshot BEFORE drawing the reference verdict — `verdict()` consumes bootstrap
+    # RNG, so capturing after it would compare two different RNG positions and the
+    # CIs would differ for a reason that has nothing to do with persistence.
+    saved = gate.state()
+    before = gate.verdict()
+
+    resumed = _rebuild(gate)
+    assert resumed.n("champion") == 0, "a fresh gate starts empty — that IS the bug"
+    resumed.load_state(saved)
+
+    assert resumed.n("champion") == gate.n("champion") == 3000
+    assert resumed.n("bc") == gate.n("bc") == 3000
+    after = resumed.verdict()
+    for o in ("champion", "bc"):
+        assert after["opponents"][o]["mean"] == pytest.approx(before["opponents"][o]["mean"])
+        # The bootstrap RNG rides along, so a resumed verdict is bit-for-bit the
+        # verdict the uninterrupted run would have drawn.
+        assert after["opponents"][o]["ci_lo"] == pytest.approx(before["opponents"][o]["ci_lo"])
+        assert after["opponents"][o]["ci_hi"] == pytest.approx(before["opponents"][o]["ci_hi"])
+
+
+def test_restored_pool_still_promotes_at_the_depth_it_reached():
+    # The point of persisting: an edge that needed N pooled windows must still bank
+    # after a restart at window N-1 rather than restarting the accumulation.
+    gate = PromotionGate(window_games=2000, pooled=True)
+    gate.record("champion", _edge(1.5, 50, 2000))
+    gate.conclude(gate.verdict())          # hold, pool survives
+    gate.record("champion", _edge(1.5, 50, 2000))
+    gate.conclude(gate.verdict())          # hold, pool = 4000
+
+    resumed = _rebuild(gate)
+    resumed.load_state(gate.state())
+    resumed.record("champion", _edge(1.5, 50, 2000))   # the window that tips it
+    v = resumed.verdict()
+    assert v["opponents"]["champion"]["n"] == 6000, "must build ON the restored pool"
+    assert v["promote"] is True
+
+
+def test_load_state_tolerates_a_changed_opponent_set():
+    # A config edit can add or drop an extra_opponent across a restart. A new stream
+    # starts empty (ready() then waits for it — the conservative direction) and a
+    # dropped stream is discarded rather than crashing the resume.
+    old = PromotionGate(opponents=("champion", "bc"), window_games=1000, pooled=True)
+    old.record("champion", _edge(2.0, 50, 1000))
+    old.record("bc", _edge(2.0, 50, 1000))
+
+    wider = PromotionGate(opponents=("champion", "bc", "cpfix3328"),
+                          window_games=1000, pooled=True)
+    wider.load_state(old.state())
+    assert wider.n("champion") == 1000
+    assert wider.n("cpfix3328") == 0
+    assert not wider.ready(), "the newly-added required stream must gate readiness"
+
+    narrower = PromotionGate(opponents=("champion",), window_games=1000, pooled=True)
+    narrower.load_state(old.state())      # 'bc' silently dropped, no crash
+    assert narrower.n("champion") == 1000
+
+
+def test_load_state_of_a_bundle_without_gate_state_is_a_no_op():
+    # Bundles written before gate persistence existed carry no "gate" key.
+    gate = PromotionGate(window_games=100, pooled=True)
+    gate.load_state({})
+    assert gate.n("champion") == 0 and not gate.ready()

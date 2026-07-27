@@ -153,3 +153,38 @@ class PromotionGate:
         """Drop the accumulated windows for all opponents (call after each verdict)."""
         self._margins = {o: [] for o in self.opponents}
         self._dirty = False
+
+    def state(self) -> dict:
+        """Serialisable pool state for the Resume Bundle (mirrors CoTrainLeague).
+
+        Load-bearing ONLY under `pooled`: an unpooled gate resets every window, so a
+        restart loses at most one partial window. A pooled gate accumulates across
+        5-20 windows (640-2560 iterations at greedy_every=128) — without this, a
+        Ctrl-C, crash or reboot mid-accumulation silently restarts the count from
+        zero and the small edge pooling exists to bank never banks.
+
+        Stored float64 so the round-trip is EXACT and a resumed verdict is bit-for-bit
+        the one the uninterrupted run would have drawn. float32 would halve it, but the
+        whole pool is ~4 MB at its deepest (20 windows x 8192 x 3 opponents) against a
+        252 MB bundle — not worth trading exactness for 1.5%.
+        """
+        return {
+            "margins": {o: np.asarray(v, dtype=np.float64) for o, v in self._margins.items()},
+            "dirty": bool(self._dirty),
+            "rng": self._rng.bit_generator.state,
+        }
+
+    def load_state(self, state: dict) -> None:
+        """Restore a pool written by `state()`.
+
+        Tolerant of an opponent-set change across the restart (a config edit adding or
+        dropping an `extra_opponents` entry): streams absent from the payload start
+        empty — `ready()` then waits for them, which is the conservative direction —
+        and saved streams no longer configured are discarded. Restoring the bootstrap
+        RNG keeps a resumed verdict identical to the uninterrupted one.
+        """
+        saved = state.get("margins") or {}
+        self._margins = {o: [float(m) for m in saved.get(o, [])] for o in self.opponents}
+        self._dirty = bool(state.get("dirty", False))
+        if state.get("rng") is not None:
+            self._rng.bit_generator.state = state["rng"]

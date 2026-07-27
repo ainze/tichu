@@ -486,6 +486,17 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             "vine.reference: champion requires promotion_gate.enabled — the gate's "
             "champion file IS the Reference Field and only promotions advance it")
 
+    # Restore a pooled gate's accumulated margins. Without this the gate rebuilds
+    # empty on every resume, silently discarding the accumulation the pooled ratchet
+    # exists to build (5-20 windows = 640-2560 iters at greedy_every=128). Bundles
+    # written before this existed carry no "gate" key and simply start empty.
+    if gate is not None and resume_payload is not None and resume_payload.get("gate"):
+        gate.load_state(resume_payload["gate"])
+        if progress and any(gate.n(o) for o in gate.opponents):
+            depth = "  ".join(f"{o}={gate.n(o)}" for o in gate.opponents)
+            print(f"  gate pool restored from bundle: {depth} "
+                  f"({'pooled' if gate.pooled else 'partial window'})", flush=True)
+
     warmup_iters = int(config.get("critic", {}).get("warmup_iters", 0))
     if warmup_iters > 0 and not resumed:
         bc_policy = BatchedCoTrainPolicy(
@@ -520,7 +531,18 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             workers=greedy_workers, export_root=run_dir / "_gate_export",
         )
         if progress:
-            print(f"  greedy gate eval @ iter {boundary}: done", flush=True)
+            # Report the POOL DEPTH each opponent now carries, not just "done". Under
+            # `pooled` the verdict is drawn on everything accumulated since the last
+            # promotion, so the depth (and how many windows it represents) is what
+            # explains the CI width — a hold at 8192 games and a hold at 40960 are
+            # very different states and used to look identical in the log.
+            depth = "  ".join(
+                f"{o}={gate.n(o)}({gate.n(o) / gate.window_games:.1f}w)"
+                for o in gate.opponents)
+            print(f"  greedy gate eval @ iter {boundary}: done — pooled games: {depth}"
+                  if gate.pooled else
+                  f"  greedy gate eval @ iter {boundary}: done — games: {depth}",
+                  flush=True)
 
     def _gate_verdict(boundary: int) -> None:
         """Draw the promotion verdict for the window ending at iter `boundary` once
@@ -544,9 +566,15 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 # learner can move further from the original BC next window.
                 bc_models["play"].load_state_dict(models["play"].state_dict())
         if progress:
-            opp_str = "  ".join(
-                f"{o} {s['mean']:+.1f}[{s['ci_lo']:+.1f},{s['ci_hi']:+.1f}]"
-                for o, s in v["opponents"].items())
+            # n= is the games the CI was actually drawn on. Under `pooled` that grows
+            # across held windows, so it is the number that explains a shrinking CI.
+            def _opp(o, s):
+                n = f"n={s['n']}"
+                if gate.pooled:
+                    n += f"/{s['n'] / gate.window_games:.1f}w"
+                return f"{o} {n} {s['mean']:+.1f}[{s['ci_lo']:+.1f},{s['ci_hi']:+.1f}]"
+
+            opp_str = "  ".join(_opp(o, s) for o, s in v["opponents"].items())
             print(f"  gate {'PROMOTE' if v['promote'] else 'hold'} @ iter {boundary}: "
                   f"{opp_str}", flush=True)
         gate.conclude(v)  # Pooled Verdict: the pool survives holds, clears on promotion
@@ -594,6 +622,16 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             league=(league.state() if league is not None else None),
             play_anchor=(bc_models["play"].state_dict()
                          if (reanchor_play_every or reanchor_on_promote) else None),
+            # The accumulated gate pool, so a pooled ratchet survives a restart.
+            # NB this bundle is deliberately written BEFORE this iteration's gate
+            # window runs (see the resume catch-up above), so the persisted pool is
+            # the PRE-window state. That pairs correctly with the catch-up: a kill
+            # DURING the mini-tournament resumes with the pre-window pool and re-runs
+            # the window, re-adding its margins exactly once. The residual gap is a
+            # kill in the moment between a concluded verdict and the next iteration's
+            # save — that loses one window's margins from the pool, but never
+            # double-counts and never loses an already-logged promotion.
+            gate=(gate.state() if gate is not None else None),
         )
         # Serving snapshots every snapshot_every (for the offline `check` command).
         if (iteration + 1) % snapshot_every == 0:
