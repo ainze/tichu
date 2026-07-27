@@ -192,3 +192,83 @@ def test_pooled_hold_does_not_redraw_until_new_margins_arrive():
     gate.record("champion", _edge(0.0, 50, 100))  # the next window's data arrives
     assert gate.ready()
     assert gate.verdict()["opponents"]["champion"]["n"] == 200  # still pooled
+
+
+# --- seat-swap cluster bootstrap (`paired`) ---------------------------------
+# The greedy window records 2*n_deals values: the two seat arrangements of each
+# deal, ADJACENT. Card luck enters them with opposite sign, so it cancels within
+# the pair; resampling them flat re-counts uncertainty the design already removed.
+
+
+def _swapped(edge, luck_sd, n_deals, seed=0):
+    """n_deals worth of seat-swap deltas, flattened pair-adjacent like
+    `_play_pair_full`. Each deal contributes (edge + luck, edge - luck)."""
+    rng = np.random.default_rng(seed)
+    luck = rng.normal(0.0, luck_sd, n_deals)
+    skill = rng.normal(edge, 5.0, n_deals)
+    out = []
+    for s, l in zip(skill, luck):
+        out.extend((s + l, s - l))
+    return out
+
+
+def test_paired_ci_is_narrower_but_same_point_estimate():
+    margins = _swapped(edge=3.0, luck_sd=200.0, n_deals=2000)
+    flat = PromotionGate(window_games=4000, paired=False)
+    paired = PromotionGate(window_games=4000, paired=True)
+    flat.record("champion", margins)
+    paired.record("champion", margins)
+    f, p = _champ(flat.verdict()), _champ(paired.verdict())
+
+    assert f["n"] == p["n"] == 4000                  # reported n is the raw obs count
+    assert f["mean"] == pytest.approx(p["mean"])     # point estimate is untouched
+    f_hw = (f["ci_hi"] - f["ci_lo"]) / 2
+    p_hw = (p["ci_hi"] - p["ci_lo"]) / 2
+    assert p_hw < f_hw / 2, "cancelling luck must collapse when pairs are clustered"
+
+
+def test_paired_gate_promotes_an_edge_the_flat_gate_cannot_see():
+    # The live symptom: a real +3/deal edge buried under seat-swap-cancelling luck.
+    margins = _swapped(edge=3.0, luck_sd=200.0, n_deals=2000, seed=7)
+    flat = PromotionGate(window_games=4000, paired=False)
+    paired = PromotionGate(window_games=4000, paired=True)
+    flat.record("champion", margins)
+    paired.record("champion", margins)
+    assert flat.verdict()["promote"] is False
+    assert paired.verdict()["promote"] is True
+
+
+def test_paired_still_rejects_a_genuinely_zero_edge():
+    # Narrower bars must not become a rubber stamp.
+    margins = _swapped(edge=0.0, luck_sd=200.0, n_deals=2000, seed=3)
+    gate = PromotionGate(window_games=4000, paired=True)
+    gate.record("champion", margins)
+    v = gate.verdict()
+    assert _champ(v)["ci_lo"] < 0.0 < _champ(v)["ci_hi"]
+    assert v["promote"] is False
+
+
+def test_paired_pools_across_windows_keeping_pairs_aligned():
+    # Pooled mode concatenates windows; each is an even, pair-adjacent block, so
+    # the clustering must stay aligned across the join. If it drifted by one, pairs
+    # would straddle deals and the cancelling luck would stop cancelling — so the
+    # pooled paired CI staying tight IS the alignment assertion.
+    paired = PromotionGate(window_games=3000, paired=True, pooled=True)
+    flat = PromotionGate(window_games=3000, paired=False, pooled=True)
+    for w in range(3):
+        window = _swapped(edge=2.0, luck_sd=200.0, n_deals=500, seed=w)
+        paired.record("champion", window)
+        flat.record("champion", window)
+    assert paired.n("champion") == 3000
+    p, f = _champ(paired.verdict()), _champ(flat.verdict())
+    assert p["mean"] == pytest.approx(f["mean"])
+    assert (p["ci_hi"] - p["ci_lo"]) < (f["ci_hi"] - f["ci_lo"]) / 2
+
+
+def test_paired_rejects_an_odd_number_of_margins():
+    # An odd count means a Position's second arrangement is missing — silently
+    # pairing across deals would be worse than failing.
+    gate = PromotionGate(window_games=4, paired=True)
+    gate.record("champion", [1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="even number of seat-swap deltas"):
+        gate.verdict()

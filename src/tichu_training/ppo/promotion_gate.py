@@ -44,11 +44,25 @@ class PromotionGate:
     pooling valid) and `conclude()` clears the pool only on a promotion — so a true
     +1-2 edge, invisible to any single window's CI, banks once the pooled CI
     resolves. Off (default) = the original one-window-per-verdict ratchet.
+
+    `paired` is the seat-swap CLUSTER bootstrap. The GREEDY margin source records
+    `2 * n_deals` values per window — the two seat arrangements of each deal, adjacent
+    — and resampling those flat double-counts card luck the swap already cancelled.
+    Resampling per-deal pair means instead is the correct estimator for the design.
+    Measured on the 40k ship check (rho = -0.42): the CI narrows ~26% at 4096 deals,
+    i.e. ~46% fewer deals for the same resolution, at an identical point estimate.
+    Only valid for the greedy stream — the SAMPLED stream is one margin per game with
+    no pairing, so this is off by default and the caller must opt in.
+
+    NB the residual after pairing is dominated by CALL-bonus variance (sd 86 of 118
+    on the ship check): each agent decides its own Tichu/Grand, so the +/-100/200
+    does NOT cancel under seat-swap. Pairing alone moves the promote bar ~4.8 -> ~3.5;
+    reaching the ~1.6 band needs `pooled` as well.
     """
 
     def __init__(self, *, opponents=("champion",), window_games: int,
                  threshold: float = 0.0, bootstrap_iters: int = 1000, seed: int = 0,
-                 observe_only=(), pooled: bool = False) -> None:
+                 observe_only=(), pooled: bool = False, paired: bool = False) -> None:
         if window_games < 1:
             raise ValueError(f"window_games must be >= 1, got {window_games}")
         if not opponents:
@@ -67,6 +81,7 @@ class PromotionGate:
         self.threshold = float(threshold)
         self.bootstrap_iters = int(bootstrap_iters)
         self.pooled = bool(pooled)
+        self.paired = bool(paired)
         self._rng = np.random.default_rng(seed)
         self._margins: dict[str, list[float]] = {o: [] for o in self.opponents}
         # New-data latch: one verdict per batch of recorded margins. Historically
@@ -95,13 +110,23 @@ class PromotionGate:
 
     def _ci(self, x: list[float]) -> tuple[float, float, float]:
         arr = np.asarray(x, dtype=float)
+        mean = float(arr.mean()) if arr.size else 0.0
+        if self.paired:
+            # Cluster the seat-swap pairs before resampling. Each greedy window
+            # appends an even, pair-adjacent block, so concatenated windows (pooled
+            # mode) stay correctly aligned. The mean is taken BEFORE clustering so
+            # it is reported identically either way (pair means average to the same
+            # value only when every pair is complete — which `pair_cluster` enforces).
+            from tichu_eval.tournament import pair_cluster
+
+            arr = pair_cluster(arr)
         n = arr.size
         if n == 0:
             return 0.0, 0.0, 0.0
         idx = self._rng.integers(0, n, size=(self.bootstrap_iters, n))
         boots = arr[idx].mean(axis=1)
         lo, hi = (float(v) for v in np.percentile(boots, [2.5, 97.5]))
-        return float(arr.mean()), lo, hi
+        return mean, lo, hi
 
     def verdict(self) -> dict:
         """`{promote, opponents: {name: {n, mean, ci_lo, ci_hi}}}`. `promote` requires

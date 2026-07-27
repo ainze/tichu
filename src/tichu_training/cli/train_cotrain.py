@@ -443,6 +443,16 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             # it); the sampled window instead accumulates positions_per_iter per iter.
             window_games = (2 * greedy_n_deals if gate_greedy
                             else int(gate_cfg.get("window_games", positions_per_iter * 8)))
+            # Seat-swap cluster bootstrap. The greedy window is 2*n_deals values with
+            # the two arrangements of each deal ADJACENT; resampling them flat counts
+            # card luck the swap already cancelled. Greedy-only — the sampled stream
+            # is one margin per game and has no pairs to cluster.
+            gate_paired = bool(gate_cfg.get("paired", False))
+            if gate_paired and not gate_greedy:
+                raise ValueError(
+                    "promotion_gate.paired requires greedy:true — the sampled stream "
+                    "records one margin per game, so there are no seat-swap pairs to "
+                    "cluster and the reshape would pair unrelated games")
             gate = PromotionGate(
                 opponents=tuple(opponents),
                 window_games=window_games,
@@ -451,6 +461,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 seed=pool_seed,
                 observe_only=tuple(gate_observe_only),
                 pooled=bool(gate_cfg.get("pooled", False)),
+                paired=gate_paired,
             )
             if progress:
                 src = (f"GREEDY mini-tournament ({greedy_n_deals} deals/opp every "

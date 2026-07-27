@@ -439,9 +439,40 @@ def _play_one_position(agent_a: Agent, agent_b: Agent, pos) -> tuple[float, floa
     )
 
 
+def pair_cluster(deltas: np.ndarray) -> np.ndarray:
+    """Collapse seat-swap deltas into one observation per Position.
+
+    `_play_one_position` emits the two arrangements of a single deal ADJACENTLY
+    (`totals.extend((t0, t1))`), and they are not independent: the deal's card luck
+    enters them with opposite sign, so it cancels within the pair. Averaging the pair
+    is the per-deal observation the experiment actually produces.
+
+    Measured on the 40k wishfix-vs-cpfix3328 ship check: rho(t0, t1) = -0.42, and
+    10.8% of deals cancel EXACTLY (both agents played the deal identically, so it
+    carries zero information about which is better).
+    """
+    arr = np.asarray(deltas, dtype=float)
+    if arr.size % 2:
+        raise ValueError(
+            f"paired CI needs an even number of seat-swap deltas, got {arr.size} — "
+            "the two arrangements of a Position must both be present, adjacent")
+    return arr.reshape(-1, 2).mean(axis=1)
+
+
 def _bootstrap_ci(
-    deltas: np.ndarray, iters: int, rng: np.random.Generator
+    deltas: np.ndarray, iters: int, rng: np.random.Generator, *, paired: bool = False,
 ) -> tuple[float, float, float]:
+    """95% bootstrap CI for the mean delta.
+
+    `paired=True` resamples per-DEAL pair means rather than the 2N individual
+    arrangements — the correct cluster for a seat-swapped design. The point estimate
+    is unchanged; only the interval narrows (the flat resample double-counts card
+    luck that structurally cancels, so it reports uncertainty the design already
+    removed). Opt-in, because not every caller's deltas are seat-swap pairs: the
+    SAMPLED promotion-gate stream records one margin per game with no pairing.
+    """
+    if paired:
+        deltas = pair_cluster(deltas)
     if len(deltas) == 0:
         return (0.0, 0.0, 0.0)
     mean = float(deltas.mean())
