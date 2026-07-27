@@ -1,7 +1,9 @@
 """v6 (ADR-0038 / ADR-0028 B-core): the engine maintains per-seat cross-Trick
 decline accumulators that the featurizer reads — declined_top_by_player,
-lead_summary_by_player, pass_stats_by_player. Semantics mirror the belief
-`HistoryAccumulator` (the canonical definition)."""
+lead_summary_by_player, pass_stats_by_player. These are now the CANONICAL
+definition of the ADR-0028 B-core channels: the belief-side replay accumulator
+that once mirrored them is gone (it duplicated the v6 featurizer and, unlike
+these, missed the synthetic PASSes the BSW replay steps through the engine)."""
 
 from tichu_engine.cards import Card, DOG, MAHJONG, Suit
 from tichu_engine.combinations import FourOfAKindBomb, Single, Pair

@@ -75,12 +75,10 @@ def train_one_belief_epoch_stream(
     optimizer: torch.optim.Optimizer,
     *,
     batch_size: int,
-    input_dim: int,
     log_path: Path,
 ) -> float:
     """Low-RAM epoch: stream batched arrays off the memmap (no full-list
-    materialisation), slicing features to `input_dim` (the ADR-0028 tier prefix).
-    Mirrors `train_one_belief_epoch` but for the scale path."""
+    materialisation). Mirrors `train_one_belief_epoch` but for the scale path."""
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     new = not log_path.exists()
@@ -88,7 +86,7 @@ def train_one_belief_epoch_stream(
     last_loss = float("inf")
     rows: list[dict] = []
     for feats, labels, card_mask in dataset.iter_arrays(batch_size):
-        x = torch.from_numpy(feats[:, :input_dim])
+        x = torch.from_numpy(feats)
         y = torch.from_numpy(labels)
         m = torch.from_numpy(_broadcast_mask(card_mask).copy())
         logits = model(x)
@@ -109,13 +107,13 @@ def train_one_belief_epoch_stream(
     return last_loss
 
 
-def stream_accuracy(model: BeliefModel, dataset, *, batch_size: int, input_dim: int) -> float:
+def stream_accuracy(model: BeliefModel, dataset, *, batch_size: int) -> float:
     """Masked accuracy over the whole bundle, streamed (no materialisation)."""
     matches = 0
     total = 0
     with torch.no_grad():
         for feats, labels, card_mask in dataset.iter_arrays(batch_size):
-            x = torch.from_numpy(feats[:, :input_dim])
+            x = torch.from_numpy(feats)
             logits = model(x)
             pred = (logits > 0).to(torch.float32).numpy()
             m = _broadcast_mask(card_mask)

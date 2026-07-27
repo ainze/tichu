@@ -343,8 +343,9 @@ def _single_lead_rank(action: object) -> int | None:
 
 def _fold_decision(public: PublicState, seat: int, action: object) -> tuple:
     """v6 (ADR-0028 B-core): fold one Play/Pass Decision by `seat` into the
-    decline / lead / pass accumulators. Mirrors belief `HistoryAccumulator`:
-    a Pass records the declined top (per type) and bumps pass + decision counts;
+    decline / lead / pass accumulators — the canonical definition of these
+    channels, read out by the featurizer for policy and belief alike.
+    A Pass records the declined top (per type) and bumps pass + decision counts;
     a play leading a fresh Trick bumps lead count (and lowest single lead).
     Returns (declined_top_by_player, lead_summary_by_player, pass_stats_by_player)."""
     declined = [list(x) for x in public.declined_top_by_player]
