@@ -49,6 +49,16 @@ Usage:
     ./plot_cotrain_csv.py path/to/run-dir                 # auto-finds ppo_log.csv
     ./plot_cotrain_csv.py path/to/run-dir --watch 15      # live-follow
     ./plot_cotrain_csv.py path/to/run-dir --out fig.png --window 20
+
+On Windows, invoke the interpreter explicitly:
+    python tools/plot_cotrain_csv.py path/to/run-dir --watch 30
+    py -3.14 tools/plot_cotrain_csv.py path/to/run-dir    # explicit version also OK
+
+NOT plain `py tools/...`: the Windows launcher honours the `#!/usr/bin/env -S uv
+run --script` shebang above and tries to exec `/usr/bin/env`, which fails with
+"Unable to create process". An explicit `-3.x` overrides the shebang; `python`
+bypasses the launcher entirely. (The sibling plot_ppo_csv.py / plot_step_csv.py
+carry the same shebang and the same caveat.)
 """
 
 import argparse
