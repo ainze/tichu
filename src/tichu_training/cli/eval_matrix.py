@@ -327,6 +327,11 @@ def _run_behavioral_mode(agent_builders, config, output_path: Path, *, n_offset:
                   "trick_win_rate", "out_first_rate", "slam_rate",
                   "caller_passivity_rate", "caller_pass_opportunities",
                   "caller_bomb_passivity_rate", "caller_pass_bomb_opportunities"]
+    # Append any counters `as_row()` emits that this curated order doesn't name, so
+    # adding a metric to BehavioralProfile can't crash the writer again (the
+    # partner_steal_* counters did exactly that: the console table printed, then
+    # DictWriter raised "fields not in fieldnames" and the CSV was never written).
+    fieldnames += [k for k in rows[0] if k not in fieldnames]
     with output_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()

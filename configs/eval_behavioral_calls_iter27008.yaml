@@ -1,0 +1,109 @@
+# Which direction does the call deficit run? — diagnostic for the iter-27008 ship check.
+#
+# The 40k ship check (ship_check_vs_cpfix3328_iter27008.npz) decomposed to:
+#     TOTAL       +0.137 [-0.985, +1.259]   straddles zero
+#       card play +5.490 [+4.880, +6.093]   CI>0   <- candidate is much better
+#       call bonus -5.354 [-6.164, -4.520]  CI<0   <- and gives all of it back
+# The deficit is stable across champions (-5.58 old, -5.35 new): 27k iterations of
+# co-training with the tichu/grand heads in the loop moved it +0.23, i.e. nothing.
+#
+# A negative call-bonus delta has TWO possible causes and the ship check cannot
+# separate them:
+#   (a) the candidate OVER-calls  -> makes calls that fail  (-100/-200 each)
+#   (b) the candidate UNDER-calls -> misses bonuses the served export collects
+# This profile separates them. Read `tichu_call_rate` / `grand_call_rate` first
+# (propensity), then the matching `*_success_rate` (quality):
+#   candidate call rate HIGHER + success LOWER  -> (a) over-calling, raise threshold
+#   candidate call rate LOWER  + success >=     -> (b) under-calling, lower threshold
+#   rates equal, success LOWER                  -> neither; the CALLS ARE FINE and
+#     the play policy is failing to convert them (a play/call coupling problem,
+#     not a threshold problem — the threshold sweep below would be a dead end)
+#
+# The t35/t65 arms bracket the candidate in BOTH directions on purpose. Only one
+# can help, and pre-committing to the "lower it" direction (the standing backlog
+# note about the argmax P>0.5 artifact vs a 14.5% human base rate) would beg the
+# question this profile exists to answer.
+#
+# The thresholds are swept INDEPENDENTLY (tichu-only and grand-only arms), not
+# jointly. Grand supersedes Tichu — a Grand caller is never solicited for Tichu
+# (ADR-0018 / `_maybe_solicit_tichu`) — so moving both at once makes
+# `tichu_call_rate` a function of the GRAND threshold. A 12-deal smoke of the
+# joint version showed exactly that: dropping both to 0.35 pushed grand
+# 0.021 -> 0.104 and thereby dragged tichu 0.229 -> 0.188, i.e. "call more"
+# reading as "calls less". Independent arms keep each rate attributable.
+#
+# CAVEAT on reading the success rates: `behavioral` mode profiles each agent in
+# SELF-PLAY at a homogeneous table, so each agent's calls are measured against
+# ITSELF, not against the other agent. Call RATES are therefore directly
+# comparable; SUCCESS rates are not strictly, since the candidate's own table is
+# the stronger one (+5.5/round of card play) and a call is harder to land against
+# better opponents. That biases the candidate's success rate DOWNWARD, so a
+# candidate success rate that is equal-or-better is a genuinely strong signal,
+# while a modestly worse one is not yet damning. The tournament is the arbiter.
+#
+# Serial (behavioral mode ignores `workers`): ~4 agents x 1500 rounds.
+#
+#   py -m tichu_training.cli.eval_matrix --config configs/eval_behavioral_calls_iter27008.yaml --mode behavioral -v
+
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 1200          # x4 seat-rounds => 4800 seat-rounds/agent; at ~20% tichu that
+                       # is ~950 calls, success-rate SE ~1.3pp — ample. Serial mode,
+                       # ~10 min/agent, 6 agents => ~1 hour.
+seed: 0
+
+_candidate: &candidate
+  checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\policy.pt
+  schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\schupfen.pt
+  tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\tichu_call.pt
+  grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\grand_tichu_call.pt
+  skill_decile: 9
+
+agents:
+  # The iter-27008 promoted champion — exported by the ship check itself, so this
+  # is byte-identical to the agent that produced the +0.137 / -5.354 reading.
+  - name: candidate
+    factory: ml
+    kwargs:
+      <<: *candidate
+
+  # The SERVED export. This is the -5.354 reference: whatever it does with calls,
+  # it does ~5.4 points/round better than the candidate.
+  - name: served_cpfix3328
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+      skill_decile: 9
+
+  # --- TICHU threshold swept alone (grand held at argmax) --------------------
+  - name: cand_tichu35_more
+    factory: ml
+    kwargs:
+      <<: *candidate
+      tichu_threshold: 0.35
+
+  - name: cand_tichu65_less
+    factory: ml
+    kwargs:
+      <<: *candidate
+      tichu_threshold: 0.65
+
+  # --- GRAND threshold swept alone (tichu held at argmax) --------------------
+  # Expect grand_call_rate to move AND tichu_call_rate to move the opposite way
+  # as a side effect (grand supersedes the Tichu solicitation) — that coupling is
+  # the point of separating the arms, not a bug.
+  - name: cand_grand35_more
+    factory: ml
+    kwargs:
+      <<: *candidate
+      grand_threshold: 0.35
+
+  - name: cand_grand65_less
+    factory: ml
+    kwargs:
+      <<: *candidate
+      grand_threshold: 0.65
+
+output: C:\workbench\tichu\data\runs\eval_behavioral_calls_iter27008\profile.csv
