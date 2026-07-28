@@ -58,11 +58,33 @@ class PromotionGate:
     on the ship check): each agent decides its own Tichu/Grand, so the +/-100/200
     does NOT cancel under seat-swap. Pairing alone moves the promote bar ~4.8 -> ~3.5;
     reaching the ~1.6 band needs `pooled` as well.
+
+    `pool_windows` bounds the pool to the most recent N windows (0 = unbounded, the
+    ADR-0040 behavior). Unbounded pooling silently assumes the learner is STATIONARY
+    over the pooling stretch, and it is not — it is training. A bad patch therefore
+    poisons the estimate for a very long time: from the live run's state (18 windows
+    at -3.16), a policy that recovered to a genuine +1.5/window would need 57 more
+    windows (~7,300 iterations) to promote, and 38 (~4,850) before the pooled mean
+    even crossed zero. A 10-window slide bounds that to ~1,280 iterations.
+
+    Choosing N: one window resolves +/-3.17 (measured, paired), so N windows resolve
+    3.17/sqrt(N). The edge worth detecting is a KL-ball step of ~+1.5, needing N>=6;
+    N=10 gives +/-1.00. Past ~10 the extra resolution is finer than any real step
+    while the staleness cost keeps growing linearly — so N=10 is the knee, not a
+    tuning choice.
+
+    Cost, on the record: overlapping windows mean a verdict is re-drawn every window
+    on mostly-shared data, so the nominal 95% CI understates the family-wise error.
+    That optional-stopping inflation already exists in the unbounded scheme (which
+    re-tests a growing nested pool every window); the slide does not add it. The
+    guards are unchanged: beat-ALL over {champion, bc} plus the observe-only
+    cpfix3328 stream.
     """
 
     def __init__(self, *, opponents=("champion",), window_games: int,
                  threshold: float = 0.0, bootstrap_iters: int = 1000, seed: int = 0,
-                 observe_only=(), pooled: bool = False, paired: bool = False) -> None:
+                 observe_only=(), pooled: bool = False, paired: bool = False,
+                 pool_windows: int = 0) -> None:
         if window_games < 1:
             raise ValueError(f"window_games must be >= 1, got {window_games}")
         if not opponents:
@@ -82,6 +104,13 @@ class PromotionGate:
         self.bootstrap_iters = int(bootstrap_iters)
         self.pooled = bool(pooled)
         self.paired = bool(paired)
+        self.pool_windows = int(pool_windows)
+        if self.pool_windows < 0:
+            raise ValueError(f"pool_windows must be >= 0, got {pool_windows}")
+        if self.pool_windows and not self.pooled:
+            raise ValueError(
+                "pool_windows requires pooled=True — an unpooled gate already resets "
+                "after every verdict, so there is no accumulation to bound")
         self._rng = np.random.default_rng(seed)
         self._margins: dict[str, list[float]] = {o: [] for o in self.opponents}
         # New-data latch: one verdict per batch of recorded margins. Historically
@@ -95,7 +124,16 @@ class PromotionGate:
         opponent it played this iteration."""
         if opponent not in self._margins:
             raise KeyError(f"unknown opponent {opponent!r}; expected one of {self.opponents}")
-        self._margins[opponent].extend(float(m) for m in margins)
+        vals = self._margins[opponent]
+        vals.extend(float(m) for m in margins)
+        if self.pool_windows:
+            # Slide: drop the oldest margins beyond the cap. The cap is a multiple of
+            # window_games and every greedy window appends exactly window_games values,
+            # so the amount trimmed is always even and the seat-swap pairs downstream
+            # of `paired` stay aligned across the cut.
+            cap = self.pool_windows * self.window_games
+            if len(vals) > cap:
+                del vals[:len(vals) - cap]
         self._dirty = True
 
     def n(self, opponent: str) -> int:

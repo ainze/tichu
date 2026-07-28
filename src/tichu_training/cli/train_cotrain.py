@@ -462,6 +462,11 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                 observe_only=tuple(gate_observe_only),
                 pooled=bool(gate_cfg.get("pooled", False)),
                 paired=gate_paired,
+                # 0 = unbounded (ADR-0040). A cap bounds how long a bad patch keeps
+                # poisoning the pooled estimate: the learner is NOT stationary over a
+                # long pooling stretch, so an early dip can take thousands of
+                # iterations to average out even after the policy recovers.
+                pool_windows=int(gate_cfg.get("pool_windows", 0)),
             )
             if progress:
                 src = (f"GREEDY mini-tournament ({greedy_n_deals} deals/opp every "

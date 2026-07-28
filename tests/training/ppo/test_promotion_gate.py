@@ -427,3 +427,101 @@ def test_load_state_of_a_bundle_without_gate_state_is_a_no_op():
     gate = PromotionGate(window_games=100, pooled=True)
     gate.load_state({})
     assert gate.n("champion") == 0 and not gate.ready()
+
+
+# --- sliding pool (`pool_windows`) -------------------------------------------
+# Unbounded pooling assumes the learner is stationary across the pooling stretch.
+# It isn't — it's training — so an early bad patch poisons the estimate long after
+# the policy recovers. Measured from the live run's state (18 windows at -3.16), a
+# recovery to +1.5/window needs ~57 more windows (~7,300 iters) to promote
+# unbounded, vs a ~1,280-iter worst case at W=10.
+
+
+def test_pool_windows_caps_the_accumulation():
+    gate = PromotionGate(window_games=1000, pooled=True, pool_windows=3)
+    for w in range(10):
+        gate.record("champion", _edge(1.0, 50, 1000))
+        gate.conclude(gate.verdict())
+    assert gate.n("champion") == 3000, "pool must not grow past pool_windows"
+
+
+def test_sliding_pool_forgets_a_bad_patch_that_unbounded_pooling_would_not():
+    bad, good = _edge(-30.0, 20, 1000), _edge(+30.0, 20, 1000)
+    unbounded = PromotionGate(window_games=1000, pooled=True)
+    sliding = PromotionGate(window_games=1000, pooled=True, pool_windows=3)
+
+    fired = {}
+    for name, g in (("unbounded", unbounded), ("sliding", sliding)):
+        for _ in range(5):                     # the regression
+            g.record("champion", bad)
+            g.conclude(g.verdict())
+        fired[name] = None
+        for _ in range(3):                     # full recovery, W windows of it
+            g.record("champion", good)
+            v = g.verdict()
+            if v["promote"] and fired[name] is None:
+                fired[name] = _champ(v)["mean"]
+            g.conclude(v)                      # a promotion legitimately clears it
+
+    # The slide flushes the bad patch and banks the recovery. With cap=3 it fires on
+    # the SECOND recovered window, when the pool is 1 bad + 2 good:
+    # (-30 + 30 + 30)/3 = +10 — already CI-clear, without waiting for a full flush.
+    assert fired["sliding"] == pytest.approx(10.0, abs=1.0)
+    # ...while the unbounded pool is still dragged under by all 5 bad windows and
+    # cannot fire at all within the same three recovered windows.
+    assert fired["unbounded"] is None
+    assert _champ(unbounded.verdict())["mean"] < 0.0
+
+
+def test_sliding_pool_keeps_seat_swap_pairs_aligned_across_the_cut():
+    # Trimming must remove a WHOLE number of pairs. If it slipped by one, pairs would
+    # straddle deals, the cancelling luck would stop cancelling, and the paired CI
+    # would blow out to roughly the flat width.
+    sliding = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    flat = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=False)
+    for w in range(5):
+        window = _swapped(edge=2.0, luck_sd=200.0, n_deals=500, seed=w)
+        sliding.record("champion", window)
+        flat.record("champion", window)
+    assert sliding.n("champion") == 2000
+    s, f = _champ(sliding.verdict()), _champ(flat.verdict())
+    assert s["mean"] == pytest.approx(f["mean"])
+    assert (s["ci_hi"] - s["ci_lo"]) < (f["ci_hi"] - f["ci_lo"]) / 2
+
+
+def test_sliding_pool_is_per_opponent():
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         pooled=True, pool_windows=2)
+    for _ in range(4):
+        gate.record("champion", _edge(1.0, 50, 1000))
+        gate.record("bc", _edge(40.0, 50, 1000))
+        gate.conclude(gate.verdict())
+    assert gate.n("champion") == 2000 and gate.n("bc") == 2000
+    opp = gate.verdict()["opponents"]
+    assert opp["champion"]["mean"] == pytest.approx(1.0, abs=0.5)
+    assert opp["bc"]["mean"] == pytest.approx(40.0, abs=0.5)
+
+
+def test_sliding_pool_survives_a_restart_and_stays_capped():
+    gate = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    for w in range(4):
+        gate.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w))
+        gate.conclude(gate.verdict())
+    resumed = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    resumed.load_state(gate.state())
+    assert resumed.n("champion") == 2000
+    resumed.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=9))
+    assert resumed.n("champion") == 2000, "cap still enforced after a resume"
+
+
+def test_pool_windows_requires_pooled():
+    with pytest.raises(ValueError, match="requires pooled"):
+        PromotionGate(window_games=100, pool_windows=5)
+
+
+def test_pool_windows_zero_is_the_unbounded_default():
+    gate = PromotionGate(window_games=100, pooled=True, pool_windows=0)
+    for _ in range(6):
+        gate.record("champion", _edge(0.0, 50, 100))
+        gate.conclude(gate.verdict())
+    assert gate.n("champion") == 600
