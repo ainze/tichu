@@ -34,6 +34,13 @@ plots its extra net with no flag. Six panels in a 3x2 grid, one line per net:
   6. Greedy-gate tournament margin (from the sibling `promotion_gate.csv`): per-
      opponent mean score margin per gate window with its bootstrap 95% CI band,
      promotions marked. Empty panel for non-gated runs.
+  7. Gate margin DECOMPOSED into card play vs call bonus (from the sibling
+     `promotion_gate_components.csv`). Panel 6 shows only the total, and a total
+     near zero can be two large opposite halves: the iter27008 champion read +0.14
+     against the served export while being +5.5 on card play and −5.4 on calls — a
+     trade invisible for 27k iterations that surfaced only at ship time. Watch for
+     the two lines DIVERGING; that is co-training reallocating value between them
+     rather than adding any. Empty for runs predating the split.
 
 Behavioral dials + strength vs the SHIPPED master stay OUT OF LOOP: `check_cotrain`
 and `eval_matrix --mode behavioral`. Panel 6 shows the in-run gate opponents only.
@@ -146,6 +153,66 @@ def _plot_gate(ax, csv_path: Path) -> None:
     ax.legend(loc="best", fontsize=8)
 
 
+def _components_frame(csv_path: Path) -> pd.DataFrame | None:
+    """The sibling `promotion_gate_components.csv`, or None when absent/empty.
+    One row per opponent per component per gate window: iter, opponent, component,
+    n, mean, se, ci_lo, ci_hi, promoted. Written separately from
+    `promotion_gate.csv` because that file's 7-column header is already on disk
+    mid-run for every live run."""
+    comp = csv_path.parent / "promotion_gate_components.csv"
+    if not comp.is_file():
+        return None
+    try:
+        c = pd.read_csv(comp)
+    except (pd.errors.EmptyDataError, OSError):
+        return None
+    need = {"iter", "opponent", "component", "mean", "ci_lo", "ci_hi"}
+    if c.empty or not need <= set(c.columns):
+        return None
+    return c
+
+
+# Colour carries the COMPONENT (the thing being compared), linestyle carries the
+# opponent — so a card-play/call-bonus divergence reads at a glance even with three
+# opponents on the panel.
+_COMPONENT_COLORS = {"card_play": "C2", "call_bonus": "C3"}
+_OPP_LINESTYLES = {"champion": "-", "bc": "--", "cpfix3328": ":"}
+
+
+def _plot_components(ax, csv_path: Path) -> None:
+    """Panel 7: the gate margin split into card play and call bonus.
+
+    The total (panel 6) hides a reallocation between the two. Diverging lines mean
+    co-training is trading one for the other rather than adding value — measured
+    once at iter27008 as +5.5 card play against −5.4 call bonus for a net +0.14,
+    i.e. ~87% of the reallocation wasted."""
+    c = _components_frame(csv_path)
+    ax.set_title("Gate margin decomposed — card play vs call bonus (diverging = a trade, not a gain)")
+    ax.set_ylabel("score margin / round")
+    ax.grid(True, alpha=0.3, which="both")
+    if c is None:
+        ax.text(0.5, 0.5, "no promotion_gate_components.csv\n"
+                          "(run predates the split, or non-gated)",
+                ha="center", va="center", transform=ax.transAxes, alpha=0.6)
+        return
+    ax.axhline(0.0, color="k", linestyle="--", alpha=0.4, linewidth=1.0)
+    for (opp, comp), rows in c.groupby(["opponent", "component"], sort=False):
+        rows = rows.sort_values("iter")
+        color = _COMPONENT_COLORS.get(str(comp), "C4")
+        style = _OPP_LINESTYLES.get(str(opp), "-.")
+        ax.plot(rows["iter"], rows["mean"], color=color, linestyle=style,
+                linewidth=1.4, marker="o", markersize=2.5,
+                label=f"{comp} vs {opp} ({rows['mean'].iloc[-1]:+.2f})")
+        ax.fill_between(rows["iter"], rows["ci_lo"], rows["ci_hi"],
+                        color=color, alpha=0.10, linewidth=0)
+    if "promoted" in c.columns:
+        promo = sorted({int(i) for i in c.loc[c["promoted"] == 1, "iter"]})
+        for k, it in enumerate(promo):
+            ax.axvline(it, color="C3", linestyle="--", alpha=0.45, linewidth=1.0,
+                       label="champion promoted" if k == 0 else None)
+    ax.legend(loc="best", fontsize=7, ncol=2)
+
+
 def _plot_critic(ax, df: pd.DataFrame, window: int, promo_iters=()) -> None:
     x, v = df["iter"], df["value_loss"]
     ax.scatter(x, v, s=8, alpha=0.2, color="C0", label="value_loss (per iter)")
@@ -239,6 +306,10 @@ def _draw(fig, axes, csv_path: Path, window: int, kl_target: float, positions_pe
     _plot_per_net(axes[4], df, window, "_entropy", ylabel="entropy",
                   title="Per-net entropy")
     _plot_gate(axes[5], csv_path)
+    _plot_components(axes[6], csv_path)
+    # 4x2 grid for 7 panels; the spare slot stays blank rather than stretching the
+    # layout. Re-hidden every redraw because `ax.clear()` restores visibility.
+    axes[7].set_visible(False)
 
     for ax in axes:
         ax.twinx = orig_twinx[ax]
@@ -251,7 +322,7 @@ def _draw(fig, axes, csv_path: Path, window: int, kl_target: float, positions_pe
 
 def _plot(csv_path: Path, window: int, out: Path | None, kl_target: float,
           positions_per_iter: int, watch: float | None) -> None:
-    fig, axes = plt.subplots(3, 2, figsize=(18, 12))
+    fig, axes = plt.subplots(4, 2, figsize=(18, 16))
     axes = axes.flatten()
     for ax in axes:
         ax._twins = []
