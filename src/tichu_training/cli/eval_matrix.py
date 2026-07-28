@@ -188,6 +188,9 @@ def _run_tournament_mode(
             result = run_full_tournament(
                 agent_builders, positions,
                 bootstrap_iters=bootstrap_iters, seed=seed, workers=workers,
+                # Seat-swap cluster bootstrap. Off by default so existing matrices
+                # keep their historical intervals; opt in per config.
+                paired=bool(config.get("paired_ci", False)),
                 progress=(None if not show_progress else bar.update),
             )
     elif variant == "play_strength":
@@ -369,12 +372,27 @@ def _pretty_print(result: MatrixResult, names: list[str]) -> None:
         print(row)
     print()
     print("95% bootstrap CI (lower, upper):")
+    seen: set[frozenset[str]] = set()
     for a in names:
         for b in names:
             if a == b:
                 continue
             lo, hi = result.ci(a, b)
             print(f"  {a} vs {b}: mean={result.mean(a, b):+.2f}  CI=[{lo:+.2f}, {hi:+.2f}]  n={result.n(a, b)}")
+            # Decomposition, once per unordered pair (the mirrored row is just the
+            # negation). A total near zero can be two large opposite components —
+            # +5.49 card play against -5.35 call bonus in the iter27008 ship check —
+            # and that is usually the actionable half of the result.
+            key = frozenset((a, b))
+            if key in seen or not result._play_mean:
+                continue
+            seen.add(key)
+            cb_lo, cb_hi = result.call_bonus_ci(a, b)
+            pl_lo, pl_hi = result.play_ci(a, b)
+            print(f"      card play : {result.play_mean(a, b):+7.2f}  "
+                  f"[{pl_lo:+.2f}, {pl_hi:+.2f}]")
+            print(f"      call bonus: {result.call_bonus_mean(a, b):+7.2f}  "
+                  f"[{cb_lo:+.2f}, {cb_hi:+.2f}]")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,23 @@ class MatrixResult:
     _call_bonus_mean: dict[tuple[str, str], float] = field(default_factory=dict)
     _win_rate: dict[tuple[str, str], float] = field(default_factory=dict)
     _tie_rate: dict[tuple[str, str], float] = field(default_factory=dict)
+    # Decomposition of the total margin into its Call-bonus and card-play halves,
+    # each with its own CI. A pair can be near-zero overall while both halves are
+    # large and opposite — the iter27008 ship check was +0.14 total from +5.49 card
+    # play and -5.35 call bonus — and reporting only the total hides that entirely.
+    _call_bonus_ci: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
+    _play_mean: dict[tuple[str, str], float] = field(default_factory=dict)
+    _play_ci: dict[tuple[str, str], tuple[float, float]] = field(default_factory=dict)
+
+    def call_bonus_ci(self, a: str, b: str) -> tuple[float, float]:
+        return self._call_bonus_ci.get((a, b), (0.0, 0.0))
+
+    def play_mean(self, a: str, b: str) -> float:
+        """Total margin minus the Call-bonus component: pure card play."""
+        return self._play_mean.get((a, b), 0.0)
+
+    def play_ci(self, a: str, b: str) -> tuple[float, float]:
+        return self._play_ci.get((a, b), (0.0, 0.0))
 
     def mean(self, a: str, b: str) -> float:
         return self._mean[(a, b)]
@@ -91,10 +108,18 @@ def run_full_tournament(
     seed: int = 0,
     workers: int = 1,
     progress: Callable[[int], None] | None = None,
+    paired: bool = False,
 ) -> MatrixResult:
     """Full-strength all-vs-all matrix: the complete stack (Grand-Tichu ->
     Schupfen -> Tichu -> Play), reporting the total delta plus the Call-bonus
     breakdown per pair. See ADR-0025.
+
+    `paired` bootstraps per-DEAL seat-swap pair means instead of the 2N individual
+    arrangements — the correct cluster for this design, which always seat-swaps
+    (`_play_one_position`). It narrows the CI ~25% at an unchanged point estimate
+    (rho ~ -0.43 measured on 40k ML-vs-ML deals). Off by default so existing
+    matrices keep their historical (too-wide) intervals rather than silently
+    shifting under a re-run.
 
     Agents are supplied as zero-argument **builder callables** (name -> builder)
     rather than live instances, so the same recipe can be rebuilt independently
@@ -127,15 +152,18 @@ def run_full_tournament(
                 agents[a], agents[b], positions, label=f"{a} vs {b}", progress=progress
             )
 
-        return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions))
+        return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions),
+                           paired=paired)
 
     return _run_full_tournament_parallel(
-        names, agent_builders, positions, bootstrap_iters, seed, workers, progress
+        names, agent_builders, positions, bootstrap_iters, seed, workers, progress,
+        paired=paired,
     )
 
 
 def _run_full_tournament_parallel(
     names, agent_builders, positions, bootstrap_iters, seed, workers, progress=None,
+    paired: bool = False,
 ) -> MatrixResult:
     """Parallel full-strength matrix. Each worker rebuilds every agent once (from
     the builders) and caches the Pool of Positions; per-pair work is dispatched as
@@ -193,7 +221,8 @@ def _run_full_tournament_parallel(
                 np.array(bonuses, dtype=np.float64),
             )
 
-        return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions))
+        return _run_matrix(names, pair_fn, bootstrap_iters, seed, len(positions),
+                           paired=paired)
 
 
 def collect_pair_deltas(
@@ -303,7 +332,8 @@ def _worker_play_chunk(
     return totals, bonuses
 
 
-def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -> MatrixResult:
+def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int,
+                paired: bool = False) -> MatrixResult:
     if len(names) < 2:
         raise ValueError(f"need at least 2 agents, got {len(names)}")
     rng = np.random.default_rng(seed)
@@ -316,7 +346,7 @@ def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -
             pair_i, len(pairs), a, b, n_units,
         )
         deltas, cb_deltas = pair_fn(a, b)
-        mean_ab, lo, hi = _bootstrap_ci(deltas, bootstrap_iters, rng)
+        mean_ab, lo, hi = _bootstrap_ci(deltas, bootstrap_iters, rng, paired=paired)
         n_obs = len(deltas)
         # Per-Round win-rate from the SAME deltas the mean uses (no extra RNG draw,
         # so serial/parallel and the existing mean-CIs are untouched). A wins when
@@ -325,6 +355,20 @@ def _run_matrix(names, pair_fn, bootstrap_iters: int, seed: int, n_units: int) -
         tie = float((deltas == 0).mean()) if n_obs else 0.0
         b_win = float((deltas < 0).mean()) if n_obs else 0.0
         cb_mean = float(cb_deltas.mean()) if cb_deltas is not None and len(cb_deltas) else 0.0
+        # Split the margin into its Call-bonus and card-play halves, each bootstrapped
+        # on the same observations, so a pair that nets to ~0 from two large opposite
+        # components is readable rather than invisible.
+        if cb_deltas is not None and len(cb_deltas) == n_obs and n_obs:
+            _, cb_lo, cb_hi = _bootstrap_ci(cb_deltas, bootstrap_iters, rng, paired=paired)
+            play_deltas = deltas - cb_deltas
+            pl_mean, pl_lo, pl_hi = _bootstrap_ci(
+                play_deltas, bootstrap_iters, rng, paired=paired)
+            result._call_bonus_ci[(a, b)] = (cb_lo, cb_hi)
+            result._call_bonus_ci[(b, a)] = (-cb_hi, -cb_lo)
+            result._play_mean[(a, b)] = pl_mean
+            result._play_mean[(b, a)] = -pl_mean
+            result._play_ci[(a, b)] = (pl_lo, pl_hi)
+            result._play_ci[(b, a)] = (-pl_hi, -pl_lo)
         log.info(
             "  done: %s vs %s mean delta=%+.1f (call-bonus %+.1f, n=%d)",
             a, b, mean_ab, cb_mean, n_obs,
