@@ -92,19 +92,24 @@ def export_opponent(weights_path: str, arch_cfg: dict, out_dir) -> dict:
 def greedy_pair_margins(
     learner_kwargs: dict, opp_kwargs: dict, positions, *,
     skill_decile: int, workers: int = 1,
-) -> np.ndarray:
-    """Seat-swapped greedy learner-minus-opponent total-score margins over `positions`
-    (2*len(positions) values, one per paired observation). Builds two deployed greedy
-    `MLAgent`s from the exported TorchScript and reuses the tournament's
-    `collect_pair_deltas` — the same per-Position observations `check_cotrain`'s
-    bootstrap draws from. Builders are module-level `partial`s (spawn-safe) so a
-    `workers>1` tournament can rebuild its agents per worker."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Seat-swapped greedy learner-minus-opponent margins over `positions` as
+    `(totals, call_bonuses)` — 2*len(positions) values each, one per paired
+    observation, index-aligned. Builds two deployed greedy `MLAgent`s from the
+    exported TorchScript and reuses the tournament's `collect_pair_deltas` — the same
+    per-Position observations `check_cotrain`'s bootstrap draws from. Builders are
+    module-level `partial`s (spawn-safe) so a `workers>1` tournament can rebuild its
+    agents per worker.
+
+    The call-bonus stream used to be discarded here. It is the half that made the
+    iter27008 champion read as +0.14 overall while being +5.5 on card play and -5.4
+    on calls — a trade invisible to a total-only gate for 27k iterations."""
     builder_learner = partial(_build_agent, "ml", skill_decile=skill_decile, **learner_kwargs)
     builder_opp = partial(_build_agent, "ml", skill_decile=skill_decile, **opp_kwargs)
-    totals, _call_bonus = collect_pair_deltas(
+    totals, call_bonus = collect_pair_deltas(
         builder_learner, builder_opp, positions, workers=workers,
     )
-    return totals
+    return totals, call_bonus
 
 
 def record_greedy_window(
@@ -120,8 +125,14 @@ def record_greedy_window(
     learner_kwargs = export_live_models(learner_models, root / "learner")
     for name, weights_path in opp_cycle:
         opp_kwargs = export_opponent(weights_path, arch_cfg, root / f"opp_{name}")
-        margins = greedy_pair_margins(
+        totals, call_bonus = greedy_pair_margins(
             learner_kwargs, opp_kwargs, positions,
             skill_decile=skill_decile, workers=workers,
         )
-        gate.record(name, margins)
+        # The promote decision stays on `totals`; the split rides along as diagnostics
+        # so a card-play-for-call-bonus trade is visible per window instead of only at
+        # ship time. card_play is the residual, so the two always sum to the total.
+        gate.record(name, totals, components={
+            "card_play": totals - call_bonus,
+            "call_bonus": call_bonus,
+        })

@@ -153,6 +153,33 @@ def _append_gate_row(path: Path, iteration: int, v: dict) -> None:
                         f"{s['ci_hi']:.4f}", int(v["promote"])])
 
 
+def _append_gate_components(path: Path, iteration: int, v: dict) -> None:
+    """Append the per-opponent margin DECOMPOSITION to `promotion_gate_components.csv`.
+
+    Deliberately a separate file rather than extra columns on `promotion_gate.csv`:
+    that file already exists mid-run for every live run, its header is written once,
+    and appending wider rows under a 7-column header would corrupt it for
+    `plot_cotrain_csv` and every other reader. NB nothing plots this yet.
+    """
+    rows = [
+        (opp, name, s)
+        for opp, st in v["opponents"].items()
+        for name, s in (st.get("components") or {}).items()
+    ]
+    if not rows:
+        return
+    fresh = not path.exists() or path.stat().st_size == 0
+    with open(path, "a", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        if fresh:
+            w.writerow(["iter", "opponent", "component", "n", "mean", "se",
+                        "ci_lo", "ci_hi", "promoted"])
+        for opp, name, s in rows:
+            w.writerow([iteration, opp, name, v["opponents"][opp]["n"],
+                        f"{s['mean']:.4f}", f"{s['se']:.4f}",
+                        f"{s['ci_lo']:.4f}", f"{s['ci_hi']:.4f}", int(v["promote"])])
+
+
 def _gate_logged_iters(path: Path) -> set[int]:
     """Iters that already have verdict rows in `promotion_gate.csv`. Used on resume to
     detect a greedy-gate window killed mid-tournament: the Resume Bundle is saved
@@ -557,6 +584,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             return
         v = gate.verdict()
         _append_gate_row(gate_log_path, boundary, v)
+        _append_gate_components(run_dir / "promotion_gate_components.csv", boundary, v)
         if v["promote"]:
             _save_champion(champion_path, models, critic)
             # Serving snapshot AT the promotion iter so the champion is directly
@@ -582,6 +610,16 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             opp_str = "  ".join(_opp(o, s) for o, s in v["opponents"].items())
             print(f"  gate {'PROMOTE' if v['promote'] else 'hold'} @ iter {boundary}: "
                   f"{opp_str}", flush=True)
+            # Decomposition line: a total near zero can be a large card-play gain
+            # cancelled by a large call-bonus loss. Diagnostic only — the verdict
+            # above is drawn on the total.
+            for o, s in v["opponents"].items():
+                comps = s.get("components") or {}
+                if comps:
+                    parts = "  ".join(
+                        f"{n}={c['mean']:+.2f}+/-{1.96 * c['se']:.2f}"
+                        for n, c in comps.items())
+                    print(f"       {o}: {parts}", flush=True)
         gate.conclude(v)  # Pooled Verdict: the pool survives holds, clears on promotion
 
     # Resume catch-up: the Resume Bundle is written BEFORE the gate window runs, so

@@ -75,8 +75,12 @@ def test_identical_greedy_policies_net_to_zero_under_seat_swap(tmp_path):
     models = _tiny_models()
     kw = export_live_models(models, tmp_path / "same")
     positions = generate_full_position_pool(seed=1, n=4)
-    margins = greedy_pair_margins(kw, kw, positions, skill_decile=9, workers=1)
+    margins, call_bonus = greedy_pair_margins(kw, kw, positions, skill_decile=9, workers=1)
     assert margins.shape == (2 * len(positions),)  # seat-swap => 2 obs per deal
+    # The call-bonus half rides along index-aligned (the gate records it as a
+    # diagnostic component); identical policies cancel in it too.
+    assert call_bonus.shape == margins.shape
+    assert np.allclose(call_bonus[0::2], -call_bonus[1::2])
     # Each seat-swapped pair (arrangement 1, arrangement 2) sums to zero.
     assert np.allclose(margins[0::2], -margins[1::2]), f"pairs must cancel, got {margins}"
     assert np.isclose(margins.mean(), 0.0), f"identical policies must net to 0, got {margins.mean()}"
@@ -100,7 +104,8 @@ def test_export_opponent_loads_rollout_weights_and_exports(tmp_path):
     # models live (identical => all-zero margins).
     learner_kw = export_live_models(_tiny_models(seed=3), tmp_path / "learner3")
     positions = generate_full_position_pool(seed=2, n=3)
-    margins = greedy_pair_margins(learner_kw, kwargs, positions, skill_decile=9, workers=1)
+    margins, _call_bonus = greedy_pair_margins(
+        learner_kw, kwargs, positions, skill_decile=9, workers=1)
     # Byte-faithful opponent => identical policies => seat-swap pairs cancel, mean 0.
     assert np.allclose(margins[0::2], -margins[1::2])
     assert np.isclose(margins.mean(), 0.0)

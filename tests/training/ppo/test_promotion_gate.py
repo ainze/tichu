@@ -525,3 +525,77 @@ def test_pool_windows_zero_is_the_unbounded_default():
         gate.record("champion", _edge(0.0, 50, 100))
         gate.conclude(gate.verdict())
     assert gate.n("champion") == 600
+
+
+# --- diagnostic component streams --------------------------------------------
+# A total near zero can be two large opposite halves. The iter27008 champion read
+# +0.14 overall while being +5.5 on card play and -5.4 on call bonus — a trade a
+# total-only gate could not see for 27k iterations, surfacing only at ship time.
+# Components ride along with the margins; they never touch the promote decision.
+
+
+def test_components_are_reported_but_never_gate_the_promotion():
+    gate = PromotionGate(window_games=1000, paired=True)
+    totals = _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=1)
+    bonus = [t - 40.0 for t in totals]          # calls -40, card play +40 => net 0
+    gate.record("champion", totals,
+                components={"card_play": [t - b for t, b in zip(totals, bonus)],
+                            "call_bonus": bonus})
+    v = _champ(gate.verdict())
+    assert v["components"]["call_bonus"]["mean"] == pytest.approx(-40.0, abs=1.0)
+    assert v["components"]["card_play"]["mean"] == pytest.approx(+40.0, abs=1.0)
+    assert v["mean"] == pytest.approx(0.0, abs=2.0), "the halves cancel in the total"
+    # ...and the verdict is still decided purely by the total.
+    assert gate.verdict()["promote"] is False
+
+
+def test_components_survive_the_sliding_trim_still_aligned():
+    gate = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    for w in range(5):
+        totals = _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w)
+        bonus = [t - 40.0 for t in totals]
+        gate.record("champion", totals,
+                    components={"card_play": [t - b for t, b in zip(totals, bonus)],
+                                "call_bonus": bonus})
+    assert gate.n("champion") == 2000
+    comps = _champ(gate.verdict())["components"]
+    # If the trim had cut margins and components by different amounts, these would
+    # drift off their planted values.
+    assert comps["call_bonus"]["mean"] == pytest.approx(-40.0, abs=1.0)
+    assert comps["card_play"]["mean"] == pytest.approx(+40.0, abs=1.0)
+
+
+def test_component_length_mismatch_is_rejected():
+    gate = PromotionGate(window_games=10)
+    with pytest.raises(ValueError, match="component length mismatch"):
+        gate.record("champion", [1.0, 2.0, 3.0, 4.0], components={"half": [1.0, 2.0]})
+
+
+def test_components_round_trip_through_state():
+    gate = PromotionGate(window_games=1000, pooled=True, paired=True)
+    totals = _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=2)
+    bonus = [t - 40.0 for t in totals]
+    gate.record("champion", totals,
+                components={"card_play": [t - b for t, b in zip(totals, bonus)],
+                            "call_bonus": bonus})
+    resumed = PromotionGate(window_games=1000, pooled=True, paired=True)
+    resumed.load_state(gate.state())
+    assert _champ(resumed.verdict())["components"]["call_bonus"]["mean"] == pytest.approx(
+        _champ(gate.verdict())["components"]["call_bonus"]["mean"])
+
+
+def test_promotion_clears_components_with_the_margins():
+    gate = PromotionGate(window_games=100, pooled=True)
+    gate.record("champion", _edge(50, 10, 100),
+                components={"call_bonus": [0.0] * 100})
+    v = gate.verdict()
+    assert v["promote"] is True
+    gate.conclude(v)
+    assert gate.n("champion") == 0
+    assert not _champ(gate.verdict()).get("components")
+
+
+def test_gate_without_components_still_works():
+    gate = PromotionGate(window_games=100)
+    gate.record("champion", _edge(50, 10, 100))
+    assert "components" not in _champ(gate.verdict())

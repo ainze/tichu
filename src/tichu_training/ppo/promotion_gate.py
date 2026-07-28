@@ -113,19 +113,45 @@ class PromotionGate:
                 "after every verdict, so there is no accumulation to bound")
         self._rng = np.random.default_rng(seed)
         self._margins: dict[str, list[float]] = {o: [] for o in self.opponents}
+        # Diagnostic-only decomposition of the SAME observations (e.g. card play vs
+        # call bonus). Never consulted by `ready()` or `promote` — the ratchet stays
+        # on the total. Exists because a total near zero can be two large opposite
+        # halves: the iter27008 champion was +0.14 overall from +5.5 card play and
+        # -5.4 call bonus, a trade the gate could not see for 27k iterations and that
+        # only surfaced at ship time.
+        self._components: dict[str, dict[str, list[float]]] = {o: {} for o in self.opponents}
         # New-data latch: one verdict per batch of recorded margins. Historically
         # reset() enforced this implicitly (empty pool => not ready); a pooled HOLD
         # keeps the pool, so without the latch a caller polling ready() every
         # iteration would re-draw and re-log the same verdict until the next window.
         self._dirty = False
 
-    def record(self, opponent: str, margins) -> None:
+    def record(self, opponent: str, margins, *, components=None) -> None:
         """Add this iteration's per-game learner margins (one value per game) for the
-        opponent it played this iteration."""
+        opponent it played this iteration.
+
+        `components` is an optional `{name: series}` decomposition of the SAME
+        observations (e.g. `{"card_play": ..., "call_bonus": ...}`), one value per
+        margin and in the same order. It is reported in the verdict but never
+        consulted by the promote decision.
+        """
         if opponent not in self._margins:
             raise KeyError(f"unknown opponent {opponent!r}; expected one of {self.opponents}")
         vals = self._margins[opponent]
         vals.extend(float(m) for m in margins)
+        if components:
+            # Components are appended alongside the margins and trimmed with them, so
+            # index alignment survives the slide. A length mismatch would silently
+            # misalign the pairs after a trim, so it fails loudly here instead.
+            store = self._components[opponent]
+            for name, series in components.items():
+                store.setdefault(name, []).extend(float(v) for v in series)
+            bad = {n: len(v) for n, v in store.items() if len(v) != len(vals)}
+            if bad:
+                raise ValueError(
+                    f"component length mismatch for opponent {opponent!r}: margins "
+                    f"{len(vals)}, components {bad} — a decomposition must carry one "
+                    "value per margin, in the same order")
         if self.pool_windows:
             # Slide: drop the oldest margins beyond the cap. The cap is a multiple of
             # window_games and every greedy window appends exactly window_games values,
@@ -133,7 +159,10 @@ class PromotionGate:
             # of `paired` stay aligned across the cut.
             cap = self.pool_windows * self.window_games
             if len(vals) > cap:
-                del vals[:len(vals) - cap]
+                drop = len(vals) - cap
+                del vals[:drop]
+                for series in self._components[opponent].values():
+                    del series[:drop]   # same cut, same indices
         self._dirty = True
 
     def n(self, opponent: str) -> int:
@@ -166,14 +195,41 @@ class PromotionGate:
         lo, hi = (float(v) for v in np.percentile(boots, [2.5, 97.5]))
         return mean, lo, hi
 
+    def _component_stat(self, vals: list[float]) -> dict:
+        """Mean + normal-approx 95% interval for a diagnostic component.
+
+        Deliberately NOT the percentile bootstrap `_ci` uses. That draws an
+        `(iters, n)` index matrix — at a pooled n of 147k with 1000 iters that is
+        ~1.2 GB per call, and running it for every component of every opponent would
+        multiply both the time and the peak memory of a hot loop for a stream that
+        cannot affect the promote decision. The analytic SE over the same clusters is
+        O(n), allocation-free, and more than adequate to read a +5.5 / -5.4 split.
+        """
+        arr = np.asarray(vals, dtype=float)
+        if self.paired and arr.size:
+            from tichu_eval.tournament import pair_cluster
+
+            arr = pair_cluster(arr)
+        if arr.size == 0:
+            return {"mean": 0.0, "se": 0.0, "ci_lo": 0.0, "ci_hi": 0.0}
+        mean = float(arr.mean())
+        se = float(arr.std(ddof=1) / np.sqrt(arr.size)) if arr.size > 1 else 0.0
+        return {"mean": mean, "se": se, "ci_lo": mean - 1.96 * se, "ci_hi": mean + 1.96 * se}
+
     def verdict(self) -> dict:
-        """`{promote, opponents: {name: {n, mean, ci_lo, ci_hi}}}`. `promote` requires
-        a full window for every REQUIRED opponent AND each of their CI lower bounds
-        above `threshold`; observe-only streams are reported but never consulted."""
+        """`{promote, opponents: {name: {n, mean, ci_lo, ci_hi, components}}}`.
+        `promote` requires a full window for every REQUIRED opponent AND each of their
+        CI lower bounds above `threshold`; observe-only streams are reported but never
+        consulted, and neither are `components` — those are diagnostic only."""
         opp = {}
         for o in self.opponents:
             mean, lo, hi = self._ci(self._margins[o])
             opp[o] = {"n": len(self._margins[o]), "mean": mean, "ci_lo": lo, "ci_hi": hi}
+            if self._components[o]:
+                opp[o]["components"] = {
+                    name: self._component_stat(vals)
+                    for name, vals in sorted(self._components[o].items())
+                }
         promote = self.ready() and all(opp[o]["ci_lo"] > self.threshold for o in self.required)
         return {"promote": promote, "opponents": opp}
 
@@ -190,6 +246,7 @@ class PromotionGate:
     def reset(self) -> None:
         """Drop the accumulated windows for all opponents (call after each verdict)."""
         self._margins = {o: [] for o in self.opponents}
+        self._components = {o: {} for o in self.opponents}
         self._dirty = False
 
     def state(self) -> dict:
@@ -208,6 +265,10 @@ class PromotionGate:
         """
         return {
             "margins": {o: np.asarray(v, dtype=np.float64) for o, v in self._margins.items()},
+            "components": {
+                o: {n: np.asarray(v, dtype=np.float64) for n, v in comps.items()}
+                for o, comps in self._components.items()
+            },
             "dirty": bool(self._dirty),
             "rng": self._rng.bit_generator.state,
         }
@@ -223,6 +284,11 @@ class PromotionGate:
         """
         saved = state.get("margins") or {}
         self._margins = {o: [float(m) for m in saved.get(o, [])] for o in self.opponents}
+        saved_c = state.get("components") or {}
+        self._components = {
+            o: {n: [float(v) for v in vals] for n, vals in (saved_c.get(o) or {}).items()}
+            for o in self.opponents
+        }
         self._dirty = bool(state.get("dirty", False))
         if state.get("rng") is not None:
             self._rng.bit_generator.state = state["rng"]
