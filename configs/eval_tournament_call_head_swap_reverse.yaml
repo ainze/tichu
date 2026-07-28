@@ -1,0 +1,75 @@
+# Reverse chimera: are the candidate's call heads bad in EVERY context, or only
+# in the one they were trained for?
+#
+# The forward chimera (configs/eval_tournament_call_head_swap.yaml) refuted the
+# "the heads are the deficit" hypothesis. On the CANDIDATE's play policy the two
+# call heads are statistically indistinguishable:
+#     candidate vs chimera   +0.11 [-0.97, +1.11]
+#        card play           -0.46 [-0.94, +0.04]
+#        call bonus          +0.57 [-0.27, +1.37]
+# and installing the served heads on the candidate's play made the deficit WORSE
+# (-4.94 -> -7.30), not better. So call heads appear co-adapted to the play policy
+# they were trained against.
+#
+# This is the same head-quality test run on the OTHER play policy. Both agents
+# here carry the SERVED play + schupfen nets; the ONLY difference between them is
+# which tichu/grand networks they use. So the margin is attributable to call-head
+# quality alone, on a fixed and competent play policy — the cleanest head
+# comparison available in either direction.
+#
+#   reverse_chimera = SERVED play + SERVED schupfen + CANDIDATE tichu + CANDIDATE grand
+#   served          = SERVED everything
+#
+# Read against the forward result:
+#   call bonus ~ 0   -> the candidate's heads are fine wherever they are placed.
+#                       Combined with the forward run, that makes the heads
+#                       equivalent in BOTH contexts and pins the entire -4.94 on
+#                       the candidate's PLAY policy failing to convert calls.
+#                       Consequence: no call-head work can recover it, and Stage 1
+#                       of the staged plan must make the play objective value
+#                       going out first, not just card points.
+#   call bonus < 0   -> the heads ARE worse, but only show it against a play policy
+#                       competent enough to convert. The co-adaptation story is
+#                       wrong and the head is worth retraining on its own.
+#
+# NB the card-play component will not be exactly zero despite identical play nets:
+# a call changes how the caller plays (going out beats collecting points). The
+# forward run priced that at -0.46, so expect small and of the opposite sign here.
+#
+# One pair only — ~20 min at 12000 deals, matched to the forward run so the CIs
+# are directly comparable.
+#
+#   py -m tichu_training.cli.eval_matrix --config configs/eval_tournament_call_head_swap_reverse.yaml --mode tournament -v
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 12000
+bootstrap_iters: 2000
+paired_ci: true
+seed: 0
+workers: 10
+
+_served_play: &served_play
+  checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+  schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+
+agents:
+  # SERVED play/schupfen + the CANDIDATE's call heads. The only delta vs the row
+  # below is the two call networks.
+  - name: reverse_chimera_servedplay_candcalls
+    factory: ml
+    kwargs:
+      <<: *served_play
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\grand_tichu_call.pt
+      skill_decile: 9
+
+  - name: served_cpfix3328
+    factory: ml
+    kwargs:
+      <<: *served_play
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\eval_call_head_swap_reverse\matrix.parquet
