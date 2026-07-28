@@ -20,6 +20,12 @@ excluding a regression still supports a correctness-motivated ship (the
 served export over-wishes and gives Dog to the grand-caller's partner) —
 owner's call, this script just reports.
 
+The CI is the PAIRED (seat-swap cluster) bootstrap as of 2026-07-27: the two
+arrangements of a deal are not independent draws, and resampling them flat
+re-counts card luck the swap already cancelled (rho -0.43 vs cpfix3328 on the
+40k stream; ~25% too wide at n=40k). Both are printed — the flat number for
+continuity with the historical -2.69 reading, the paired one for the decision.
+
     $env:PYTHONPATH = "<worktree>\\src"
     py scripts/ship_check_wishfix_vs_cpfix3328.py --deals 40000 --workers 10
 """
@@ -50,8 +56,15 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=180_000_000,
                     help="fresh deal stream, >=100M, distinct from all diag streams")
     ap.add_argument("--workers", type=int, default=10)
-    ap.add_argument("--out", default=str(WISHFIX_RUN / "ship_check_vs_cpfix3328.npz"))
+    # Distinct per-run filename: the original ship_check_vs_cpfix3328.npz is the
+    # historical -2.69 reading (and the stream rho was measured off it) — a rerun
+    # must not clobber it.
+    ap.add_argument("--tag", default="iter27008",
+                    help="suffix for the saved deltas, identifying the candidate")
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    if args.out is None:
+        args.out = str(WISHFIX_RUN / f"ship_check_vs_cpfix3328_{args.tag}.npz")
 
     config = yaml.safe_load(open(args.config, encoding="utf-8"))
     skill_decile = int(config["ppo"].get("skill_decile", 9))
@@ -88,21 +101,32 @@ def main() -> int:
     np.savez(args.out, totals=totals, bonuses=bonuses,
              deals=np.asarray([args.deals]), seed=np.asarray([args.seed]))
 
-    rng = np.random.default_rng(0)
-    boots = totals[rng.integers(0, totals.size, size=(10_000, totals.size))].mean(axis=1)
-    lo, hi = np.percentile(boots, [2.5, 97.5])
+    from tichu_eval.tournament import _bootstrap_ci, pair_cluster
+
+    # Flat = the historical estimator (kept for continuity with the -2.69 read).
+    # Paired = the correct one for a seat-swapped design; it decides the verdict.
+    _, flo, fhi = _bootstrap_ci(totals, 10_000, np.random.default_rng(0))
+    _, lo, hi = _bootstrap_ci(totals, 10_000, np.random.default_rng(0), paired=True)
+    pairs = pair_cluster(totals)
+
     print(f"\n=== SHIP CHECK: wishfix champion vs cpfix3328 (served) ===", flush=True)
-    print(f"margin/round: {totals.mean():+.3f} [{lo:+.3f}, {hi:+.3f}]  "
+    print(f"margin/round: {totals.mean():+.3f}  "
           f"(n={totals.size} obs, {args.deals} deals)", flush=True)
+    print(f"  flat   CI [{flo:+.3f}, {fhi:+.3f}]  +/-{(fhi - flo) / 2:.3f}   "
+          f"(historical estimator; too wide on paired data)", flush=True)
+    print(f"  PAIRED CI [{lo:+.3f}, {hi:+.3f}]  +/-{(hi - lo) / 2:.3f}   "
+          f"rho={np.corrcoef(totals[0::2], totals[1::2])[0, 1]:+.3f}", flush=True)
     print(f"round record: win {(totals > 0).mean():.1%}  "
           f"loss {(totals < 0).mean():.1%}  tie {(totals == 0).mean():.1%}", flush=True)
+    print(f"deals that cancelled exactly: {(pairs == 0).mean():.1%} "
+          f"(both agents played them identically)", flush=True)
     print(f"call-bonus component: {bonuses.mean():+.3f}/round", flush=True)
     verdict = ("CLEARS the strict CI>0 ship bar" if lo > 0 else
                "regression NOT excluded — do not ship" if hi < 0 else
                "CI straddles zero — strict bar not met; correctness-motivated "
                "ship is an owner call (regression excluded)" if lo > -1.0 else
                "CI straddles zero, wide — strict bar not met")
-    print(f"verdict: {verdict}", flush=True)
+    print(f"verdict: {verdict}   (on the PAIRED CI)", flush=True)
     print(f"rows saved -> {args.out}", flush=True)
     return 0
 
