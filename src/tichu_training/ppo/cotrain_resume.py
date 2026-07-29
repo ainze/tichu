@@ -43,6 +43,7 @@ def save_resume_bundle(
     rng_state: dict,
     league=None,
     play_anchor=None,
+    gate=None,
 ) -> None:
     """Atomically write the whole training state to `path`, keeping the prior bundle
     at `path + PREV_SUFFIX`. Write order: serialize to a `.tmp`, fsync, move the
@@ -51,7 +52,12 @@ def save_resume_bundle(
 
     `play_anchor` (a play-net state_dict) rides along when periodic re-anchoring is
     on (ADR-0035 addendum) — without it a resume would rebuild the anchor from the
-    warm-start files and snap a re-anchored run back to its origin."""
+    warm-start files and snap a re-anchored run back to its origin.
+
+    `gate` (a `PromotionGate.state()` payload) likewise rides along so a POOLED gate
+    survives a restart. The pooled ratchet accumulates margins across many windows to
+    resolve a small edge; rebuilding the gate empty on resume silently throws that
+    accumulation away, so the edge can never bank on a run that is ever interrupted."""
     payload = {
         "version": 1,
         "models": {dt: m.state_dict() for dt, m in models.items()},
@@ -62,6 +68,7 @@ def save_resume_bundle(
         "rng": rng_state,
         "league": league if league is not None else [],
         "play_anchor": play_anchor,
+        "gate": gate,
     }
     tmp = path + ".tmp"
     with open(tmp, "wb") as fh:

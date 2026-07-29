@@ -1,0 +1,97 @@
+# Chimera: is the call deficit in the CALL HEADS, or in the play policy failing
+# to convert calls?
+#
+# The 40k ship check put the iter-27008 champion at +0.137 vs the served export,
+# from two large opposite halves:
+#     card play  +5.490 [+4.880, +6.093]
+#     call bonus -5.354 [-6.164, -4.520]
+# The behavioral profile (4800 seat-rounds/agent) says the candidate over-calls
+# Tichu (rate 0.189 vs 0.165, success 0.668 vs 0.717) and under-calls Grand
+# (0.057 vs 0.090, success 0.650 vs 0.620) — opposite errors — and that at a
+# MATCHED tichu rate the served head still picks better hands (0.717 vs 0.682).
+# That is a RANKING gap, which no threshold can close; the EV arithmetic says the
+# best available threshold arm recovers only +0.59 of the -3.42 it explains.
+#
+# But the profile is SELF-PLAY: the candidate's table is 5.5 points/round stronger
+# at card play, so its calls face tougher opponents and its success rate is biased
+# DOWNWARD by an unknown amount. The discrimination gap might be entirely that
+# artifact. This tournament removes the confound by holding everything fixed and
+# swapping ONLY the two call networks, head to head.
+#
+#   chimera = candidate play + candidate schupfen + SERVED tichu + SERVED grand
+#
+# Three pairs, each answering something distinct:
+#   chimera   vs served    -> if the call-bonus half collapses toward 0 while card
+#                             play stays ~+5.5, the CALL HEADS are the whole deficit
+#                             — and this chimera is a shippable agent TODAY, with
+#                             no retraining.
+#   candidate vs served    -> validity check; should reproduce the ship check's
+#                             +0.137 / +5.49 / -5.35 (different deal stream, so
+#                             within CI, not identical).
+#   chimera   vs candidate -> the cleanest isolation available: byte-identical
+#                             play and schupfen, ONLY the call nets differ, paired
+#                             on the same deals. Its call-bonus component IS the
+#                             head-swap effect, with no play confound at all.
+#                             NB its CARD-PLAY component will not be exactly zero
+#                             despite identical play nets: a call changes how the
+#                             caller plays (going out beats collecting points), so
+#                             this row also prices the play-side cost of calling.
+#                             Expect small; large would mean the call decision is
+#                             dragging card points around more than the bonus.
+#
+# If instead the call-bonus half persists in the chimera, the served heads are not
+# the fix: the candidate's PLAY policy is failing to convert calls (a play/call
+# coupling problem), and no call-head work will help.
+#
+# `paired_ci` uses the seat-swap cluster bootstrap — correct for a design that
+# always seat-swaps, ~25% narrower at an unchanged point estimate.
+#
+# 12000 deals x 3 pairs x2 arrangements. That is enough to resolve a ~5-point
+# call-bonus effect several times over; re-run the winning pair at 40k if it turns
+# into a ship decision.
+#
+#   py -m tichu_training.cli.eval_matrix --config configs/eval_tournament_call_head_swap.yaml --mode tournament -v
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 12000
+bootstrap_iters: 2000
+paired_ci: true
+seed: 0
+workers: 10
+
+_cand_play: &cand_play
+  checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\policy.pt
+  schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\schupfen.pt
+
+_served_calls: &served_calls
+  tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+  grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+agents:
+  # THE CHIMERA — candidate's play/schupfen, served's call heads. One variable.
+  - name: chimera_candplay_servedcalls
+    factory: ml
+    kwargs:
+      <<: [*cand_play, *served_calls]
+      skill_decile: 9
+
+  # The iter-27008 champion exactly as the ship check measured it.
+  - name: candidate
+    factory: ml
+    kwargs:
+      <<: *cand_play
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\grand_tichu_call.pt
+      skill_decile: 9
+
+  # The served export, all four nets.
+  - name: served_cpfix3328
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+      <<: *served_calls
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\eval_call_head_swap\matrix.parquet
