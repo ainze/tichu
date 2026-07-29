@@ -1,0 +1,105 @@
+# The BC starts -10.58 behind on call bonus. Is that its call HEADS, or its play?
+#
+# Established by configs/eval_tournament_bc_vs_served_calls.yaml (10k deals, paired):
+#     bc_wishfix vs served     total -16.29   card play  -5.71   call bonus -10.58
+#     candidate  vs served     total  +1.39   card play  +6.22   call bonus  -4.83
+#     bc_wishfix vs candidate  total -14.49   card play -10.99   call bonus  -3.50
+# Read the last row as candidate-minus-BC: 27k iterations of co-training improved
+# card play +10.99 AND call bonus +3.50, both CI-clean. There was no trade — the
+# earlier "co-training trades go-out-first for card points" reading was wrong in
+# SIGN. It came from treating a level difference between two BCs as if training had
+# generated it. The deficit is INHERITED and cotrain has been closing it, roughly
+# half in 27k iterations.
+#
+# So the target moved to the BC's call stack. This applies the chimera trick that
+# already worked once, now to the BC: hold everything fixed, swap ONLY the two call
+# networks.
+#
+#   bc_chimera = BC play + BC schupfen + SERVED tichu + SERVED grand
+#
+#   bc_chimera vs served     -> if the call-bonus half collapses from -10.58 toward
+#                               0, the BC's call HEADS are the weak link and Stage 2
+#                               ("tailor calls to a frozen play policy") has ~10
+#                               points of real headroom.
+#                            -> if it stays near -10.58, the BC's deficit is play
+#                               CONVERSION, which co-training already demonstrably
+#                               improves (+3.50 measured), and the answer is just
+#                               more/better play training rather than a call build.
+#   bc_wishfix vs served     -> anchor. Same pool, same seed, same n_deals as the run
+#                               above, so the POSITIONS ARE IDENTICAL and this must
+#                               reproduce -10.58 to within torch's cross-process
+#                               noise (~0.1%). If it does not, distrust everything
+#                               else in this matrix.
+#   bc_chimera vs bc_wishfix -> the clean isolation: byte-identical play and
+#                               schupfen, only the call nets differ, paired on the
+#                               same deals. Measured directly rather than by
+#                               differencing the other two pairs — head-to-head
+#                               margins do not compose, and this lineage has already
+#                               shown non-transitivity of ~2.3 points twice.
+#
+# Prior result worth holding in mind: on the CANDIDATE's play the candidate and
+# served call heads were interchangeable (+0.57 [-0.27, +1.37]), and on SERVED's play
+# likewise (-0.50 [-1.31, +0.28]). Those were cotrain-refined heads on cotrain-refined
+# play. The BC's heads are BC-trained (calls_full_corpus_v6_tichu_resid /
+# calls_full_corpus_v6) sitting on raw BC play, so the equivalence is NOT assumed to
+# carry over — that is exactly what this measures.
+#
+# NB the card-play component will not be exactly zero despite identical play nets: a
+# call changes how the caller plays (going out beats collecting points). Priced at
+# -0.46 in the first chimera run, so expect small. Large would be its own finding.
+#
+# bc_wishfix is exported from the four warm_start checkpoints, NOT from the run's
+# _bc_opponent.pt — that file is written lazily at gate setup and under
+# reanchor_on_promote a post-promotion resume captures the ANCHOR instead (measured:
+# its play net differs from the BC by max|logit diff| 812). Regenerate with:
+#     py -m scripts.export_rollout_weights --warm-start \
+#         --config configs/cotrain_v6_pbrs_resid_wish_gated_wishfix.yaml \
+#         --out data/export/bc_wishfix_warmstart
+#
+# 3 pairs x 10000 deals, ~50 min at 10 workers.
+#
+#   py -m tichu_training.cli.eval_matrix --config configs/eval_tournament_bc_call_head_swap.yaml --mode tournament -v
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+n_deals: 10000          # identical pool/seed/n to eval_tournament_bc_vs_served_calls
+bootstrap_iters: 2000   # => the shared bc-vs-served pair is a reproducibility check
+paired_ci: true
+seed: 0
+workers: 10
+
+_bc_play: &bc_play
+  checkpoint_path: C:\workbench\tichu\data\export\bc_wishfix_warmstart\policy.pt
+  schupfen_path:   C:\workbench\tichu\data\export\bc_wishfix_warmstart\schupfen.pt
+
+_served_calls: &served_calls
+  tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+  grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+agents:
+  # THE CHIMERA — BC play/schupfen, served call heads. One variable.
+  - name: bc_chimera_bcplay_servedcalls
+    factory: ml
+    kwargs:
+      <<: [*bc_play, *served_calls]
+      skill_decile: 9
+
+  # The wishfix BC exactly as the lineage warm-started from it.
+  - name: bc_wishfix
+    factory: ml
+    kwargs:
+      <<: *bc_play
+      tichu_call_path: C:\workbench\tichu\data\export\bc_wishfix_warmstart\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\export\bc_wishfix_warmstart\grand_tichu_call.pt
+      skill_decile: 9
+
+  # The served export, all four nets.
+  - name: served_cpfix3328
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+      schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+      <<: *served_calls
+      skill_decile: 9
+
+output: C:\workbench\tichu\data\runs\eval_bc_call_head_swap\matrix.parquet
