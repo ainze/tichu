@@ -4,7 +4,10 @@ the legal set, and tier-2 worlds must keep the actor's observation fixed. All wi
 deterministic RuleAgents — no torch, no checkpoints.
 """
 
+import os
 import random
+import subprocess
+import sys
 
 from tichu_engine.legality import Pass, legal_actions_for
 from tichu_eval.full_position_pool import generate_full_position_pool
@@ -12,6 +15,7 @@ from tichu_eval.play_full import play_full_round
 from tichu_ml.rule_agent import RuleAgent
 from tichu_training.search.blunder_miner import (
     candidate_alternatives,
+    candidate_seed,
     decision_context,
     mine_round,
     playout_from,
@@ -19,6 +23,23 @@ from tichu_training.search.blunder_miner import (
     team_relative,
     verify_candidate,
 )
+
+
+def _seed_in_subprocess(hash_seed: str, key=(7, 13, "Pass()")) -> int:
+    """Compute candidate_seed in a FRESH interpreter under an explicit
+    PYTHONHASHSEED. Same-process equality proves nothing here — builtin hash() of a
+    str is salted per interpreter, so a salted seed looks perfectly deterministic
+    until it crosses a process boundary (and mp 'spawn' crosses one per worker)."""
+    env = {**os.environ, "PYTHONHASHSEED": hash_seed}
+    src = str((__file__ + "/../../../../src").replace("\\", "/"))
+    env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from tichu_training.search.blunder_miner import candidate_seed;"
+         f"print(candidate_seed(*{key!r}))"],
+        capture_output=True, text=True, env=env, check=True,
+    )
+    return int(out.stdout.strip())
 
 
 class _TichuCallingRule(RuleAgent):
@@ -161,3 +182,20 @@ def test_playout_parity_holds_in_a_determinized_world():
     totals = playout_from(agents, world, forced_action=d.chosen,
                           asked_tichu=d.asked_tichu, initial_scores=d.initial_scores)
     assert isinstance(totals, tuple) and len(totals) == 2
+
+
+def test_candidate_seed_is_stable_across_processes_with_different_hash_salts():
+    """A tier-2 verdict must be reproducible. The seed therefore may not depend on
+    builtin hash(), which is PYTHONHASHSEED-salted and re-salted in every spawn
+    worker — so two runs of the same candidate would draw different worlds."""
+    assert _seed_in_subprocess("0") == _seed_in_subprocess("12345")
+
+
+def test_candidate_seed_separates_candidates():
+    """Distinct candidates must draw distinct worlds — a constant seed would
+    satisfy the stability test above while collapsing every verdict onto one
+    sample of the hidden-hand distribution."""
+    base = candidate_seed(7, 13, "Pass()")
+    assert candidate_seed(8, 13, "Pass()") != base
+    assert candidate_seed(7, 14, "Pass()") != base
+    assert candidate_seed(7, 13, "PlaySingle(rank=5)") != base
