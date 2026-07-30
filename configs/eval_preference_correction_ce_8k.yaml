@@ -49,3 +49,5 @@ agents:
       tichu_call_path: C:\workbench\tichu\data\runs\correction_corpus_iter27008\export_ce\tichu_call.pt
       grand_call_path: C:\workbench\tichu\data\runs\correction_corpus_iter27008\export_ce\grand_tichu_call.pt
 
+
+output: C:\workbench\tichu\data\runs\correction_corpus_iter27008\matrix_ce_8k.parquet
