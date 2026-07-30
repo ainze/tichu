@@ -324,3 +324,63 @@ arm runs:**
   floor of what this eval can certify.** §Decision 5's policy iteration is not an
   optional refinement; it is how the effect gets large enough to bank.
 - A null at 40k is a kill. A null at 8k is **not** — do not record one.
+
+## Both arms run (2026-07-30) — mechanism CONFIRMED, net EV not offline-resolvable
+
+Both arms trained on the realised corpus from the same base (`iter_27008`,
+provenance `argmax_is_chosen = 0.9997`). Priced on the 4,008 held-out rows over
+365 held-out Rounds using **verified deltas only** — no critic anywhere: a fixed
+Verified Correction credits its measured delta, a broken Verified Non-Correction
+debits its measured delta.
+
+```
+                  transfer  damage |   net    95% CI (bootstrap over Rounds)
+CE (June recipe)    0.149    0.098 |  -4.90  [-10.67, +0.74]
+PAIR                0.127    0.056 |  -0.31  [ -4.16, +3.48]
+PAIR - CE, paired over the same Rounds:  +4.59 [-0.35, +9.68]
+
+transfer diff  -0.022 +/- 0.083  -> NOT resolved (same transfer)
+damage   diff  -0.042 +/- 0.012  -> RESOLVED
+```
+
+**1. The mechanism claim holds, on the statistic that resolves.** PAIR achieves
+**the same transfer at half the damage** (5.6% vs 9.8%, ~7 sigma on 3,874 held-out
+negatives). §What-is-actually-new's diagnosis is confirmed: the June recipe's
+failure was the missing negative class and the mis-targeted regulariser, not
+"hard labels fight calibration" in general.
+
+**2. The June drift number was mis-measured by 10x.** That recipe reported 0.9%
+drift on its uniform ordinary set; on the *trigger* distribution it does **9.8%**
+damage. A guard that samples where the damage isn't will certify a policy that is
+being wrecked where it is.
+
+**3. The priced net does NOT resolve, and neither does any variant.** Baseline CI
+is +/-3.8/Round over 365 Rounds. A ~19-config sweep (10-800 epochs, delta_scale
+20-150, anchor_coef 10-100, corpus subsets 25-100%) spans -3.60 to +0.95 — the
+**entire sweep fits inside one CI width**. Two structural facts do survive because
+they are counts rather than delta-weighted sums: fixed corrections **plateau at
+17-18 of 134 across 50->800 epochs** while broken negatives climb monotonically
+218 -> 269, so past ~50 epochs every further step is pure damage. Transfer has a
+ceiling near 13%, matching June's 13.9-20.6% and the mining note's "max cluster
+n=2, no codifiable trigger".
+
+**4. REFUTED, so nobody retries it: anchoring the KL on Verified Non-Corrections.**
+The hinge pins one pair and leaves 1,807 logits free, and 11,551 training negatives
+from the exact trigger distribution sit unused — so anchoring on them looked like
+the obvious fix. Negatives-only is uniformly *worse* (-3.14, -2.42, -1.55 vs
+-0.31); negatives+ordinary read +0.95 once and **did not replicate**: three seeds
+of the identical config gave +0.95 / -0.45 / -1.67, paired vs baseline
+**-0.08 [-2.95, +2.61]**. It was a draw from a 19-config sweep — the piKL
+optimizer's-curse pattern, caught by pre-registered replication. §Decision 3's
+ordinary drift set stands.
+
+**5. Consequence: the offline instrument cannot decide this, by construction.**
++/-3.8 over 365 Rounds is the same order as the 4k-Starting-Position Tournament
+(+/-4.7) that the eval fix was built to escape; tightening it means more mined
+Rounds, i.e. the same ~80 h. That is not a failure of the pre-registration — it is
+ADR-0040's verdict restated with a better dial: **the Tournament is the only
+verdict instrument.** Proceed to it as amended (CE 8k, PAIR 40k), carrying the
+prediction on the record: PAIR prices at -0.31 +/- 3.8, and the one calibration
+point available (CE priced -4.90, Tournament-measured -18.2 in June) suggests the
+Tournament magnifies offline magnitude ~3.7x, presumably because a fine-tuned
+partner and altered continuations compound what a held-out row cannot see.
