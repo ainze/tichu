@@ -1,0 +1,51 @@
+# ADR-0042 verdict leg: CE control at n=8,192 against BOTH the base it was fine-tuned
+# from and the served export. All three pairs measured DIRECTLY — never difference
+# two other pairs (~2.3-point non-transitivity observed twice).
+#
+# paired_ci: true is NOT optional. eval_matrix defaults it to false, which is the
+# flat bootstrap that re-counts the card luck seat-swap already cancelled (~1.45x
+# too wide). That is the exact defect that held the promotion gate for 129
+# consecutive windows; leaving it off here would manufacture a false null on a
+# lever that gets no third reopening.
+#
+# Pool is seed 0 — the Correction Corpus was mined on seed 777000, so the eval
+# positions are disjoint from every state the corpus saw.
+#
+# Prediction on the record before the run (ADR-0042 §Both arms run): PAIR prices
+# at -0.31 +/- 3.8 offline; the one calibration point (CE priced -4.90 vs
+# Tournament-measured -18.2 in June) suggests the Tournament magnifies offline
+# magnitude ~3.7x. Expect roughly -1. CI_lo > 0 vs cpfix3328 is the ship bar;
+# a clean negative closes the delivery-mechanism question per the kill ladder.
+#
+#   ~15 min at ~10 pos/s. Do NOT run a second tournament concurrently (OOM, ADR-0034).
+
+variant: full_strength
+starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n49152.parquet
+n_deals: 8192
+n_offset: 40960
+bootstrap_iters: 2000
+paired_ci: true
+seed: 0
+workers: 10
+
+agents:
+  - name: iter_27008
+    factory: ml
+    kwargs:
+      checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\policy.pt
+      skill_decile: 9
+      schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\_ship_check_export\grand_tichu_call.pt
+
+  - name: ce
+    factory: ml
+    kwargs:
+      # ONLY policy.pt differs from iter_27008 — the other three nets are copied
+      # verbatim by the trainer, so the delta is attributable to the play head.
+      checkpoint_path: C:\workbench\tichu\data\runs\correction_corpus_iter27008\export_ce\policy.pt
+      skill_decile: 9
+      schupfen_path:   C:\workbench\tichu\data\runs\correction_corpus_iter27008\export_ce\schupfen.pt
+      tichu_call_path: C:\workbench\tichu\data\runs\correction_corpus_iter27008\export_ce\tichu_call.pt
+      grand_call_path: C:\workbench\tichu\data\runs\correction_corpus_iter27008\export_ce\grand_tichu_call.pt
+
