@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: rejected
 ---
 
 # Preference Correction — verified corrections delivered as a pairwise ordering
@@ -384,3 +384,58 @@ prediction on the record: PAIR prices at -0.31 +/- 3.8, and the one calibration
 point available (CE priced -4.90, Tournament-measured -18.2 in June) suggests the
 Tournament magnifies offline magnitude ~3.7x, presumably because a fine-tuned
 partner and altered continuations compound what a held-out row cannot see.
+
+## Outcome (2026-07-31) — KILLED per the pre-registered ladder
+
+```
+n=81,920 paired seat-swap observations (40,960 Starting Positions), paired CI
+
+  pair       vs iter_27008        -1.81  [-2.43, -1.21]   card -1.52  call -0.29
+  pair       vs cpfix3328_served  -2.71  [-3.81, -1.60]
+  iter_27008 vs cpfix3328_served  +0.27  [-0.84, +1.32]   card +5.31  call -5.58
+  ce         vs iter_27008        -4.81  [-6.41, -3.10]   (8k control)
+```
+
+**The kill bar was "PAIR's CI entirely below 0". It is: [-2.43, -1.21].** Not a
+null — a CI-clean regression against the very base it was fine-tuned from. Per
+§Pre-registered bars the delivery-mechanism question is **closed**, and no third
+reopening follows without a qualitatively new label source.
+
+**What still stands as measured fact.** PAIR is **+3.0/Round better than CE**
+(-1.81 vs -4.81), and offline it achieved the same transfer at half the damage
+(5.6% vs 9.8%, ~7 sigma). §What-is-actually-new's diagnosis was correct: the June
+recipe's specific defects were the missing negative class and a regulariser aimed
+at the wrong distribution, and fixing them recovers ~3 points. **It was not
+enough.** A large improvement to a mechanism that was losing by 4.8 still loses.
+
+**What is refuted — the exemption this ADR was granted on.** §Decisions 4-5
+exempted this design from the pMCPA/piKL/vine self-inconsistency family because
+the update is "second-order in size" — ~0.17% of Decisions changed. That was
+argued explicitly and accepted. A 0.17% behaviour change produced **-1.81/Round**,
+and the loss is **in card play** (-1.52), the head that was trained. So the
+second-order argument does not hold at this scale: a Verified Correction holds
+given all four seats continue under the *mining* policy, and even a tiny
+deviation invalidates enough of them to swamp the gain. **The self-inconsistency
+family now has a fourth member, and the "small update" escape is closed with it.**
+
+**The offline pricing instrument, honestly scored.** Two calibration points:
+CE priced -4.90 / measured -4.81 (error +0.09), PAIR priced -0.31 / measured
+-1.81 (error -1.50). Both fell inside the offline CI, and the point estimates
+were optimistic by ~0 and ~1.5. Useful for ordering variants, **not** a substitute
+for a Tournament — which is ADR-0040's verdict for the third time. The
+mid-session claim that "the Tournament magnifies offline magnitude ~3.7x" was
+wrong and is retracted: it compared this corpus's CE price against *June's*
+different CE arm on a different corpus and base — a cross-lineage comparison
+treated as a calibration, the same error §5 of the 2026-07-29 note records.
+
+**Incidental, and material to the open ship decision.** `iter_27008` vs the served
+export reads **+0.27 [-0.84, +1.32]** at n=40,960 with the paired CI — *parity*,
+revising the +1.39 [-0.75, +3.58] that stood as "the best artifact". The split is
+unchanged in character: card play +5.31, call bonus -5.58. The ship case for
+iter_27008 therefore rests on **correctness** (it carries the wish-decline fix,
+the residual-head capacity upgrade and the schupfen `current_player` fix, all of
+which the served export predates), not on measured strength.
+
+**Remaining paths**, as §Consequences committed: ship `iter_27008` on correctness
+and accept the plateau; a different BC; or critic quality
+(`project_advantage_snr_probe.md`). The mine->correct->train family is done.
