@@ -7,7 +7,7 @@ path reads them off the live engine `GameState` as a **Round** is played, so a
 
 At **Featurizer v6** the policy Feature Vector already carries ADR-0028's B-core
 History channels (`declined_top` / `lead_summary` / `pass_pressure`), so the
-belief input here is the Feature Vector itself — no `HistoryAccumulator`.
+belief input here is the Feature Vector itself — see `belief/input_spec.py`.
 """
 
 from __future__ import annotations
