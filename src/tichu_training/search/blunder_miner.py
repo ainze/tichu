@@ -25,6 +25,7 @@ tichu-ask rule (first non-Pass per seat, grand callers skipped) is reconstructed
 from the recorded prefix — and is parity-tested from every recorded decision.
 """
 
+import hashlib
 from dataclasses import dataclass
 
 from tichu_engine.combinations import FourOfAKindBomb, StraightFlushBomb
@@ -229,6 +230,18 @@ def mine_round(agents, position, *, round_idx: int = 0, top_k: int = 4):
                 }
             )
     return rows
+
+
+def candidate_seed(round_idx: int, turn: int, alt_repr: str) -> int:
+    """Process-stable rng seed for one tier-2 candidate.
+
+    Deliberately NOT builtin `hash()`: hashing a `str` is salted by PYTHONHASHSEED,
+    which is unset in this repo and re-drawn in every `spawn` worker — so the same
+    candidate drew different Determinized Worlds on every run, and tier-2 verdicts
+    were not reproducible even within one run.
+    """
+    key = f"{round_idx}|{turn}|{alt_repr}".encode()
+    return int.from_bytes(hashlib.blake2b(key, digest_size=4).digest(), "big")
 
 
 def verify_candidate(agents, decision: RecordedDecision, alternative, *, worlds: int, rng):

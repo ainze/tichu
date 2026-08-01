@@ -59,3 +59,52 @@ def test_cluster_report_groups_and_ranks():
     assert len(report) == 2
     top = report.iloc[0]
     assert top["n"] == 2 and top["mean_delta"] == 40.0 and top["alt_kind"] == "Single"
+
+
+# --- tier-2 reproducibility ------------------------------------------------
+#
+# A tier-2 verdict IS the label the correction corpus is built from (ADR-0042),
+# so the same candidate must score the same way on every run. The failure this
+# guards is invisible in-process: builtin hash() of a str is PYTHONHASHSEED-
+# salted, and `spawn` re-draws the salt in every worker, so a salted seed looks
+# perfectly deterministic until it crosses a process boundary.
+
+import os
+import subprocess
+import sys
+
+_VERDICT_PROBE = """
+import json, random
+from tichu_eval.full_position_pool import generate_full_position_pool
+from tichu_engine.legality import legal_actions_for
+from tichu_ml.rule_agent import RuleAgent
+import scripts.mine_blunders as mb
+from tichu_training.search.blunder_miner import record_round
+
+agents = [RuleAgent() for _ in range(4)]
+mb._WORKER["agents"] = agents
+pos = generate_full_position_pool(seed=11, n=1)[0]
+_, decisions = record_round(agents, pos)
+d = next(x for x in decisions
+         if len(legal_actions_for(x.state.private_view(x.seat))) > 1)
+alt = next(a for a in legal_actions_for(d.state.private_view(d.seat))
+           if a != d.chosen)
+cand = {"turn": d.turn, "chosen": repr(d.chosen), "alt": repr(alt)}
+out = mb._tier2_task((5, pos, [cand], 3))
+print(json.dumps([{k: r[k] for k in ("alt_win_rate", "mean_delta")} for r in out]))
+"""
+
+
+def _tier2_verdict_under(hash_seed: str) -> str:
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    env = {**os.environ, "PYTHONHASHSEED": hash_seed}
+    env["PYTHONPATH"] = (os.path.join(root, "src") + os.pathsep + root
+                         + os.pathsep + env.get("PYTHONPATH", ""))
+    proc = subprocess.run([sys.executable, "-c", _VERDICT_PROBE],
+                          capture_output=True, text=True, env=env, cwd=root)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip().splitlines()[-1]
+
+
+def test_tier2_verdicts_reproduce_across_hash_salts():
+    assert _tier2_verdict_under("0") == _tier2_verdict_under("12345")

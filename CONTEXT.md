@@ -481,6 +481,38 @@ _Avoid_: field (bare), sparring partner, evaluator (bare), frozen policy (bare).
 The greedy gate's cumulative promotion mode ([ADR-0040](docs/adr/0040-frozen-reference-vine-pooled-ratchet.md)): per-window margins **accumulate across consecutive windows against the unchanged champion** (fresh deals each window make pooling valid), the verdict is drawn on the pooled sample each window, promotion fires on pooled CI_lo > 0, and the pool resets on promotion. Exists because the per-window gate needs a true +~5 edge at n=8,192 while a KL-ball step of real improvement is +0.5–2 — without pooling, the ratchet's minimum bankable step exceeds the mechanism's natural step size and provable-but-small gains can never bank (the measured λ=1-arm stall signature).
 _Avoid_: cumulative gate (bare), window pooling (bare), rolling verdict.
 
+### Blunder-mining / correction terms
+
+**Rule:** these name an **evaluation-side** instrument and the training stage built on it. Never call a tier-2 verdict a **Leaf Rollout** or a **Vine** advantage — those are the same playout machinery used as a *value estimate*; a tier-2 verdict is a *label*. And never call **Preference Correction** "distillation" — that names the CE mechanism killed on 2026-06-11.
+
+**Blunder Miner**:
+The two-tier counterfactual-replay component ([tichu_training/search/blunder_miner.py](src/tichu_training/search/blunder_miner.py) + [scripts/mine_blunders.py](scripts/mine_blunders.py)). **Tier 1** forces each of the policy's top-4 alternative **Intents** in the **true** self-play world and records the hindsight `delta`; **Tier 2** re-plays chosen-vs-alternative across 24 **Determinized Worlds** sampled from the actor's **PrivateState**. Deterministic (argmax) agents make tier 1 exact rather than estimated.
+_Avoid_: miner (bare), mistake finder, counterfactual search.
+
+**Delta Band**:
+One of the three tier-1 hindsight-delta strata used for stratified verification — `[15,50)`, `[50,150)`, `[150,400)` — plus the `|δ| ≤ 5` **Control Band** that measures the false-positive rate rather than assuming it. Band membership is a property of the **Decision** (best alternative), not of a branch. A per-Round rate is only comparable across runs when it is each band's survival rate extrapolated back to that band's population.
+_Avoid_: bucket, tier (Tier means the miner's two stages), bin.
+
+**Verified Correction**:
+A `(Play Decision, chosen Intent, alternative Intent)` triple where the alternative won **≥70% of 24 Determinized Worlds at mean δ ≥ +15** — "the agent should have known better without seeing hidden cards".
+_Avoid_: blunder (that names the Decision, not the label), correction (bare), fix.
+
+**Verified Non-Correction**:
+The same triple, tier-2 screened, that **failed** that criterion — "this alternative is not provably better than what the policy already does". Outnumbers Verified Corrections roughly **17:1** and was discarded by every miner run before 2026-07. Not a statement that the chosen action is optimal, only that this alternative does not beat it.
+_Avoid_: negative (bare), rejected candidate, false positive (that names a Control-Band survivor).
+
+**Correction Corpus**:
+The Verified Corrections **and** Verified Non-Corrections from one tier-2 sweep of one policy. **Policy-relative**: valid only for the **Checkpoint** whose argmax produced `chosen`, and only under continuations by that same policy on all four seats. A Corpus mined against one Checkpoint is invalid for any other.
+_Avoid_: correction set, blunder corpus, training corrections.
+
+**Preference Correction** (proposed):
+The training stage that consumes a Correction Corpus + a Checkpoint and applies a **sign-verified pairwise ordering** on the `(chosen, alternative)` logits — asserting an ordering on one pair per row, never a target distribution over the **Action Space**. Distinct from **AWR Refine** (offline, corpus-bounded), from **PPO Refine** / **Full-Stack Co-Training** (self-play gradient), and from the CE-distillation killed 2026-06-11 (which had no negative class and regularised the wrong distribution). See [ADR-0042](docs/adr/0042-preference-correction.md).
+_Avoid_: distillation, mine→distill, fine-tune, correction training.
+
+**Corrected Checkpoint** (proposed):
+A Checkpoint produced by **Preference Correction**. Byte-compatible with BC / **Refined** / **Sharpened** Checkpoints — same **Trunk** + Heads payload shape, so it is a drop-in **Difficulty**-tier swap.
+_Avoid_: distilled checkpoint, patched model.
+
 ### Endgame / claim terms
 
 These are **deterministic, card-counted certainties**, categorically distinct from the Monte-Carlo **PIMC** vocabulary (**Determinized World**, **Leaf Rollout**) — never describe a claim-solver result as a "search" or a "rollout". Proposed in the grilling session of 2026-06-05 as the direction after the entire Phase-2 search / search+learning line was empirically falsified (see [ADR-0031](docs/adr/0031-search-and-learning-loop.md) "Final synthesis").
@@ -548,4 +580,6 @@ _Avoid_: endgame search, solver (bare), lookahead, claim search.
 - "version" used loosely for both Featurizer Version and a model's training-run identity — resolved: a Tournament agent may mix networks from **different training runs / scales / epochs / checkpoints** freely, but **only at a single Featurizer Version**. Every export an MLAgent loads is asserted against the harness's global `FEATURIZER_VERSION` (`load_exported`), so featurizer-v3 and featurizer-v5 exports cannot coexist in one process — cross-Featurizer-Version comparison is two separate runs, not one matrix. See [ADR-0025](docs/adr/0025-full-strength-tournament-is-the-only-variant-and-includes-calls.md).
 - "Schupfen provenance is hidden — the receiver can't know which seat passed which card" (ADR-0015 Finding 3) — **resolved: factually wrong about Tichu/BSW.** Schupfen passes to *specific seats* and is collected from *specific seats*; the face-down rule enforces *simultaneity* (no one commits after seeing others' passes), **not anonymity of source**. The receiver legitimately knows the provenance of all three received cards. So `schupfen_received` is *not* a rules violation — it is re-added (self-only) at featurizer v6. See [ADR-0038](docs/adr/0038-featurizer-v6-played-by-and-schupfen-received.md). (Note this is *self-only*: a player never sees what opponents passed *each other*.)
 - "Tichu Call sees no Trick or public-play history" (ADR-0007 §rationale 1) — resolved: that's the upper bound at deal-time, not the actual featurise state. **Tichu Call featurises at the seat's first non-Pass Play state** (per-seat, symmetric across positives and negatives). May include up to ~3 prior Plays of public history. Grand-Tichu still featurises at the synthetic deal-time 8-card state. See [ADR-0018](docs/adr/0018-tichu-call-featurises-at-first-non-pass-play.md).
+- "blunder rate" compared across mining runs without fixing the estimator — resolved 2026-07-29: a per-Round rate is **only** comparable when it is each **Delta Band**'s survival rate extrapolated back to that band's tier-1 population. The 2026-06-11 note's headline "~0.2–0.3 true blunders per Round" was a crude `5.3 decisions/Round × 3–7%` blend; on the band-population estimator that run is **0.374/Round**, so the iter_27008 ratio is **1.56×, not 2.3×**, at Fisher exact p = 0.211 with identical per-Round candidate populations. See [ADR-0042](docs/adr/0042-preference-correction.md).
+- "correction" used for both a tier-2 *label* and the *training row* built from it — resolved: the label is a **Verified Correction**, the screened-and-failed peer is a **Verified Non-Correction**, and the pair of sets is a **Correction Corpus**. A Correction Corpus is policy-relative and is invalid for any Checkpoint other than the one it was mined against.
 - **Trick leader = current winner** (NOT the opener) — resolved 2026-07-03, correcting an earlier wrong entry. `Trick.add_play` reassigns `leader = player` on **every** play ([state.py:53](src/tichu_engine/state.py)), so `Trick.leader` is always the player of the *last* Combination played = the **current trick winner** = `trick.plays[-1].player`. There is **no** separate "opener" tracked. Consequently a `current_trick_winner` feature is **byte-identical to the existing `trick_leader[4]`** (both are `(trick.leader - self) % 4`) and adds nothing — verified empirically (all 105,460 partner-winning contested rows had partner as leader; zero partner-overtook cases). This retires the H2 premise in [ADR-0039](docs/adr/0039-featurizer-v7-trick-point-stakes-and-current-winner.md). _Avoid_: calling `Trick.leader` the "opener" — it is the current top-holder.

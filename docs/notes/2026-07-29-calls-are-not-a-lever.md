@@ -107,10 +107,44 @@ export; the `_bc_opponent.pt` one is not.
 - **iter 27,008 is the best artifact**: +1.39 [−0.75, +3.58] vs the served export,
   positive across three independent measurements (+0.137, +0.90, +1.39), regression
   excluded, carrying the wish-decline fix the served export lacks. **Ship candidate.**
-- **The restart at a 0.02 leash is converged, not blocked.** `play_kl` sits at 0.0175
+- ~~**The restart at a 0.02 leash is converged, not blocked.** `play_kl` sits at 0.0175
   *below* its 0.02 target — the policy is not using the movement it is allowed — and
   25 gate windows produced zero promotions. That is an in-ball optimum with a working
-  ratchet, which is a different situation from the 129-window jam.
+  ratchet, which is a different situation from the 129-window jam.~~
+  **REFUTED by the session's final measurement — see below.**
 - The open problem is back to play-policy improvement: better critic, different BC,
   or accept the plateau. Worth reopening as a fresh question rather than as a
-  continuation of this run.
+  continuation of this run. **Qualified: a fourth path — delivering verified
+  corrections as a pairwise ordering — was scoped afterwards in
+  [ADR-0042](../adr/0042-preference-correction.md).**
+
+## Correction: noise-limited, not converged
+
+Stratified blunder mining (v1 protocol, both runs, both Control Bands clean at 0/150)
+refuted the "converged" reading above. Per-**Delta Band** survival extrapolated back
+to each band's tier-1 population — the only estimator that is comparable across runs:
+
+```
+                    [15,50)       [50,150)      [150,400)    control   rate/round  mean d   pool
+cpfix3328 (served)   8/150  5.3%   5/150 3.3%    2/150 1.3%   0/150      0.324      105.7   34.3
+iter 27008          15/150 10.0%   6/150 4.0%    5/150 3.3%   0/150      0.583       67.1   39.1
+```
+
+Co-training traded a few large **Verified Corrections** for many smaller ones and left
+total identifiable loss ~unchanged. The policy has ~0.58 demonstrably-better actions
+per Round against a margin over the served export of +1.39/Round. **Noise-limited,
+not converged.**
+
+Carry this qualification with the number: **~39 pts/Round is an upper bound, not an
+achievable gain** — it sums individually-avoidable losses, and fixing one Decision
+changes the others (the labels are policy-relative).
+
+**A second correction, to the 2026-06-11 note.** Comparing this rate to that session's
+headline "~0.2–0.3 blunders/Round" is invalid: that figure was a crude
+`5.3 decisions/Round × 3–7%` blend, not the band-population extrapolation. Recomputed
+on the same estimator, `iter_06225` is **0.374/Round** (pool 23.6). So the rate is
+**1.56× higher, not 2.3×**, the per-Round candidate populations are identical to two
+decimals (3.04/4.12/3.13 vs 3.01/4.22/3.41), and the survival difference is 17/450 vs
+26/450 at **Fisher exact p = 0.211**. **The recoverable pool has not been shown to have
+changed.** The 2026-06-11 kill note also under-stated its own ceiling: `0.374 × 0.175
+× 63.1 = +4.1/Round`, not the "+2–3" recorded there.
