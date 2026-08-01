@@ -62,6 +62,22 @@ def test_worker_arch_extraction_preserves_grand_split():
         worker[k].load_state_dict(main[k].state_dict())
 
 
+def test_worker_arch_extraction_survives_an_absent_grand_block():
+    """Same main->extract->worker->load chain, but for a config with NO grand block.
+    `_arch_cfg` materialises every arch key, so the worker sees `grand_model: {}` —
+    an empty block must not out-rank the `call_model` fallback, or the worker
+    rebuilds grand at the library defaults and the state_dict load blows up."""
+    cfg = {
+        "model": dict(skill_dim=8, trunk_hidden=32, trunk_depth=1, trunk_out_dim=16, head_hidden=16),
+        "schupfen_model": {"skill_dim": 8, "hidden": 16},
+        "call_model": {"skill_dim": 8, "hidden": 16},
+    }
+    main = _build_models(cfg)
+    worker = _build_models(_arch_cfg(cfg))            # `grand_model` arrives as {}
+    for k in ("play", "schupfen", "tichu", "grand"):
+        worker[k].load_state_dict(main[k].state_dict())
+
+
 def test_residual_warm_start_round_trips(tmp_path):
     """The real bug seam: a residual schupfen/tichu checkpoint loads into the
     cotrain-built nets without a shape mismatch, while grand stays non-residual."""
