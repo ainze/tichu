@@ -12,6 +12,7 @@ import torch
 
 from tichu_engine.legality import legal_actions_for
 from tichu_training.action_space import play_intent_index
+from tichu_training.concrete_resolver import resolution_cost_fn
 from tichu_training.bc.heads import HEAD_LOGIT_DIMS
 from tichu_training.featurizer import featurize
 from tichu_training.perfect_info import featurize_perfect_info
@@ -67,7 +68,7 @@ class BatchedPolicy:
             feats.append(featurize(private_state))
             if self._perfect_info:
                 pi_feats.append(featurize_perfect_info(game_state, seat))
-            by_index: dict[int, object] = {}
+            candidates: dict[int, list] = {}
             for action in legal_actions_for(private_state):
                 try:
                     idx = play_intent_index(action)
@@ -75,7 +76,24 @@ class BatchedPolicy:
                     continue  # shape the v1 Action Space can't represent
                 if 0 <= idx < _PLAY_DIM:
                     masks[row, idx] = True
-                    by_index.setdefault(idx, action)
+                    candidates.setdefault(idx, []).append(action)
+
+            # Many concrete actions collapse onto one Intent, so a sampled index
+            # still has to be resolved back to cards. Take the cheapest by
+            # `resolution_cost_fn` — the same tie-break serving uses, so the
+            # rollout world doesn't play the learner's own hand worse than the
+            # exported agent would. Intents with a single realisation have
+            # nothing to break, so the cost function is built lazily and skipped
+            # for them entirely.
+            by_index: dict[int, object] = {}
+            cost = None
+            for idx, actions in candidates.items():
+                if len(actions) == 1:
+                    by_index[idx] = actions[0]
+                    continue
+                if cost is None:
+                    cost = resolution_cost_fn(private_state.hand)
+                by_index[idx] = min(actions, key=cost)
             resolvers.append(by_index)
 
         features = torch.from_numpy(np.stack(feats))
