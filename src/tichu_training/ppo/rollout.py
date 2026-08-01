@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple, Protocol, Sequence
 
 from tichu_engine.engine import step
-from tichu_engine.legality import ConcreteAction, Pass
+from tichu_engine.legality import ConcreteAction, Pass, legal_actions
 from tichu_engine.state import (
     GameState, MahjongWishPending, PublicState, SchupfenPending, Trick,
 )
@@ -174,6 +174,7 @@ def collect_rollout(
     opponent_policy: RolloutPolicy | None = None,
     learner_team: int = 0,
     seat_agents: Sequence[Agent] | None = None,
+    skip_forced_play: bool = True,
 ) -> list[Trajectory]:
     """Roll out the Starting Positions concurrently under `policy`, returning one
     Trajectory per learner-team seat per Round.
@@ -186,6 +187,21 @@ def collect_rollout(
     Decisions (Schupfen / Wish / Dragon) plus Calls are served inline by the
     four frozen per-seat `seat_agents` (default: four RuleAgents, which decline
     every call).
+
+    `skip_forced_play` (DEFAULT ON) resolves Play Decisions with exactly one
+    legal action (~38% of them, almost all Passes) straight through the engine:
+    no policy forward, no recorded step. Those rows contribute exactly zero
+    policy gradient — the legal-masked log-prob is 0 by construction — so
+    nothing is lost from the objective, while the trajectory gets shorter, which
+    at `lam < 1` restores credit assignment the forced steps were attenuating
+    (~21% of the terminal-reward weight at lam=0.95). It is not a pure no-op:
+    the surviving rows' advantage-normalisation stats shift either way, so under
+    a SAMPLING policy a run is statistically equivalent, not bit-identical.
+    Pass False to reproduce a pre-2026-08-01 run exactly.
+
+    Forced Plays still solicit the seat's Tichu Call (ADR-0018): ~8% of forced
+    actions are plays, not Passes, and one of them can be a seat's first
+    non-Pass Play.
     """
     if opponent_policy is None:
         opponent_policy = policy
@@ -217,7 +233,10 @@ def collect_rollout(
     # model falls back to the frozen seat agent's `should_call` (ADR-0029 behavior).
     _solicit_grand(runs, grand_prefixes, policy, opponent_policy, learner_team)
 
-    _drive(runs, policy, opponent_policy, learner_team)
+    _drive(
+        runs, policy, opponent_policy, learner_team,
+        skip_forced_play=skip_forced_play,
+    )
 
     out: list[Trajectory] = []
     for run in runs:
@@ -230,6 +249,7 @@ def _drive(
     policy: RolloutPolicy,
     opponent_policy: RolloutPolicy,
     learner_team: int,
+    skip_forced_play: bool = True,
 ) -> None:
     # Each live game advances exactly one Decision per tick, so the longest game
     # bounds the tick count.
@@ -262,6 +282,12 @@ def _drive(
             model = policy if current % 2 == learner_team else opponent_policy
             pending = run.state.public.pending_decision
             if pending is None:  # a Play Decision
+                if skip_forced_play:
+                    forced = _forced_action(run.state)
+                    if forced is not None:
+                        _maybe_solicit_tichu(run, current, forced, model)
+                        _advance(run, forced)
+                        continue
                 group = groups[model]
                 group.meta.append((run, current))
                 # (seat, private_state, game_state): the GameState carries all four
@@ -339,6 +365,16 @@ def _drive(
         )
         for traj in run.trajs.values():
             traj.reward = reward
+
+
+def _forced_action(state: GameState) -> ConcreteAction | None:
+    """The single legal action, when the engine leaves the current player exactly
+    one — else None. Almost always a Pass the seat cannot beat; sometimes a last
+    card or the only wish-fulfilling combination."""
+    legal = legal_actions(state)
+    if len(legal) != 1:
+        return None
+    return next(iter(legal))
 
 
 def _supports_schupfen(model: RolloutPolicy) -> bool:

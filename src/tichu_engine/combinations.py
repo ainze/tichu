@@ -400,8 +400,8 @@ def combo_type_and_rank(combo: object) -> tuple[int, int] | None:
     Type indices match the featurizer's intent_kind order: Single 0, Pair 1,
     Triple 2, FullHouse 3, PairStep 4, Straight 5. Bombs and the NaN-rank Dog
     return None. Single source of truth for the cross-Trick decline channel
-    (ADR-0028 B-core) — consumed by the engine's live decline accumulators and
-    the belief HistoryAccumulator alike.
+    (ADR-0028 B-core) — consumed by the engine's live decline accumulators,
+    which the v6 featurizer reads out for policy and belief alike.
     """
     if isinstance(combo, Single):
         r = combo.rank

@@ -1,9 +1,15 @@
 # ADR-0028: Belief input = policy features + compressed history projections
 
-- **Status:** Accepted (B-core; H4 play-time rejected by ablation)
+- **Status:** Accepted (B-core; H4 play-time rejected by ablation) — **mechanism superseded by
+  [ADR-0038](0038-featurizer-v6-played-by-and-schupfen-received.md) on 2026-07-27**: featurizer
+  v6 absorbed the B-core channels, so the belief-side History block and the A / B_core / B_full
+  tier machinery are deleted. See *Implementation status* below. The *decision* (Belief needs
+  cross-Trick negative information) stands and is now delivered by the policy featurizer.
 - **Date:** 2026-06-03
 - **Supersedes (in part):** [ADR-0021](0021-belief-trains-on-a-replay-derived-bundle.md) — the
-  "Belief reuses the same 224-dim Feature Vector the policy consumes" clause.
+  "Belief reuses the same 224-dim Feature Vector the policy consumes" clause. **Un-superseded by
+  ADR-0038:** at v6 the belief input is again exactly the policy Feature Vector — because that
+  vector now *contains* B-core, not because Belief gave up the channels.
 - **Ablation outcome:** B-core > A > naive on all metrics (decline channel earns its bytes);
   **B-full < B-core, so H4 (play-time) is dropped**. Absolute belief signal is weak at gate
   scale — see [docs/notes/2026-06-03-belief-history-gate.md](../notes/2026-06-03-belief-history-gate.md).
@@ -122,6 +128,28 @@ as the existing BC bundle, none near the terabyte raw-history figure.
 - `BeliefModel(feature_dim=...)` takes the wider input; no architecture change.
 - A new belief bundle must be materialised (none exists on disk today); start at 100k.
 - The CONTEXT.md Belief Model entry and ADR-0021's "same 224-dim vector" line are updated.
+
+## Implementation status (2026-07-27)
+
+Everything above shipped at v5 and produced the ablation result in the header. **Featurizer v6
+([ADR-0038](0038-featurizer-v6-played-by-and-schupfen-received.md)) then folded H1/H2/H3 into
+the policy Feature Vector itself** as the `declined_top` / `lead_summary` / `pass_pressure`
+sections, fed by live per-seat engine accumulators — so from v6 on:
+
+- **The belief-side History block is deleted** (`belief/history.py`). Appending it to a v6
+  vector produced 674 dims in which H1/H2/H3 duplicated columns `[564:591]`. Equivalence was
+  verified on the sample replays: 1,143 / 1,172 emitted decisions matched bit-for-bit, and the
+  29 that did not were H3 rows where the **engine accumulators are the more faithful side**
+  (the replay walk missed synthetic `PASS`es inserted by `bsw/replay.py::_sync_for`). Since
+  inference has only the engine accumulators, dropping the block also closes a train/serve skew.
+- **H4 `play_time` is not carried forward.** It was already rejected here by ablation
+  (B-full < B-core), so v6 having no equivalent channel is not a loss.
+- **The A / B_core / B_full tiers are deleted.** They existed to run an ablation that this ADR
+  settled; at v6 all three would select the same channels anyway. The belief input width is
+  pinned to `FEATURIZER_OUTPUT_DIM` by `tests/training/belief/test_input_spec.py`.
+- **`belief_input_version` survives and does its job**: bumped `v1 -> v2`, it invalidates every
+  History-block bundle independently of the policy featurizer pin — the separation this ADR
+  introduced is what made the fix a version bump rather than a silent re-slice.
 
 ## Rejected alternatives
 

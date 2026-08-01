@@ -52,7 +52,11 @@ def _tier1_task(task):
 def _tier2_task(task):
     """Replay one round, then verify each of its candidates across worlds."""
     from tichu_engine.legality import legal_actions_for
-    from tichu_training.search.blunder_miner import record_round, verify_candidate
+    from tichu_training.search.blunder_miner import (
+        candidate_seed,
+        record_round,
+        verify_candidate,
+    )
 
     round_idx, position, candidates, worlds = task
     _, decisions = record_round(_WORKER["agents"], position)
@@ -68,7 +72,7 @@ def _tier2_task(task):
         )
         if alt is None:
             continue
-        rng = random.Random(hash((round_idx, cand["turn"], cand["alt"])) & 0xFFFFFFFF)
+        rng = random.Random(candidate_seed(round_idx, cand["turn"], cand["alt"]))
         verdict = verify_candidate(_WORKER["agents"], d, alt, worlds=worlds, rng=rng)
         out.append({**cand, **verdict})
     return out

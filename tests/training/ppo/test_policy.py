@@ -167,3 +167,61 @@ def test_sample_masked_is_deterministic_under_a_seed():
 
     assert torch.equal(a_idx, b_idx)
     assert torch.allclose(a_logp, b_logp)
+
+
+def _lead_state_with_bomb():
+    """Seat 0 on lead: jade 3-7 is a straight-flush bomb, and the two off-suit
+    5s make a pair of 5s realisable three ways — one Intent, three concretes."""
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.state import PrivateState, PublicState, Trick
+
+    hand = frozenset(
+        {Card(suit=Suit.JADE, rank=r) for r in range(3, 8)}
+        | {Card(suit=Suit.SWORD, rank=5), Card(suit=Suit.STAR, rank=5)}
+    )
+    pub = PublicState(
+        current_player=0, hand_sizes=(len(hand), 5, 5, 5), scores=(0, 0),
+        trick=Trick(plays=(), leader=0),
+    )
+    return PrivateState(player=0, hand=hand, public=pub)
+
+
+def test_rollout_resolves_the_sampled_intent_without_spending_the_bomb(monkeypatch):
+    # The rollout resolver is separate from serving's: a sampled Intent index has
+    # to be turned back into concrete cards here too. It must make the same
+    # bomb-sparing choice, or the policy trains against a world that plays its
+    # own hand worse than the served agent does.
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.combinations import Pair
+    from tichu_engine.legality import _cards_in
+    import tichu_training.ppo.policy as pol
+    from tichu_training.action_space import play_intent_index
+
+    jade_five = Card(suit=Suit.JADE, rank=5)
+    pv = _lead_state_with_bomb()
+    pair_of_fives = play_intent_index(
+        Pair(Card(suit=Suit.SWORD, rank=5), Card(suit=Suit.STAR, rank=5))
+    )
+
+    # Hand the resolver the bomb-breaking variant first; otherwise the frozenset
+    # iterates favourably and this passes with or without a resolver.
+    real = pol.legal_actions_for
+    monkeypatch.setattr(
+        pol, "legal_actions_for",
+        lambda ps: sorted(real(ps), key=lambda a: 0 if jade_five in _cards_in(a) else 1),
+    )
+
+    class _Peaked:
+        def __call__(self, features, skill):
+            play = torch.full((features.shape[0], HEAD_LOGIT_DIMS["play"]), -10.0)
+            play[:, pair_of_fives] = 10.0
+            return {"play": play}
+
+    class _ZeroCritic:
+        def __call__(self, features):
+            return torch.zeros(features.shape[0])
+
+    [choice] = BatchedPolicy(_Peaked(), _ZeroCritic()).act_play_batch([(0, pv, None)])
+
+    assert choice.intent_index == pair_of_fives
+    assert jade_five not in _cards_in(choice.concrete_action)

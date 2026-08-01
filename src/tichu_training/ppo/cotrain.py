@@ -480,6 +480,7 @@ def train_cotrain(
     train_wish: bool = False,
     vine_collect=None,
     reanchor_play_every: int = 0,
+    skip_forced_play: bool = True,
 ) -> list[dict]:
     """Run `iterations` of full-stack co-training self-play (ADR-0034).
 
@@ -518,7 +519,8 @@ def train_cotrain(
             )
             opponent = opponent_policy_provider(it) if opponent_policy_provider is not None else policy
             trajs = collect_rollout(
-                positions, policy, opponent_policy=opponent, learner_team=learner_team
+                positions, policy, opponent_policy=opponent, learner_team=learner_team,
+                skip_forced_play=skip_forced_play,
             )
         batch = build_cotrain_batch(trajs, skill_decile=skill_decile, gamma=gamma, lam=lam)
         # Vine play advantages (ADR-0035): replace the play head's GAE group with
@@ -554,6 +556,12 @@ def train_cotrain(
                 c.update(stats[f"{dt}_kl"])
         if vine_collect is not None:
             stats["vine_rows"] = vine_rows
+        # Play rows actually trained on this iteration. Under `skip_forced_play`
+        # this is the visible ~38% drop — the only end-to-end evidence the flag
+        # took effect (a config key that silently does nothing is this repo's
+        # known failure mode).
+        play_nb = batch.nets.get("play")
+        stats["play_rows"] = 0 if play_nb is None else int(play_nb.features.shape[0])
         stats["iter"] = it
         history.append(stats)
         if on_iteration is not None:

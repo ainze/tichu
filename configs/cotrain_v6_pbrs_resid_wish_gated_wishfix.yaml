@@ -51,6 +51,38 @@ promotion_gate:
   bootstrap_iters:     1000
   reanchor_on_promote: true
   also_beat_bc:        true      # opponent "bc" = the wishfix BC (fixed human reference)
+  # Ratchet-resolution fix (2026-07-27). The gate had held 129 CONSECUTIVE windows
+  # (last promotion iter 10368) while the learner ran +0.17..+3.40 vs its own
+  # champion every window — and since `reanchor_on_promote` makes promotion the ONLY
+  # thing that advances the KL anchor, the policy sat pinned in one 0.12-nat ball for
+  # 16.5k iterations. Not a policy plateau: a measurement floor. Two dials fix it.
+  #
+  # paired — cluster the seat-swap pairs before bootstrapping. A greedy window is
+  #   2*n_deals values with the two arrangements of each deal ADJACENT; card luck
+  #   enters them with opposite sign and cancels within the pair, so resampling flat
+  #   re-counts uncertainty the swap already removed (a paired design analysed as
+  #   unpaired). Measured on this run @ iter 26900, 4096 fresh deals/opponent
+  #   (scripts/gate_pairing_check.py): rho(t0,t1) = -0.52 vs champion, 16.3% of deals
+  #   cancel EXACTLY, CI +/-4.605 -> +/-3.166 (shrink 0.688, ~53% fewer deals for the
+  #   same resolution) at an IDENTICAL point estimate. That window's verdict flips
+  #   hold -> PROMOTE (champion +3.540, ci_lo +0.40; bc +15.712, ci_lo +12.28).
+  #
+  # pooled — accumulate margins across consecutive windows vs the unchanged champion
+  #   (ADR-0040 §4; fresh deals per window make it valid, pool clears on promotion).
+  #   Costs nothing: verdict() draws on whatever has accumulated, so pooling never
+  #   DELAYS a promotion a single window would have made — it only adds the ability
+  #   to promote on accumulated evidence when a window is inconclusive. Here that
+  #   matters because the single-window ci_lo is only +0.40; pooled x5 puts it at
+  #   +2.12, which is what keeps a marginal read from becoming a winner's-curse
+  #   promotion (and the anchor moves on promotion, so a false positive co-drifts).
+  #
+  # WATCH cpfix3328 (observe-only): still -1.50 [-4.97, +2.17] at iter 26900, i.e.
+  # the lineage is NOT yet at the served export. Promotions resuming != caught up.
+  # Also watch for cycling — this is the first time the beat-both gate actually
+  # ratchets, and single-champion cycling is what capped gated_reanchor at +3.66.
+  # Revert = set both back to false; nothing else depends on them.
+  paired:              true
+  pooled:              true
   # Third fixed opponent (the shipped champion), OBSERVE-ONLY (2026-07-24, λ=1 arm):
   # scored by the greedy eval every window so its margin lands in promotion_gate.csv
   # (plot_cotrain_csv panel 6 picks the stream up automatically), but require:false

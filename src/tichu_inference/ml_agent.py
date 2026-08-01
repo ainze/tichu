@@ -65,6 +65,7 @@ from tichu_training.card_slots import card_slot, slot_to_card
 # agent; `_combination_to_action_index` is ACTION-SPACE-bound (v1, shared across
 # featurizer generations — verified byte-identical), so it stays module-level.
 from tichu_training import featurizer as _DEFAULT_FEATURIZER
+from tichu_training.concrete_resolver import resolution_cost_fn
 from tichu_training.featurizer import _combination_to_action_index
 
 
@@ -138,6 +139,7 @@ class MLAgent(Agent):
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
         partner_trick_guard: bool = True,
+        bomb_preserving_resolver: bool = True,
         featurizer=_DEFAULT_FEATURIZER,
     ) -> None:
         # Load each artifact from its path, then hand off to the shared
@@ -156,6 +158,7 @@ class MLAgent(Agent):
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
             partner_trick_guard=partner_trick_guard,
+            bomb_preserving_resolver=bomb_preserving_resolver,
         )
 
     @classmethod
@@ -171,6 +174,7 @@ class MLAgent(Agent):
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
         partner_trick_guard: bool = True,
+        bomb_preserving_resolver: bool = True,
         featurizer=_DEFAULT_FEATURIZER,
     ) -> "MLAgent":
         """Build an agent over already-loaded modules, skipping disk I/O.
@@ -191,6 +195,7 @@ class MLAgent(Agent):
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
             partner_trick_guard=partner_trick_guard,
+            bomb_preserving_resolver=bomb_preserving_resolver,
         )
         return self
 
@@ -207,6 +212,7 @@ class MLAgent(Agent):
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
         partner_trick_guard: bool = True,
+        bomb_preserving_resolver: bool = True,
     ) -> None:
         # Skill Embedding input fed to every network at inference. 0..9 are the
         # BSW skill deciles (9 = strongest players); 10 is the neutral/cold-start
@@ -235,6 +241,7 @@ class MLAgent(Agent):
         self._rule_fallback = RuleAgent()
         self._rng = fallback_rng or random.Random(0)
         self._partner_trick_guard = bool(partner_trick_guard)
+        self._bomb_preserving_resolver = bool(bomb_preserving_resolver)
         self.last_fallback_used: bool = False
 
     @staticmethod
@@ -324,11 +331,21 @@ class MLAgent(Agent):
         legal = list(legal_actions_for(private_state))
         if not legal:
             raise RuntimeError("no legal actions available")
+        if len(legal) == 1:
+            # Forced Decision — the engine leaves exactly one action (almost always
+            # a Pass the agent cannot beat; occasionally a last card or the only
+            # wish-fulfilling combination). Ranking a one-element set can only
+            # return that element, and the partner-trick guard needs a legal Pass
+            # *alongside* a bomb, so it can never fire here either: the result is
+            # identical, the forward is pure cost. ~38-39% of Play Decisions are
+            # forced (measured on both the human corpus and self-play, 2026-07-31)
+            # and act() costs ~2.0 ms against ~17 us for the enumeration alone.
+            return legal[0]
         play_logits = self._play_logits(private_state)
         if not _is_finite(play_logits):
             raise RuntimeError("non-finite logits from policy")
 
-        ranked = _rank_legal_by_logits(legal, play_logits)
+        ranked = _rank_legal_by_logits(legal, play_logits, self._resolution_cost(private_state))
         if not ranked:
             raise RuntimeError("no legal action mapped into the action space")
         choice = ranked[0]
@@ -343,8 +360,14 @@ class MLAgent(Agent):
         play_logits = self._play_logits(private_state)
         if not _is_finite(play_logits):
             raise RuntimeError("non-finite logits")
-        ranked = _rank_legal_by_logits(legal, play_logits)
+        ranked = _rank_legal_by_logits(legal, play_logits, self._resolution_cost(private_state))
         return ranked or legal
+
+    def _resolution_cost(self, private_state: PrivateState):
+        """Tie-break cost over concrete realisations, or None when disabled."""
+        if not self._bomb_preserving_resolver:
+            return None
+        return resolution_cost_fn(private_state.hand)
 
     def play_action_scores(
         self, private_state: PrivateState
@@ -548,16 +571,41 @@ def _softmax_scores(pairs: list[tuple]) -> list[tuple]:
     return out
 
 
-def _rank_legal_by_logits(legal: list[ConcreteAction], play_logits: np.ndarray) -> list[ConcreteAction]:
+def _rank_legal_by_logits(
+    legal: list[ConcreteAction],
+    play_logits: np.ndarray,
+    cost=None,
+) -> list[ConcreteAction]:
     """Order legal actions by descending policy logit. Actions that don't map to
-    a canonical action-space index are placed at the end in their original order."""
-    scored: list[tuple[float, int, ConcreteAction]] = []
+    a canonical action-space index are placed at the end in their original order.
+
+    Every concrete realisation of one Intent shares a logit, so `cost` (from
+    `resolution_cost_fn`) breaks those ties in favour of the variant that keeps
+    the hand's bombs and suit runs. It only ever reorders *within* a tie group;
+    a higher logit always wins first. `cost=None` restores the old behaviour of
+    falling back to enumeration order."""
+    mapped: list[tuple[int, int, ConcreteAction]] = []
     unmapped: list[ConcreteAction] = []
+    seen: dict[int, int] = {}
     for i, action in enumerate(legal):
         idx = _combination_to_action_index(action)
         if idx is None or not (0 <= idx < play_logits.shape[0]):
             unmapped.append(action)
             continue
-        scored.append((float(play_logits[idx]), i, action))
-    scored.sort(key=lambda t: (-t[0], t[1]))
-    return [a for _, _, a in scored] + unmapped
+        seen[idx] = seen.get(idx, 0) + 1
+        mapped.append((idx, i, action))
+
+    # Only an Intent with more than one realisation has a tie to break, so the
+    # cost is paid there and nowhere else — on a typical hand that is a small
+    # minority of the legal set, and `cost` is the expensive part of this loop.
+    scored = [
+        (
+            float(play_logits[idx]),
+            cost(action) if cost is not None and seen[idx] > 1 else (0, 0),
+            i,
+            action,
+        )
+        for idx, i, action in mapped
+    ]
+    scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+    return [t[3] for t in scored] + unmapped

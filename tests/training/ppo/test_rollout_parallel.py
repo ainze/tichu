@@ -93,3 +93,44 @@ def test_league_opponent_honors_train_wish(tmp_path):
     declining = _league_opponent(str(opp_w), skill_decile=9, seed=0, train_wish=False)
     assert _supports_wish(wishing)
     assert not _supports_wish(declining)
+
+
+def test_worker_task_carries_skip_forced_play_across_the_spawn_boundary(tmp_path):
+    # The spawn pool ships a RolloutTask verbatim to the worker. Running the
+    # worker body in-process (the pool itself needs spawned children) proves the
+    # flag survives the hand-off and actually suppresses forced rows there.
+    from tichu_training.ppo.rollout_parallel import RolloutTask, _rollout_chunk
+
+    torch.manual_seed(0)
+    models = _build_models(_ARCH)
+    critic = ValueBaseline(PERFECT_INFO_DIM, hidden=16)
+    weights = tmp_path / "w.pt"
+    save_rollout_weights(str(weights), models, critic)
+    _init_worker(_ARCH, 16, 1, True)
+
+    positions = generate_full_position_pool(seed=0, n=4)
+
+    def run(skip: bool):
+        return _rollout_chunk(
+            RolloutTask(
+                positions=positions, weights_path=str(weights),
+                opp_weights_path=None, learner_team=0, skill_decile=9, seed=0,
+                train_wish=False, skip_forced_play=skip,
+            )
+        )
+
+    baseline = run(False)
+    skipped = run(True)
+
+    def play_rows(trajs):
+        return sum(
+            1 for t in trajs for s in t.steps if s.decision_type == "play"
+        )
+
+    assert play_rows(skipped) < play_rows(baseline)
+    assert play_rows(skipped) > 0
+    # Forced rows are exactly the single-legal ones; none may survive.
+    for t in skipped:
+        for s in t.steps:
+            if s.decision_type == "play" and s.legal_mask is not None:
+                assert int(s.legal_mask.sum()) > 1

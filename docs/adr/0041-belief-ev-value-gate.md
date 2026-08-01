@@ -24,7 +24,7 @@ The verdict bands are pre-committed:
 
 | `D_on − D_off` | Verdict |
 |---|---|
-| **≥ +10, CI excluding 0** | GREEN — route to **distillation** of the chooser's decisions (the mine→distill bet), not to a new belief model. The model exists; consumption was the gap. |
+| **≥ +10, CI excluding 0** | GREEN — route to **Preference Correction** ([ADR-0042](0042-preference-correction.md)) over a Correction Corpus mined from the Chooser's deviations, not to a new belief model. The model exists; consumption was the gap. |
 | **CI includes 0** | **KILL the card-modelling program.** |
 | **significantly < 0** | Not a verdict — a calibration-bug signal. Diagnose, do not report. |
 
@@ -200,7 +200,8 @@ opponent *policy* is a different object and is not priced here.
 **Free by-product, worth more than the verdict.** The belief-off Chooser — one exact step of
 policy iteration over card-counting worlds — deviates from the champion at only **2.09%** of
 Decisions under a criterion with a measured 0.7% false-positive rate. That bounds the
-`mine → distill` headroom on the *same* mechanism, and it is the first EV-unit read on it.
+**Preference Correction** headroom on the *same* mechanism (its deviation rule is exactly the
+**Verified Correction** criterion), and it is the first EV-unit read on it.
 
 ## Consequences
 
@@ -228,7 +229,7 @@ Decisions under a criterion with a measured 0.7% false-positive rate. That bound
   that this gate exists to price.
 - **Nothing new is shippable at inference.** The chooser is ~770 playouts/round — an
   offline instrument, in the same category as the ADR-0030 **Search Agent**. GREEN routes
-  to distillation, not deployment.
+  to **Preference Correction**, not deployment.
 
 ## Open follow-up — the same channels, in the *policy* rather than a belief net
 

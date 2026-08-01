@@ -54,12 +54,12 @@ def main(argv: list[str] | None = None) -> int:
 
     seed = int(config.get("seed", 0))
     torch.manual_seed(seed)
+    _reject_legacy_tier(config)
 
     if config.get("streaming"):
         return _run_streaming(config, run_dir)
 
     examples = _build_dataset(config)
-    examples = _select_tier(examples, config.get("tier"))
     feature_dim = examples[0].features.shape[0]
     m_cfg = config.get("model", {})
     model = BeliefModel(feature_dim=feature_dim, hidden=int(m_cfg.get("hidden", 256)))
@@ -95,11 +95,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run_streaming(config, run_dir: Path) -> int:
     """Low-RAM scale path: stream batched arrays off the memmap bundle (no
-    full-list materialisation), tier-sliced per batch. Required at 10k+ games
-    where the in-memory list would OOM. Skips the (full-stack) calibration
-    table — use scripts/belief_naive_baseline.py for held-out metrics."""
+    full-list materialisation), at the bundle's own feature width. Required at
+    10k+ games where the in-memory list would OOM. Skips the (full-stack)
+    calibration table — use scripts/belief_naive_baseline.py for held-out
+    metrics."""
     from tichu_training.belief.belief_materialised import MemmapBeliefDataset
-    from tichu_training.belief.history import TIER_DIMS
     from tichu_training.belief.training import (
         stream_accuracy,
         train_one_belief_epoch_stream,
@@ -108,15 +108,11 @@ def _run_streaming(config, run_dir: Path) -> int:
     if config.get("dataset") != "memmap":
         raise ValueError("streaming requires dataset: memmap")
     ds = MemmapBeliefDataset(config["dataset_kwargs"]["data_dir"])
-    tier = config.get("tier")
-    input_dim = TIER_DIMS[tier] if tier else ds.feature_dim
-    if input_dim > ds.feature_dim:
-        raise ValueError(f"tier {tier!r} needs {input_dim} cols; bundle has {ds.feature_dim}")
-    log.info("streaming belief: %s examples, tier=%s (input_dim=%d), batch=%s",
-             f"{len(ds):,}", tier, input_dim, config["batch_size"])
+    log.info("streaming belief: %s examples, feature_dim=%d, batch=%s",
+             f"{len(ds):,}", ds.feature_dim, config["batch_size"])
 
     m_cfg = config.get("model", {})
-    model = BeliefModel(feature_dim=input_dim, hidden=int(m_cfg.get("hidden", 256)))
+    model = BeliefModel(feature_dim=ds.feature_dim, hidden=int(m_cfg.get("hidden", 256)))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["learning_rate"]))
 
     step_log = run_dir / "step.csv"
@@ -129,12 +125,10 @@ def _run_streaming(config, run_dir: Path) -> int:
         for epoch in range(int(config["epochs"])):
             loss = train_one_belief_epoch_stream(
                 model, ds, optimizer,
-                batch_size=int(config["batch_size"]), input_dim=input_dim,
+                batch_size=int(config["batch_size"]),
                 log_path=step_log,
             )
-            acc = stream_accuracy(
-                model, ds, batch_size=int(config["batch_size"]), input_dim=input_dim,
-            )
+            acc = stream_accuracy(model, ds, batch_size=int(config["batch_size"]))
             log.info("epoch %d loss=%.4f acc=%.4f", epoch, loss, acc)
             writer.writerow({"epoch": epoch, "loss": loss, "accuracy": acc})
 
@@ -145,30 +139,18 @@ def _run_streaming(config, run_dir: Path) -> int:
     return 0
 
 
-def _select_tier(examples, tier):
-    """Select an ADR-0028 belief-input tier by COLUMN PREFIX (A=:224,
-    B_core=:251, B_full=:307). The tiers are nested prefixes of the one
-    materialised B-full vector, so the ablation is three trainings over one
-    bundle. `tier=None` (e.g. synthetic smoke) leaves features untouched."""
-    if tier is None or not examples:
-        return examples
-    from dataclasses import replace
-
-    from tichu_training.belief.history import TIER_DIMS
-
-    if tier not in TIER_DIMS:
-        raise ValueError(f"unknown belief tier {tier!r}; expected one of {sorted(TIER_DIMS)}")
-    want = TIER_DIMS[tier]
-    have = examples[0].features.shape[0]
-    if want > have:
+def _reject_legacy_tier(config) -> None:
+    """The ADR-0028 A / B_core / B_full tiers are gone: the ablation settled on
+    B-core, and featurizer v6 (ADR-0038) folded B-core's channels into the
+    policy Feature Vector itself, so the belief input is now just that vector.
+    A leftover `tier:` key would otherwise be silently ignored — fail instead."""
+    if "tier" in config:
         raise ValueError(
-            f"tier {tier!r} needs {want} input cols but the bundle has {have} "
-            "(materialise at B-full to run the ablation)"
+            f"config sets tier: {config['tier']!r}, but the ADR-0028 belief-input "
+            "tiers no longer exist — v6 absorbed the B-core history channels "
+            "(ADR-0038) and the belief input is the full policy Feature Vector. "
+            "Drop the key."
         )
-    if want == have:
-        return examples
-    log.info("belief tier %s -> using input columns [:%d] of %d", tier, want, have)
-    return [replace(e, features=e.features[:want]) for e in examples]
 
 
 def _build_dataset(config):

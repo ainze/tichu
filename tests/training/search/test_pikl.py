@@ -14,8 +14,10 @@ import numpy as np
 import pytest
 
 from tichu_engine.legality import legal_actions_for
+from tichu_export.torchscript import VersionMismatchError, load_exported
 from tichu_engine.state import deal_for_schupfen, deal_initial_state
 from tichu_ml.rule_agent import RuleAgent
+from tichu_training.featurizer import FEATURIZER_VERSION
 from tichu_training.search.blunder_miner import playout_from, team_relative
 from tichu_training.search.determinize import sample_determinized_world
 from tichu_training.search.pikl import (
@@ -29,6 +31,21 @@ from tichu_training.search.pikl import (
 )
 
 _ITER06225 = Path("C:/workbench/tichu/data/runs/cotrain_wish_v5/export/iter_06225")
+
+
+def _iter06225_compatible() -> bool:
+    """True iff the real export is on disk AND its embedded featurizer version
+    matches the live one. Same guard as `tests/eval/test_cli.py`: a bundle from an
+    older featurizer (this one is v5 lineage) is treated as absent rather than
+    failing the suite — the expected state after a version bump, before re-export."""
+    policy = _ITER06225 / "policy.pt"
+    if not policy.exists():
+        return False
+    try:
+        load_exported(policy, expected_featurizer_version=FEATURIZER_VERSION)
+        return True
+    except (VersionMismatchError, RuntimeError, OSError):
+        return False
 
 
 class _ScriptedAnchor(RuleAgent):
@@ -192,8 +209,8 @@ def test_non_play_decisions_delegate_to_the_anchor():
 def test_pikl_over_the_real_iter06225_anchor_plays_a_legal_action():
     # End-to-end on the actual τ: MLAgent anchor + frozen-field rollout → a legal
     # Play. The integration proof the stub tests can't give (real net, real Q).
-    if not _ITER06225.exists():
-        pytest.skip("iter_06225 export not present")
+    if not _iter06225_compatible():
+        pytest.skip(f"no iter_06225 export compatible with featurizer {FEATURIZER_VERSION}")
     agent = build_pikl_agent(export_dir=_ITER06225, worlds=3, k=6, lam=0.1)
     state = deal_initial_state(seed=7)
     view = state.private_view(state.public.current_player)

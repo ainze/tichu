@@ -1,0 +1,44 @@
+# Belief SCALE check — ~10x data + 2x capacity + more epochs vs the ADR-0028 gate.
+#
+# Tests whether belief is scale-limited (worth integrating) or near-ceiling
+# (pivot). Uses the low-RAM `streaming: true` path so 10M+ examples never
+# materialise as a list. Gate reference to beat: B-core top-1 0.505 aggregate /
+# 0.669 late-game (docs/notes/2026-06-03-belief-history-gate.md).
+#
+# There is no `tier:` key any more. The ADR-0028 ablation settled on B-core, and
+# featurizer v6 (ADR-0038) folded B-core's channels (declined_top / lead_summary
+# / pass_pressure) into the policy Feature Vector itself — so the belief input
+# IS the full v6 vector. The gate numbers above were measured at v5 and are only
+# a rough reference across the featurizer bump.
+#
+# 1. Materialise a belief bundle (subset to taste; ~534 examples/game):
+#   py -3.14 -m tichu_training.cli.parse_bsw `
+#     --archive        C:\workbench\tichu\data\archive.zst `
+#     --output         C:\workbench\tichu\data\parquet_belief_scale_v6 `
+#     --bundle-out-dir C:\workbench\tichu\data\materialised_belief_scale_v6 `
+#     --bundle-tasks   belief --subset 20000 --workers 10
+#
+# 2. Train (streaming; ~2 min/epoch per ~10M examples on this box):
+#   py -3.14 -m tichu_training.cli.train_belief `
+#     --config configs\belief_v6_scale.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\belief_scale_v6 -v
+#
+# 3. Eval top-1 by round vs the gate:
+#   py -3.14 scripts\belief_naive_baseline.py `
+#     --bundle C:\workbench\tichu\data\materialised_belief_scale_v6\belief `
+#     --checkpoint C:\workbench\tichu\data\runs\belief_scale_v6\checkpoints\belief_final.bin `
+#     --max-examples 100000
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_belief_scale_v6\belief
+
+streaming: true
+
+model:
+  hidden: 512          # 256 -> 512 (capacity test)
+
+learning_rate: 1.0e-3
+batch_size: 2048
+epochs: 12
+seed: 0

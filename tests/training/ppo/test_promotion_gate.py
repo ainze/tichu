@@ -192,3 +192,410 @@ def test_pooled_hold_does_not_redraw_until_new_margins_arrive():
     gate.record("champion", _edge(0.0, 50, 100))  # the next window's data arrives
     assert gate.ready()
     assert gate.verdict()["opponents"]["champion"]["n"] == 200  # still pooled
+
+
+# --- seat-swap cluster bootstrap (`paired`) ---------------------------------
+# The greedy window records 2*n_deals values: the two seat arrangements of each
+# deal, ADJACENT. Card luck enters them with opposite sign, so it cancels within
+# the pair; resampling them flat re-counts uncertainty the design already removed.
+
+
+def _swapped(edge, luck_sd, n_deals, seed=0):
+    """n_deals worth of seat-swap deltas, flattened pair-adjacent like
+    `_play_pair_full`. Each deal contributes (edge + luck, edge - luck)."""
+    rng = np.random.default_rng(seed)
+    luck = rng.normal(0.0, luck_sd, n_deals)
+    skill = rng.normal(edge, 5.0, n_deals)
+    out = []
+    for s, l in zip(skill, luck):
+        out.extend((s + l, s - l))
+    return out
+
+
+def test_paired_ci_is_narrower_but_same_point_estimate():
+    margins = _swapped(edge=3.0, luck_sd=200.0, n_deals=2000)
+    flat = PromotionGate(window_games=4000, paired=False)
+    paired = PromotionGate(window_games=4000, paired=True)
+    flat.record("champion", margins)
+    paired.record("champion", margins)
+    f, p = _champ(flat.verdict()), _champ(paired.verdict())
+
+    assert f["n"] == p["n"] == 4000                  # reported n is the raw obs count
+    assert f["mean"] == pytest.approx(p["mean"])     # point estimate is untouched
+    f_hw = (f["ci_hi"] - f["ci_lo"]) / 2
+    p_hw = (p["ci_hi"] - p["ci_lo"]) / 2
+    assert p_hw < f_hw / 2, "cancelling luck must collapse when pairs are clustered"
+
+
+def test_paired_gate_promotes_an_edge_the_flat_gate_cannot_see():
+    # The live symptom: a real +3/deal edge buried under seat-swap-cancelling luck.
+    margins = _swapped(edge=3.0, luck_sd=200.0, n_deals=2000, seed=7)
+    flat = PromotionGate(window_games=4000, paired=False)
+    paired = PromotionGate(window_games=4000, paired=True)
+    flat.record("champion", margins)
+    paired.record("champion", margins)
+    assert flat.verdict()["promote"] is False
+    assert paired.verdict()["promote"] is True
+
+
+def test_paired_still_rejects_a_genuinely_zero_edge():
+    # Narrower bars must not become a rubber stamp.
+    margins = _swapped(edge=0.0, luck_sd=200.0, n_deals=2000, seed=3)
+    gate = PromotionGate(window_games=4000, paired=True)
+    gate.record("champion", margins)
+    v = gate.verdict()
+    assert _champ(v)["ci_lo"] < 0.0 < _champ(v)["ci_hi"]
+    assert v["promote"] is False
+
+
+def test_paired_pools_across_windows_keeping_pairs_aligned():
+    # Pooled mode concatenates windows; each is an even, pair-adjacent block, so
+    # the clustering must stay aligned across the join. If it drifted by one, pairs
+    # would straddle deals and the cancelling luck would stop cancelling — so the
+    # pooled paired CI staying tight IS the alignment assertion.
+    paired = PromotionGate(window_games=3000, paired=True, pooled=True)
+    flat = PromotionGate(window_games=3000, paired=False, pooled=True)
+    for w in range(3):
+        window = _swapped(edge=2.0, luck_sd=200.0, n_deals=500, seed=w)
+        paired.record("champion", window)
+        flat.record("champion", window)
+    assert paired.n("champion") == 3000
+    p, f = _champ(paired.verdict()), _champ(flat.verdict())
+    assert p["mean"] == pytest.approx(f["mean"])
+    assert (p["ci_hi"] - p["ci_lo"]) < (f["ci_hi"] - f["ci_lo"]) / 2
+
+
+def test_paired_rejects_an_odd_number_of_margins():
+    # An odd count means a Position's second arrangement is missing — silently
+    # pairing across deals would be worse than failing.
+    gate = PromotionGate(window_games=4, paired=True)
+    gate.record("champion", [1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="even number of seat-swap deltas"):
+        gate.verdict()
+
+
+def test_pooled_paired_accumulates_independently_per_opponent():
+    # Each opponent is a DIFFERENT comparison (learner-vs-champion, learner-vs-bc),
+    # so their pools must never mix: pooling them into one stream would average two
+    # unrelated questions. Drive one opponent at a real edge and one at zero — if the
+    # pools leaked, both means would drift toward the average of the two.
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    for w in range(3):
+        gate.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w))
+        gate.record("bc", _swapped(edge=40.0, luck_sd=200.0, n_deals=500, seed=100 + w))
+        v = gate.verdict()
+        assert v["promote"] is False, "champion sits at 0 — beat-ALL must hold"
+        gate.conclude(v)
+
+    assert gate.n("champion") == 3000
+    assert gate.n("bc") == 3000
+    opp = gate.verdict()["opponents"]
+    assert opp["champion"]["mean"] == pytest.approx(0.0, abs=2.0)
+    assert opp["bc"]["mean"] == pytest.approx(40.0, abs=2.0)
+    assert opp["champion"]["ci_lo"] < 0.0 < opp["champion"]["ci_hi"]
+    assert opp["bc"]["ci_lo"] > 0.0
+
+
+def test_promotion_clears_every_opponents_pool_not_just_the_deciding_one():
+    # The champion changes on promotion, so its pool is stale — but so is every other
+    # stream's, because they all measured a learner that has now been elevated. A
+    # partial clear would carry pre-promotion margins into the next window.
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    gate.record("champion", _swapped(edge=30.0, luck_sd=200.0, n_deals=500, seed=1))
+    gate.record("bc", _swapped(edge=30.0, luck_sd=200.0, n_deals=500, seed=2))
+    v = gate.verdict()
+    assert v["promote"] is True
+    gate.conclude(v)
+    assert gate.n("champion") == 0
+    assert gate.n("bc") == 0
+
+
+def test_pooled_is_not_ready_until_every_required_opponent_has_a_window():
+    # Opponents can accumulate at different rates (the SAMPLED path alternates the
+    # rollout opponent per iteration). A full pool on one stream must not arm the
+    # verdict while another is still short.
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    gate.record("champion", _swapped(edge=30.0, luck_sd=50.0, n_deals=1000, seed=1))
+    assert gate.n("champion") == 2000
+    assert not gate.ready(), "bc has no margins yet — cannot draw a beat-ALL verdict"
+    assert gate.verdict()["promote"] is False
+    gate.record("bc", _swapped(edge=30.0, luck_sd=50.0, n_deals=500, seed=2))
+    assert gate.ready()
+
+
+def test_observe_only_pool_never_blocks_a_pooled_promotion():
+    # cpfix3328 is observe-only and currently NEGATIVE (-1.50 live). Its pool must
+    # accumulate and report, but never gate readiness or the promote decision.
+    gate = PromotionGate(opponents=("champion", "cpfix3328"), window_games=1000,
+                         observe_only=("cpfix3328",), paired=True, pooled=True)
+    gate.record("champion", _swapped(edge=30.0, luck_sd=200.0, n_deals=500, seed=1))
+    gate.record("cpfix3328", _swapped(edge=-20.0, luck_sd=200.0, n_deals=500, seed=2))
+    v = gate.verdict()
+    assert v["opponents"]["cpfix3328"]["mean"] == pytest.approx(-20.0, abs=3.0)
+    assert v["opponents"]["cpfix3328"]["ci_hi"] < 0.0, "observe stream is clearly negative"
+    assert v["promote"] is True, "observe-only must not veto"
+
+
+# --- pool survives a restart (Resume Bundle round-trip) ----------------------
+# Load-bearing only under `pooled`: an unpooled gate resets every window, so a
+# restart loses at most a partial window. A pooled gate accumulates over 5-20
+# windows (640-2560 iters at greedy_every=128) — rebuilding it empty on resume
+# silently discards exactly the accumulation pooling exists to build.
+
+
+def _rebuild(gate) -> PromotionGate:
+    """A fresh gate with the same config, as the trainer builds one on resume."""
+    return PromotionGate(opponents=gate.opponents, window_games=gate.window_games,
+                         threshold=gate.threshold, observe_only=tuple(gate.observe_only),
+                         pooled=gate.pooled, paired=gate.paired)
+
+
+def test_pool_survives_a_restart_via_state_round_trip():
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         paired=True, pooled=True)
+    for w in range(3):
+        # edge 0 => every window HOLDS, so the pool is still there to be persisted
+        # (a promotion would legitimately clear it, which is the other test).
+        gate.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w))
+        gate.record("bc", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=50 + w))
+        v = gate.verdict()
+        assert v["promote"] is False
+        gate.conclude(v)
+    # Snapshot BEFORE drawing the reference verdict — `verdict()` consumes bootstrap
+    # RNG, so capturing after it would compare two different RNG positions and the
+    # CIs would differ for a reason that has nothing to do with persistence.
+    saved = gate.state()
+    before = gate.verdict()
+
+    resumed = _rebuild(gate)
+    assert resumed.n("champion") == 0, "a fresh gate starts empty — that IS the bug"
+    resumed.load_state(saved)
+
+    assert resumed.n("champion") == gate.n("champion") == 3000
+    assert resumed.n("bc") == gate.n("bc") == 3000
+    after = resumed.verdict()
+    for o in ("champion", "bc"):
+        assert after["opponents"][o]["mean"] == pytest.approx(before["opponents"][o]["mean"])
+        # The bootstrap RNG rides along, so a resumed verdict is bit-for-bit the
+        # verdict the uninterrupted run would have drawn.
+        assert after["opponents"][o]["ci_lo"] == pytest.approx(before["opponents"][o]["ci_lo"])
+        assert after["opponents"][o]["ci_hi"] == pytest.approx(before["opponents"][o]["ci_hi"])
+
+
+def test_restored_pool_still_promotes_at_the_depth_it_reached():
+    # The point of persisting: an edge that needed N pooled windows must still bank
+    # after a restart at window N-1 rather than restarting the accumulation.
+    gate = PromotionGate(window_games=2000, pooled=True)
+    gate.record("champion", _edge(1.5, 50, 2000))
+    gate.conclude(gate.verdict())          # hold, pool survives
+    gate.record("champion", _edge(1.5, 50, 2000))
+    gate.conclude(gate.verdict())          # hold, pool = 4000
+
+    resumed = _rebuild(gate)
+    resumed.load_state(gate.state())
+    resumed.record("champion", _edge(1.5, 50, 2000))   # the window that tips it
+    v = resumed.verdict()
+    assert v["opponents"]["champion"]["n"] == 6000, "must build ON the restored pool"
+    assert v["promote"] is True
+
+
+def test_load_state_tolerates_a_changed_opponent_set():
+    # A config edit can add or drop an extra_opponent across a restart. A new stream
+    # starts empty (ready() then waits for it — the conservative direction) and a
+    # dropped stream is discarded rather than crashing the resume.
+    old = PromotionGate(opponents=("champion", "bc"), window_games=1000, pooled=True)
+    old.record("champion", _edge(2.0, 50, 1000))
+    old.record("bc", _edge(2.0, 50, 1000))
+
+    wider = PromotionGate(opponents=("champion", "bc", "cpfix3328"),
+                          window_games=1000, pooled=True)
+    wider.load_state(old.state())
+    assert wider.n("champion") == 1000
+    assert wider.n("cpfix3328") == 0
+    assert not wider.ready(), "the newly-added required stream must gate readiness"
+
+    narrower = PromotionGate(opponents=("champion",), window_games=1000, pooled=True)
+    narrower.load_state(old.state())      # 'bc' silently dropped, no crash
+    assert narrower.n("champion") == 1000
+
+
+def test_load_state_of_a_bundle_without_gate_state_is_a_no_op():
+    # Bundles written before gate persistence existed carry no "gate" key.
+    gate = PromotionGate(window_games=100, pooled=True)
+    gate.load_state({})
+    assert gate.n("champion") == 0 and not gate.ready()
+
+
+# --- sliding pool (`pool_windows`) -------------------------------------------
+# Unbounded pooling assumes the learner is stationary across the pooling stretch.
+# It isn't — it's training — so an early bad patch poisons the estimate long after
+# the policy recovers. Measured from the live run's state (18 windows at -3.16), a
+# recovery to +1.5/window needs ~57 more windows (~7,300 iters) to promote
+# unbounded, vs a ~1,280-iter worst case at W=10.
+
+
+def test_pool_windows_caps_the_accumulation():
+    gate = PromotionGate(window_games=1000, pooled=True, pool_windows=3)
+    for w in range(10):
+        gate.record("champion", _edge(1.0, 50, 1000))
+        gate.conclude(gate.verdict())
+    assert gate.n("champion") == 3000, "pool must not grow past pool_windows"
+
+
+def test_sliding_pool_forgets_a_bad_patch_that_unbounded_pooling_would_not():
+    bad, good = _edge(-30.0, 20, 1000), _edge(+30.0, 20, 1000)
+    unbounded = PromotionGate(window_games=1000, pooled=True)
+    sliding = PromotionGate(window_games=1000, pooled=True, pool_windows=3)
+
+    fired = {}
+    for name, g in (("unbounded", unbounded), ("sliding", sliding)):
+        for _ in range(5):                     # the regression
+            g.record("champion", bad)
+            g.conclude(g.verdict())
+        fired[name] = None
+        for _ in range(3):                     # full recovery, W windows of it
+            g.record("champion", good)
+            v = g.verdict()
+            if v["promote"] and fired[name] is None:
+                fired[name] = _champ(v)["mean"]
+            g.conclude(v)                      # a promotion legitimately clears it
+
+    # The slide flushes the bad patch and banks the recovery. With cap=3 it fires on
+    # the SECOND recovered window, when the pool is 1 bad + 2 good:
+    # (-30 + 30 + 30)/3 = +10 — already CI-clear, without waiting for a full flush.
+    assert fired["sliding"] == pytest.approx(10.0, abs=1.0)
+    # ...while the unbounded pool is still dragged under by all 5 bad windows and
+    # cannot fire at all within the same three recovered windows.
+    assert fired["unbounded"] is None
+    assert _champ(unbounded.verdict())["mean"] < 0.0
+
+
+def test_sliding_pool_keeps_seat_swap_pairs_aligned_across_the_cut():
+    # Trimming must remove a WHOLE number of pairs. If it slipped by one, pairs would
+    # straddle deals, the cancelling luck would stop cancelling, and the paired CI
+    # would blow out to roughly the flat width.
+    sliding = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    flat = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=False)
+    for w in range(5):
+        window = _swapped(edge=2.0, luck_sd=200.0, n_deals=500, seed=w)
+        sliding.record("champion", window)
+        flat.record("champion", window)
+    assert sliding.n("champion") == 2000
+    s, f = _champ(sliding.verdict()), _champ(flat.verdict())
+    assert s["mean"] == pytest.approx(f["mean"])
+    assert (s["ci_hi"] - s["ci_lo"]) < (f["ci_hi"] - f["ci_lo"]) / 2
+
+
+def test_sliding_pool_is_per_opponent():
+    gate = PromotionGate(opponents=("champion", "bc"), window_games=1000,
+                         pooled=True, pool_windows=2)
+    for _ in range(4):
+        gate.record("champion", _edge(1.0, 50, 1000))
+        gate.record("bc", _edge(40.0, 50, 1000))
+        gate.conclude(gate.verdict())
+    assert gate.n("champion") == 2000 and gate.n("bc") == 2000
+    opp = gate.verdict()["opponents"]
+    assert opp["champion"]["mean"] == pytest.approx(1.0, abs=0.5)
+    assert opp["bc"]["mean"] == pytest.approx(40.0, abs=0.5)
+
+
+def test_sliding_pool_survives_a_restart_and_stays_capped():
+    gate = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    for w in range(4):
+        gate.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w))
+        gate.conclude(gate.verdict())
+    resumed = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    resumed.load_state(gate.state())
+    assert resumed.n("champion") == 2000
+    resumed.record("champion", _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=9))
+    assert resumed.n("champion") == 2000, "cap still enforced after a resume"
+
+
+def test_pool_windows_requires_pooled():
+    with pytest.raises(ValueError, match="requires pooled"):
+        PromotionGate(window_games=100, pool_windows=5)
+
+
+def test_pool_windows_zero_is_the_unbounded_default():
+    gate = PromotionGate(window_games=100, pooled=True, pool_windows=0)
+    for _ in range(6):
+        gate.record("champion", _edge(0.0, 50, 100))
+        gate.conclude(gate.verdict())
+    assert gate.n("champion") == 600
+
+
+# --- diagnostic component streams --------------------------------------------
+# A total near zero can be two large opposite halves. The iter27008 champion read
+# +0.14 overall while being +5.5 on card play and -5.4 on call bonus — a trade a
+# total-only gate could not see for 27k iterations, surfacing only at ship time.
+# Components ride along with the margins; they never touch the promote decision.
+
+
+def test_components_are_reported_but_never_gate_the_promotion():
+    gate = PromotionGate(window_games=1000, paired=True)
+    totals = _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=1)
+    bonus = [t - 40.0 for t in totals]          # calls -40, card play +40 => net 0
+    gate.record("champion", totals,
+                components={"card_play": [t - b for t, b in zip(totals, bonus)],
+                            "call_bonus": bonus})
+    v = _champ(gate.verdict())
+    assert v["components"]["call_bonus"]["mean"] == pytest.approx(-40.0, abs=1.0)
+    assert v["components"]["card_play"]["mean"] == pytest.approx(+40.0, abs=1.0)
+    assert v["mean"] == pytest.approx(0.0, abs=2.0), "the halves cancel in the total"
+    # ...and the verdict is still decided purely by the total.
+    assert gate.verdict()["promote"] is False
+
+
+def test_components_survive_the_sliding_trim_still_aligned():
+    gate = PromotionGate(window_games=1000, pooled=True, pool_windows=2, paired=True)
+    for w in range(5):
+        totals = _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=w)
+        bonus = [t - 40.0 for t in totals]
+        gate.record("champion", totals,
+                    components={"card_play": [t - b for t, b in zip(totals, bonus)],
+                                "call_bonus": bonus})
+    assert gate.n("champion") == 2000
+    comps = _champ(gate.verdict())["components"]
+    # If the trim had cut margins and components by different amounts, these would
+    # drift off their planted values.
+    assert comps["call_bonus"]["mean"] == pytest.approx(-40.0, abs=1.0)
+    assert comps["card_play"]["mean"] == pytest.approx(+40.0, abs=1.0)
+
+
+def test_component_length_mismatch_is_rejected():
+    gate = PromotionGate(window_games=10)
+    with pytest.raises(ValueError, match="component length mismatch"):
+        gate.record("champion", [1.0, 2.0, 3.0, 4.0], components={"half": [1.0, 2.0]})
+
+
+def test_components_round_trip_through_state():
+    gate = PromotionGate(window_games=1000, pooled=True, paired=True)
+    totals = _swapped(edge=0.0, luck_sd=200.0, n_deals=500, seed=2)
+    bonus = [t - 40.0 for t in totals]
+    gate.record("champion", totals,
+                components={"card_play": [t - b for t, b in zip(totals, bonus)],
+                            "call_bonus": bonus})
+    resumed = PromotionGate(window_games=1000, pooled=True, paired=True)
+    resumed.load_state(gate.state())
+    assert _champ(resumed.verdict())["components"]["call_bonus"]["mean"] == pytest.approx(
+        _champ(gate.verdict())["components"]["call_bonus"]["mean"])
+
+
+def test_promotion_clears_components_with_the_margins():
+    gate = PromotionGate(window_games=100, pooled=True)
+    gate.record("champion", _edge(50, 10, 100),
+                components={"call_bonus": [0.0] * 100})
+    v = gate.verdict()
+    assert v["promote"] is True
+    gate.conclude(v)
+    assert gate.n("champion") == 0
+    assert not _champ(gate.verdict()).get("components")
+
+
+def test_gate_without_components_still_works():
+    gate = PromotionGate(window_games=100)
+    gate.record("champion", _edge(50, 10, 100))
+    assert "components" not in _champ(gate.verdict())

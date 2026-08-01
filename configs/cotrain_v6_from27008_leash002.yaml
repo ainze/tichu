@@ -1,0 +1,158 @@
+# Restart from the iter-27008 champion with a TIGHT leash and the gate finally able
+# to see what it is trading.
+#
+# WHY A RESTART AT ALL
+# The previous run (cotrain_v6_pbrs_resid_wish_gated_wishfix) promoted at iter 27008
+# — its first promotion in 129 windows, unblocked by the paired-bootstrap fix — and
+# then regressed for 2,300 iterations:
+#     champion  pooled -3.16 [-4.01, -2.43]
+#     cpfix3328 pooled -4.03 [-4.88, -3.17]   (it had been +0.38/+1.14 at promotion)
+# Both ADR-0040 safety-kill triggers fired. The bundle at 29,439 is 2,400 iterations
+# into that regression; iter 27008 is the best artifact the lineage has produced
+# (40k ship check: +0.137 [-0.985, +1.259] vs the SERVED export, i.e. parity, with
+# the wish-decline fix the served export lacks). So: start from the champion, drop
+# the 2,400 bad iterations.
+#
+# THE EXPERIMENTAL VARIABLE: play KL target 0.12 -> 0.02
+# ADR-0040 §5 prescribed 0.02 *with* reanchor_on_promote — "total travel is the sum
+# of gate-proven steps". The 0.12 in the previous run was a plateau-escape hack
+# adopted when the gradient was biased (lam=0.95) AND the gate was jammed by the
+# unpaired bootstrap. Both premises are gone. A 0.12 ball around a MOVING centre is
+# the worst case for co-drift, and the 27008 promotion demonstrated it: the anchor
+# jumped onto the new weights, the policy got 0.12 fresh nats in every direction
+# including ones the old anchor forbade, and drifted into a worse region.
+#
+# reanchor_on_promote stays TRUE. Turning it off is a rollback, not a fix: iters
+# 10368-27008 had ZERO promotions, so that stretch already WAS the fixed-anchor
+# regime — 16,537 iterations of it — and it produced no absolute improvement
+# (cpfix3328 hovered around -1.5 the whole way). The cap is real; the answer is
+# smaller validated steps, not no steps.
+#
+# WHAT THIS RUN IS ACTUALLY TESTING
+# Not the leash. The open question is whether co-training systematically trades
+# go-out-first competence for card points. Measured once, at 27008 vs the served
+# export:  card play +5.49 [+4.88, +6.09] / call bonus -5.35 [-6.16, -4.52], net
+# +0.14. Forward AND reverse call-head chimeras showed the call HEADS are
+# equivalent in both contexts (+0.57 and -0.50, both straddling zero), so the
+# deficit is the PLAY policy's ability to convert calls, not the heads.
+#
+# That is one comparison across two lineages 24k iterations apart. It establishes
+# the trade exists; it does NOT establish systematic drift. The gate now records
+# the card_play/call_bonus split per window (promotion_gate_components.csv), so a
+# few thousand iterations answers it directly. READ THAT STREAM — it is the point
+# of this run. Reallocating 5.5 points to net 0.7 is ~87% waste, the signature of a
+# gradient wandering a flat direction rather than finding a better frontier point;
+# if that is what is happening, the split will keep drifting apart here too.
+#
+# Everything downstream (PBRS with an out-first potential, staged/decoupled call
+# training) is weeks of work predicated on that answer. Do not build it first.
+#
+# SEMANTIC CHANGE YOU MUST KNOW ABOUT
+# `bc_models` is a deepcopy of the warm-start (train_cotrain.py:295), so warm-starting
+# from iter_27008 means the gate's "bc" opponent is iter_27008, NOT the human BC.
+# That is deliberate and arguably better: the real BC floor sat at +11 and was never
+# binding, while a fixed reference at parity actually constrains. But it means this
+# run has NO human-plausibility anchor in the loop — the move-prediction top-1 drift
+# check at ship time is the only guard. At iteration 0 champion == bc == learner;
+# they separate on the first promotion.
+#
+#   py -m tichu_training.cli.train_cotrain --config configs/cotrain_v6_from27008_leash002.yaml
+#   py -m tichu_training.cli.check_cotrain --config configs/cotrain_v6_from27008_leash002.yaml [--iter N]
+
+warm_start:
+  play:     C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\snapshots\iter_27008_play.bin
+  schupfen: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\snapshots\iter_27008_schupfen.bin
+  tichu:    C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\snapshots\iter_27008_tichu.bin
+  grand:    C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_wishfix\snapshots\iter_27008_grand.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v6_from27008_leash002
+
+promotion_gate:
+  enabled:             true
+  greedy:              true
+  greedy_n_deals:      4096
+  greedy_every:        128
+  greedy_workers:      10
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true      # == iter_27008 here, see the note above
+  paired:              true      # seat-swap cluster bootstrap (rho -0.52 measured)
+  pooled:              true      # accumulate across held windows (ADR-0040)
+  pool_windows:        10        # ...but forget beyond 10, so a bad patch costs
+                                 # ~1,280 iters to flush rather than ~7,300
+  extra_opponents:
+    - name: cpfix3328
+      path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\iter03328_opponent.pt
+      require: false             # still observe-only. The learner is now at PARITY
+                                 # rather than -9.9, so requiring it is finally
+                                 # plausible — but a required opponent at parity
+                                 # hard-blocks promotion until it is CI-above, which
+                                 # re-jams the ratchet. Watch the stream; promote it
+                                 # to required only once it is clearly positive.
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256 }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }
+grand_model:    { skill_dim: 64, hidden: 256 }
+
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  play:     { coef: 1.0, target: 0.02,  factor: 2.0 }   # <- THE variable (was 0.12)
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8
+  master:
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                1.0    # unchanged from the previous run ON PURPOSE. The lam=1
+                             # arm's verdict was never readable (the gate was jammed
+                             # the entire time it ran), so it has not actually been
+                             # tested. Holding it fixed keeps the leash the single
+                             # learner-side variable here.
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
+  # NB: no `pbrs` block. The previous config carried
+  #     pbrs: { enabled: true, potential: banked_points }
+  # and NOTHING IN THE CODEBASE READS IT — grep src/tichu_training for "pbrs" returns
+  # nothing. PBRS was never merged, so every run in this lineage has been *named*
+  # `..._pbrs_...` while running unshaped. Dropped rather than carried forward; if
+  # PBRS is implemented later, note that `banked_points` would have been the wrong
+  # potential anyway (it densifies card points, the signal that is already dense).
