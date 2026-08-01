@@ -318,6 +318,13 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
     # anchor caps TOTAL movement; moving the anchor every N iterations turns it
     # into a trail of contained steps. 0 = off (the fixed-anchor regime).
     reanchor_play_every = int(config.get("reanchor_play_every", 0))
+    # Forced Play Decisions (|legal| == 1, ~38% of them) carry no decision and
+    # contribute exactly zero policy gradient. Dropping them from the rollout is
+    # DEFAULT ON: cheaper iterations, and no forced step lengthening a
+    # trajectory. It does shift the play advantage-normalisation stats (and, at
+    # lam<1, credit assignment), so a run that must reproduce pre-2026-08-01
+    # numbers has to set this false explicitly.
+    skip_forced_play = bool(ppo.get("skip_forced_play", True))
 
     def _sample_positions(iteration: int):
         return generate_full_position_pool(
@@ -733,7 +740,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             arch_cfg, critic_hidden=int(config.get("critic", {}).get("hidden", 512)),
             critic_depth=int(config.get("critic", {}).get("depth", 1)),
             skill_decile=skill_decile, perfect_info=perfect_info, workers=rollout_workers,
-            train_wish=cotrain_wish,
+            train_wish=cotrain_wish, skip_forced_play=skip_forced_play,
         )
         weights_path = str(run_dir / "_rollout_weights.pt")
 
@@ -816,6 +823,7 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
             update_device=update_device, rollout_collect=rollout_collect,
             train_wish=cotrain_wish, vine_collect=vine_collect,
             reanchor_play_every=reanchor_play_every,
+            skip_forced_play=skip_forced_play,
         )
     finally:
         if parallel is not None:

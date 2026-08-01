@@ -117,3 +117,22 @@ def test_cotrain_cli_league_seeds_base_snapshots_and_resumes(tmp_path):
     config["ppo"]["iterations"] = 3
     r2 = run_cotrain_training(config, progress=False)
     assert r2["start_iter"] == 2 and r2["final_iter"] == 3
+
+
+def test_skip_forced_play_config_reaches_the_rollout(tmp_path):
+    # `ppo.pbrs` was once accepted and silently ignored for a whole arc. The only
+    # defence is a per-iteration row count the flag visibly moves: ~38% of Play
+    # Decisions are forced, so opting in must shrink the play batch.
+    torch.manual_seed(0)
+    base = _config(tmp_path / "off")
+    base["ppo"]["positions_per_iter"] = 8
+    base["ppo"]["skip_forced_play"] = False
+    off = run_cotrain_training(base, progress=False)
+
+    torch.manual_seed(0)
+    on_cfg = _config(tmp_path / "on")
+    on_cfg["ppo"]["positions_per_iter"] = 8
+    on_cfg["ppo"]["skip_forced_play"] = True
+    on = run_cotrain_training(on_cfg, progress=False)
+
+    assert on["history"][0]["play_rows"] < off["history"][0]["play_rows"]
