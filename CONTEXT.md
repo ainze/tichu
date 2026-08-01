@@ -513,6 +513,30 @@ _Avoid_: distillation, mine→distill, fine-tune, correction training.
 A Checkpoint produced by **Preference Correction**. Byte-compatible with BC / **Refined** / **Sharpened** Checkpoints — same **Trunk** + Heads payload shape, so it is a drop-in **Difficulty**-tier swap.
 _Avoid_: distilled checkpoint, patched model.
 
+### Information-ceiling terms
+
+**Rule:** this family measures **how much an Agent's EV would rise if it knew more about the hidden hands** — it is *not* **PIMC** and must never be called search. The distinction is load-bearing: PIMC takes a **per-world argmax** (strategy fusion — the defect that falsified it in [ADR-0030](docs/adr/0030-phase-2-search-design.md)/[ADR-0031](docs/adr/0031-search-and-learning-loop.md)); an **Oracle Chooser** commits to **one action across all worlds** and is fusion-free by construction. There is no tree, no PUCT, no visit count. Proposed in the grilling session of 2026-07-26.
+
+**Oracle Chooser**:
+The measurement instrument family: **one** seat replaces its Policy Network's argmax with `argmax_a Q(a)`, where `Q(a)` is the exact team-relative round outcome from forcing `a` and playing out under the **frozen** champion at every other seat *and at that seat's own later turns* (`blunder_miner.playout_from`). Because every other seat is frozen and deterministic, the improved seat faces a fixed MDP, so this is one exact step of **policy iteration** and `V' ≥ V` is *guaranteed*, not hoped for — the property that every prior oracle instrument on this project lacked (**pMCPA** −67.83, **piKL** −58.66, both negative because their estimator assumed a continuation the agent then abandoned). Exactly **one** seat is upgraded: upgrading both team seats is a joint policy change with no guarantee.
+_Avoid_: cheating agent, oracle agent (bare), perfect-info policy, search, PIMC.
+
+**True-World Chooser**:
+The **Oracle Chooser** variant whose `Q` is a single exact playout in the **true** `GameState`. Measures the *absolute* ceiling of hidden-card knowledge. **Not reachable by any Belief Model** — acting on the one true world is per-world divergence, i.e. strategy fusion. Diagnostic only, never a build target.
+_Avoid_: perfect-info policy, maphack agent, cheating ceiling.
+
+**Belief-Optimal Chooser**:
+The **Oracle Chooser** variant whose `Q(a)` is the **mean** outcome over K **Determinized Worlds** drawn consistent with the acting seat's **Observation** — an unbiased estimate of `Q(infoset, a)` under the frozen continuation, so its argmax is one step of policy iteration in *info-set* space. Fusion-free: one action is committed across all K worlds. Two variants, and their **difference is the deliverable**: **belief-off** (worlds uniform over card-counting constraints — hand sizes, shown voids, Mahjong wish) is the ceiling of an agent with *no* opponent model; **belief-on** (worlds drawn to the **Belief Model**'s marginals) is the ceiling *with* one.
+_Avoid_: PIMC, belief search, world-averaged search, perfect belief.
+
+**Belief EV Value**:
+`D_on − D_off` — the tournament-point gap between the belief-on and belief-off **Belief-Optimal Chooser**s, both measured against the same frozen champion. The **only** number that prices the opponent-modelling program in ship units: it is what the existing **Belief Model** is worth when consumed *optimally* at action-selection time, with no training and no deployment loss. All prior belief evidence is in prediction-accuracy units, which no ship decision can consume.
+_Avoid_: belief gain, belief lift, belief headroom.
+
+**Disambiguation Factor**:
+`(D_on − D_off) / (D_true − D_off)` — the share of the unreachable true-world advantage that an actual posterior recovers. Converts the structural "a distribution can never equal the truth" argument into a measured ratio on this game with this agent. The **Blunder Miner**'s **96–99% of tier-1 true-world-winning alternatives evaporate across observation-consistent worlds** (i.e. they are **Verified Non-Corrections**) ([note](docs/notes/2026-06-11-blunder-mining-counterfactual-replay.md)) is the prior estimate this quantity replaces with an EV-unit measurement.
+_Avoid_: information gap, belief loss, hindsight ratio.
+
 ### Endgame / claim terms
 
 These are **deterministic, card-counted certainties**, categorically distinct from the Monte-Carlo **PIMC** vocabulary (**Determinized World**, **Leaf Rollout**) — never describe a claim-solver result as a "search" or a "rollout". Proposed in the grilling session of 2026-06-05 as the direction after the entire Phase-2 search / search+learning line was empirically falsified (see [ADR-0031](docs/adr/0031-search-and-learning-loop.md) "Final synthesis").
