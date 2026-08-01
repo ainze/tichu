@@ -398,3 +398,181 @@ def test_records_each_learner_play_decision_in_order_and_no_opponent_leak():
         for s in steps:
             assert s.logprob == float(-s.intent_index)
             assert s.value == float(s.intent_index)
+
+
+# ---------------------------------------------------------------------------
+# skip_forced_play (2026-08-01): ~38% of Play Decisions leave the acting seat
+# exactly one legal action — almost always a Pass it cannot beat. Those carry
+# no decision, contribute exactly zero policy gradient, and only lengthen the
+# trajectory. Opt-in per arm; default off keeps every existing run unchanged.
+# ---------------------------------------------------------------------------
+
+
+class LegalCountPolicy:
+    """Plays RuleAgent moves, stamping each choice with the number of legal
+    actions the acting seat had. Makes 'was this decision forced?' readable off
+    the returned trajectories."""
+
+    def __init__(self) -> None:
+        self._rule = RuleAgent()
+        self.asked: list[int] = []
+
+    def act_play_batch(self, decisions) -> list[PlayChoice]:
+        from tichu_engine.legality import legal_actions_for
+
+        out = []
+        for _seat, private_state, _gs in decisions:
+            n = len(legal_actions_for(private_state))
+            self.asked.append(n)
+            out.append(
+                PlayChoice(
+                    concrete_action=self._rule.act(private_state), intent_index=n,
+                )
+            )
+        return out
+
+
+def _play_steps(trajs):
+    return [s for t in trajs for s in t.steps if s.decision_type == "play"]
+
+
+def test_skip_forced_play_records_no_forced_decision():
+    pos = generate_full_position_pool(seed=0, n=4)
+
+    baseline = collect_rollout(
+        pos, LegalCountPolicy(), learner_team=0, skip_forced_play=False,
+    )
+    assert any(s.intent_index == 1 for s in _play_steps(baseline)), (
+        "fixture must contain forced decisions for this test to mean anything"
+    )
+
+    skipped = collect_rollout(
+        pos, LegalCountPolicy(), learner_team=0, skip_forced_play=True,
+    )
+    assert not any(s.intent_index == 1 for s in _play_steps(skipped))
+    assert len(_play_steps(skipped)) > 0
+
+
+def test_skip_forced_play_leaves_the_round_outcome_unchanged():
+    # A forced action is forced: resolving it without consulting the policy must
+    # play the identical Round. Same positions, same deterministic policy.
+    pos = generate_full_position_pool(seed=0, n=4)
+
+    baseline = collect_rollout(
+        pos, RulePlayPolicy(), learner_team=0, skip_forced_play=False,
+    )
+    skipped = collect_rollout(
+        pos, RulePlayPolicy(), learner_team=0, skip_forced_play=True,
+    )
+
+    assert [(t.seat, t.team, t.reward) for t in baseline] == [
+        (t.seat, t.team, t.reward) for t in skipped
+    ]
+
+
+def test_skip_forced_play_keeps_every_free_decision_intact():
+    # Dropping forced rows must remove ONLY those rows: the free decisions the
+    # learner actually made are the same ones, in the same order.
+    pos = generate_full_position_pool(seed=0, n=4)
+
+    baseline = collect_rollout(
+        pos, LegalCountPolicy(), learner_team=0, skip_forced_play=False,
+    )
+    skipped = collect_rollout(
+        pos, LegalCountPolicy(), learner_team=0, skip_forced_play=True,
+    )
+
+    by_seat_base = {t.seat: t for t in baseline}
+    by_seat_skip = {t.seat: t for t in skipped}
+    assert set(by_seat_base) == set(by_seat_skip)
+    for seat, base in by_seat_base.items():
+        free = [
+            s.intent_index for s in base.steps
+            if s.decision_type == "play" and s.intent_index != 1
+        ]
+        kept = [
+            s.intent_index for s in by_seat_skip[seat].steps
+            if s.decision_type == "play"
+        ]
+        assert kept == free
+        assert len(kept) < len([s for s in base.steps if s.decision_type == "play"])
+
+
+def test_skip_forced_play_never_asks_the_policy_for_a_forced_decision():
+    # The point of the skip is the saved forward: the policy must not see the
+    # row at all, for opponent seats as well as learner seats.
+    pos = generate_full_position_pool(seed=0, n=4)
+
+    baseline = LegalCountPolicy()
+    collect_rollout(pos, baseline, learner_team=0, skip_forced_play=False)
+    assert 1 in baseline.asked  # fixture sanity
+
+    policy = LegalCountPolicy()
+    collect_rollout(pos, policy, learner_team=0, skip_forced_play=True)
+    assert 1 not in policy.asked
+    assert len(policy.asked) < len(baseline.asked)
+
+
+class CallSpyPolicy(LegalCountPolicy):
+    """Call-capable: records which seats it was asked to decide a Tichu Call for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tichu_asked: list[int] = []
+
+    def act_call_batch(self, kind, decisions) -> list[CallChoice]:
+        out = []
+        for seat, _private, _gs in decisions:
+            if kind == "tichu":
+                self.tichu_asked.append(seat)
+            out.append(CallChoice(called=False, logprob=0.0, value=0.0))
+        return out
+
+
+def _wish_forced_lead_state():
+    """Seat 0 leads under an active Mahjong wish of 5 and holds exactly one
+    wish-fulfilling combination — a FORCED non-Pass Play, and seat 0's first
+    action of the Round. The only shape in which skipping a forced decision can
+    cost a seat its Tichu Call (ADR-0018 solicits at the first non-Pass Play)."""
+    return GameState(
+        hands=(
+            frozenset({_card(5, Suit.JADE), _card(13, Suit.SWORD)}),
+            frozenset({_card(9, Suit.PAGODA)}),
+            frozenset({_card(10, Suit.JADE)}),
+            frozenset({_card(11, Suit.SWORD)}),
+        ),
+        public=PublicState(
+            current_player=0, hand_sizes=(2, 1, 1, 1), scores=(0, 0),
+            trick=Trick.empty(), mahjong_wish=5,
+        ),
+    )
+
+
+def test_skip_forced_play_still_solicits_tichu_on_a_forced_non_pass_play():
+    from tichu_engine.legality import legal_actions
+
+    state = _wish_forced_lead_state()
+    assert len(legal_actions(state)) == 1  # fixture: seat 0 is forced, and it plays
+
+    pos = FullStartingPosition(state=state, grand_prefixes=(frozenset(),) * 4)
+    policy = CallSpyPolicy()
+    collect_rollout([pos], policy, learner_team=0, skip_forced_play=True)
+
+    assert 0 in policy.tichu_asked, (
+        "seat 0's first non-Pass Play was forced and the skip swallowed its "
+        "Tichu Call solicitation"
+    )
+
+
+def test_forced_decisions_are_skipped_by_default():
+    # Default ON (2026-08-01): a forced action is not a decision, so the rollout
+    # resolves it without the policy unless a run explicitly opts back in.
+    pos = generate_full_position_pool(seed=0, n=4)
+
+    default = collect_rollout(pos, LegalCountPolicy(), learner_team=0)
+    assert not any(s.intent_index == 1 for s in _play_steps(default))
+
+    opted_out = collect_rollout(
+        pos, LegalCountPolicy(), learner_team=0, skip_forced_play=False,
+    )
+    assert any(s.intent_index == 1 for s in _play_steps(opted_out))

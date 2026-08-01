@@ -13,6 +13,8 @@ keeps the validated single-process path.
 
 import multiprocessing as mp
 
+from typing import NamedTuple
+
 import torch
 
 # Per-worker state: the net skeletons built once by the initializer and reused
@@ -107,12 +109,27 @@ def _vine_chunk(task):
     )
 
 
-def _rollout_chunk(task):
+class RolloutTask(NamedTuple):
+    """One worker's slice of an iteration. Named (not positional) so adding a
+    field can never silently mis-bind an existing one across the spawn boundary
+    — the pool ships this verbatim to `_rollout_chunk`."""
+
+    positions: list
+    weights_path: str
+    opp_weights_path: str | None
+    learner_team: int
+    skill_decile: int
+    seed: int
+    train_wish: bool
+    skip_forced_play: bool = True
+
+
+def _rollout_chunk(task: "RolloutTask"):
     from tichu_training.ppo.cotrain import BatchedCoTrainPolicy
     from tichu_training.ppo.rollout import collect_rollout
 
     (positions, weights_path, opp_weights_path, learner_team, skill_decile, seed,
-     train_wish) = task
+     train_wish, skip_forced_play) = task
     state = torch.load(weights_path, map_location="cpu", weights_only=False)
     models, critic = _WORKER["models"], _WORKER["critic"]
     for key, module in models.items():
@@ -133,7 +150,8 @@ def _rollout_chunk(task):
             train_wish=bool(train_wish),
         )
     return collect_rollout(
-        positions, learner, opponent_policy=opponent, learner_team=learner_team
+        positions, learner, opponent_policy=opponent, learner_team=learner_team,
+        skip_forced_play=bool(skip_forced_play),
     )
 
 
@@ -145,7 +163,7 @@ class ParallelRollout:
 
     def __init__(self, arch_cfg: dict, *, critic_hidden: int, critic_depth: int = 1,
                  skill_decile: int, perfect_info: bool, workers: int,
-                 train_wish: bool = False) -> None:
+                 train_wish: bool = False, skip_forced_play: bool = True) -> None:
         ctx = mp.get_context("spawn")
         self._pool = ctx.Pool(
             int(workers), initializer=_init_worker,
@@ -154,6 +172,7 @@ class ParallelRollout:
         self._workers = int(workers)
         self._skill_decile = int(skill_decile)
         self._train_wish = bool(train_wish)
+        self._skip_forced_play = bool(skip_forced_play)
 
     def collect(self, positions, weights_path: str, *, learner_team: int, base_seed: int,
                 opp_weights_path: str | None = None):
@@ -166,8 +185,12 @@ class ParallelRollout:
         w = max(1, min(self._workers, len(positions)))
         chunks = [positions[i::w] for i in range(w)]
         tasks = [
-            (chunk, weights_path, opp_weights_path, learner_team, self._skill_decile,
-             base_seed + i, self._train_wish)
+            RolloutTask(
+                positions=chunk, weights_path=weights_path,
+                opp_weights_path=opp_weights_path, learner_team=learner_team,
+                skill_decile=self._skill_decile, seed=base_seed + i,
+                train_wish=self._train_wish, skip_forced_play=self._skip_forced_play,
+            )
             for i, chunk in enumerate(chunks) if chunk
         ]
         results = self._pool.map(_rollout_chunk, tasks)
