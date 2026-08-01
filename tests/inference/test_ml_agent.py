@@ -162,6 +162,134 @@ def _bomb_state(*, leader, hand_extra=frozenset(), tichu_callers=frozenset(),
     return PrivateState(player=0, hand=hand, public=pub), bomb
 
 
+def _lead_state(hand):
+    """Seat 0 on lead (empty trick) holding `hand`."""
+    from tichu_engine.state import PrivateState, PublicState, Trick
+    pub = PublicState(
+        current_player=0, hand_sizes=(len(hand), 5, 5, 5), scores=(0, 0),
+        trick=Trick(plays=(), leader=0),
+    )
+    return PrivateState(player=0, hand=hand, public=pub)
+
+
+def _peaked_at(index):
+    """Policy module putting all its mass on one play Intent."""
+    from tichu_training.action_space import ACTION_SPACE_SIZE
+
+    class _Peaked:
+        def __call__(self, features, skill_decile):
+            n = features.shape[0]
+            play = torch.full((n, ACTION_SPACE_SIZE), -10.0)
+            play[:, index] = 10.0
+            return {
+                "play": play,
+                "schupfen": torch.zeros(n, 3),
+                "wish": torch.zeros(n, 14),
+                "dragon_assignment": torch.zeros(n, 2),
+            }
+    return _Peaked()
+
+
+def _sf_bomb_plus_offsuit_fives():
+    """jade 3-7 is a straight-flush bomb; the two off-suit 5s let a pair of 5s
+    be realised three ways, only one of which spares the bomb."""
+    from tichu_engine.cards import Card, Suit
+    jade_run = {Card(suit=Suit.JADE, rank=r) for r in range(3, 8)}
+    return frozenset(jade_run | {Card(suit=Suit.SWORD, rank=5),
+                                 Card(suit=Suit.STAR, rank=5)})
+
+
+def _worst_variant_first(monkeypatch, avoid):
+    """Force the legal-action list to hand the resolver the bomb-breaking variant
+    first. Without this the frozenset happens to iterate favourably and the test
+    passes whether or not a resolver exists."""
+    import tichu_inference.ml_agent as ml
+    from tichu_engine.legality import _cards_in
+    real = ml.legal_actions_for
+
+    def ordered(private_state):
+        return sorted(real(private_state),
+                      key=lambda a: 0 if avoid in _cards_in(a) else 1)
+
+    monkeypatch.setattr(ml, "legal_actions_for", ordered)
+
+
+def test_rank_actions_realises_the_intent_without_spending_the_bomb(tmp_path, monkeypatch):
+    # The three concrete pairs of 5s share one logit — the network cannot choose
+    # between them. The resolver must, and must not spend the jade 5.
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.combinations import Pair
+    from tichu_engine.legality import _cards_in, legal_actions_for
+    from tichu_training.action_space import ACTION_SPACE_SIZE, play_intent_index
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    hand = _sf_bomb_plus_offsuit_fives()
+    pv = _lead_state(hand)
+    _worst_variant_first(monkeypatch, Card(suit=Suit.JADE, rank=5))
+
+    pair_of_fives = play_intent_index(
+        Pair(Card(suit=Suit.SWORD, rank=5), Card(suit=Suit.STAR, rank=5))
+    )
+    agent = MLAgent(artifact)
+    agent._module = _peaked_at(pair_of_fives)
+
+    ranked = agent.rank_actions(pv)
+
+    assert play_intent_index(ranked[0]) == pair_of_fives  # intent unchanged
+    assert Card(suit=Suit.JADE, rank=5) not in _cards_in(ranked[0])
+    assert len(ranked) == len(legal_actions_for(pv))  # full ranking preserved
+
+
+def test_act_resolves_to_the_sparing_variant_and_the_flag_disables_it(tmp_path, monkeypatch):
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.combinations import Pair
+    from tichu_engine.legality import _cards_in
+    from tichu_training.action_space import ACTION_SPACE_SIZE, play_intent_index
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    jade_five = Card(suit=Suit.JADE, rank=5)
+    pv = _lead_state(_sf_bomb_plus_offsuit_fives())
+    _worst_variant_first(monkeypatch, jade_five)
+    pair_of_fives = play_intent_index(
+        Pair(Card(suit=Suit.SWORD, rank=5), Card(suit=Suit.STAR, rank=5))
+    )
+
+    on = MLAgent(artifact)
+    on._module = _peaked_at(pair_of_fives)
+    assert jade_five not in _cards_in(on.act(pv))
+
+    # Flag off: back to enumeration order, which here leads with the variant
+    # that shreds the bomb — the behaviour this resolver exists to replace.
+    off = MLAgent(artifact, bomb_preserving_resolver=False)
+    off._module = _peaked_at(pair_of_fives)
+    assert jade_five in _cards_in(off.act(pv))
+
+
+def test_resolver_never_overrides_the_networks_intent_choice(tmp_path, monkeypatch):
+    # Peak the logits on a single that necessarily spends the jade 5 and so
+    # destroys the bomb. The resolver must not rescue it: it orders within a tie
+    # group only, and a higher logit always wins first.
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.combinations import Single
+    from tichu_training.action_space import ACTION_SPACE_SIZE, play_intent_index
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    jade_five = Card(suit=Suit.JADE, rank=5)
+    pv = _lead_state(_sf_bomb_plus_offsuit_fives())
+    _worst_variant_first(monkeypatch, jade_five)
+
+    agent = MLAgent(artifact)
+    agent._module = _peaked_at(play_intent_index(Single(jade_five)))
+
+    assert agent.rank_actions(pv)[0] == Single(jade_five)
+
+
 def test_guard_suppresses_bomb_on_partners_trick():
     from tichu_inference.ml_agent import suppress_partner_trick_bomb
     pv, bomb = _bomb_state(leader=2)
@@ -212,7 +340,7 @@ def test_act_applies_partner_trick_guard(tmp_path, monkeypatch):
                              action_space_size=ACTION_SPACE_SIZE)
     pv, bomb = _bomb_state(leader=2)
 
-    def bomb_first(legal, logits):
+    def bomb_first(legal, logits, cost=None):
         return sorted(legal, key=lambda a: 0 if a == bomb else 1)
     monkeypatch.setattr(ml, "_rank_legal_by_logits", bomb_first)
 
