@@ -324,6 +324,16 @@ class MLAgent(Agent):
         legal = list(legal_actions_for(private_state))
         if not legal:
             raise RuntimeError("no legal actions available")
+        if len(legal) == 1:
+            # Forced Decision — the engine leaves exactly one action (almost always
+            # a Pass the agent cannot beat; occasionally a last card or the only
+            # wish-fulfilling combination). Ranking a one-element set can only
+            # return that element, and the partner-trick guard needs a legal Pass
+            # *alongside* a bomb, so it can never fire here either: the result is
+            # identical, the forward is pure cost. ~38-39% of Play Decisions are
+            # forced (measured on both the human corpus and self-play, 2026-07-31)
+            # and act() costs ~2.0 ms against ~17 us for the enumeration alone.
+            return legal[0]
         play_logits = self._play_logits(private_state)
         if not _is_finite(play_logits):
             raise RuntimeError("non-finite logits from policy")

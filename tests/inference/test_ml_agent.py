@@ -351,3 +351,69 @@ def test_round_local_team_scores_pairs_teams_0_2_and_1_3():
         round_points_by_player=(10, 5, 20, 7),
     )
     assert round_local_team_scores(pub) == (30, 12)
+
+
+# ---------------------------------------------------------------------------
+# Forced Play Decisions (|legal| == 1) must not run the network.
+# ~38-39% of Play Decisions are forced (almost all forced Passes); the
+# 2026-07-31 diagnose measured the full act() at ~2.0 ms against ~17 us for
+# the legality enumeration that alone determines the answer.
+# ---------------------------------------------------------------------------
+
+
+def _forced_pass_state(agent):
+    """The first Play Decision in a real self-played round where the acting
+    seat's only legal action is a Pass."""
+    from tichu_engine.engine import step
+    from tichu_engine.legality import legal_actions
+
+    for seed in range(50):
+        state = deal_initial_state(seed=seed)
+        done = False
+        for _ in range(400):
+            if done:
+                break
+            if state.public.pending_decision is None and len(legal_actions(state)) == 1:
+                return state.private_view(state.public.current_player)
+            cur = state.public.current_player
+            state, _, done, _ = step(state, agent.act(state.private_view(cur)))
+    raise AssertionError("no forced Play Decision found in 50 deals")
+
+
+class _CountingModule:
+    """Wraps a loaded policy module, counting forward calls."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    def __call__(self, features, skill):
+        self.calls += 1
+        return self.inner(features, skill)
+
+
+def test_forced_play_decision_skips_the_policy_forward(tmp_path):
+    agent = _build_dummy_agent(tmp_path)
+    forced = _forced_pass_state(agent)
+    legal = legal_actions_for(forced)
+    assert len(legal) == 1  # fixture precondition
+
+    counting = _CountingModule(agent._module)
+    agent._module = counting
+    action = agent.act(forced)
+
+    assert action == next(iter(legal))
+    assert counting.calls == 0, "forced Play Decision still ran the policy forward"
+
+
+def test_free_play_decision_still_runs_the_policy_forward(tmp_path):
+    agent = _build_dummy_agent(tmp_path)
+    state = deal_initial_state(seed=0)
+    free = state.private_view(state.public.current_player)
+    assert len(legal_actions_for(free)) > 1  # fixture precondition
+
+    counting = _CountingModule(agent._module)
+    agent._module = counting
+    agent.act(free)
+
+    assert counting.calls == 1
