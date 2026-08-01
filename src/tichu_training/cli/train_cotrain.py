@@ -74,7 +74,11 @@ def _build_models(config) -> dict:
     # `call_model` keep grand == tichu shape). An explicit `grand_model` block
     # lets tichu carry a residual trunk (PR #64) while grand stays the small
     # non-residual MLP its capacity probe showed is irreducible.
-    gm = config.get("grand_model", cm)
+    # `or cm` (not a `.get` default): `_arch_cfg` materialises EVERY arch key, so a
+    # config without a grand block reaches the workers as `grand_model: {}` — with a
+    # plain default that empty dict would win and grand would rebuild at the library
+    # defaults, mismatching the main process's call_model-shaped grand on load.
+    gm = config.get("grand_model") or cm
     return {
         "play": BCModel(
             feature_dim=FEATURIZER_OUTPUT_DIM, skill_buckets=10,
