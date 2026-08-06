@@ -76,3 +76,39 @@ def test_main_with_no_serve_does_not_bind_port(tmp_path):
     cfg = _write_config(tmp_path)
     rc = main(["--config", str(cfg), "--no-serve"])
     assert rc == 0
+
+
+# --- v7 strict mode (ADR-0044) -------------------------------------------------
+
+def test_require_v7_defaults_off(tmp_path):
+    """A config that says nothing keeps serving the current, pre-v7 client."""
+    cfg = yaml.safe_load(_write_config(tmp_path).read_text(encoding="utf-8"))
+    client = TestClient(build_app_for_config(cfg))
+
+    assert client.get("/health").json()["requires_v7"] is False
+
+
+def test_require_v7_flag_turns_strict_mode_on(tmp_path):
+    """The flag is the deploy-time switch: it flips the moment the client ships
+    the Rich History Block, turning a silent input degradation into a 400."""
+    cfg_path = _write_config(tmp_path)
+    rc = main(["--config", str(cfg_path), "--require-v7", "--no-serve"])
+    assert rc == 0
+
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["require_v7"] = True
+    client = TestClient(build_app_for_config(cfg))
+    assert client.get("/health").json()["requires_v7"] is True
+
+
+def test_require_v7_can_be_set_in_the_config_file(tmp_path):
+    """Deployments pin it in YAML rather than in a process supervisor's argv."""
+    cfg_path = _write_config(tmp_path)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["require_v7"] = True
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    assert main(["--config", str(cfg_path), "--no-serve"]) == 0
+    client = TestClient(build_app_for_config(
+        yaml.safe_load(cfg_path.read_text(encoding="utf-8"))))
+    assert client.get("/health").json()["requires_v7"] is True

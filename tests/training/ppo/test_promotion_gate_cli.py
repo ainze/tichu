@@ -327,6 +327,29 @@ def test_extra_opponent_require_false_still_logged_on_hold(tmp_path):
     assert all(r["promoted"] == "0" for r in rows)
 
 
+def test_required_opponent_with_rollout_false_is_scored_by_the_greedy_window(tmp_path):
+    # The held-out ship bar (v7): `require: true, rollout: false`. The promote
+    # decision consults it — pinned by the resolver unit tests — but the learner
+    # never best-responds to it, so the margin is not measured against an opponent
+    # the policy was fitted to. What the WIRING has to get right is that the greedy
+    # mini-tournament still scores a full window for a stream the rollout skips.
+    torch.manual_seed(0)
+    config = _greedy_config(tmp_path, threshold=-1e9, also_beat_bc=True)
+    opp_path = tmp_path / "shipbar_opponent.pt"
+    _write_rollout_opponent(opp_path)
+    config["promotion_gate"]["extra_opponents"] = [
+        {"name": "shipbar", "path": str(opp_path), "require": True, "rollout": False}]
+    run_dir = Path(config["run_dir"])
+
+    run_cotrain_training(config, progress=False)
+
+    rows = _gate_rows(run_dir)
+    assert rows and {r["opponent"] for r in rows} == {"champion", "bc", "shipbar"}
+    assert all(int(r["n"]) == 2 * _GREEDY_N_DEALS for r in rows), \
+        "a required-but-not-rolled-out stream must still fill from the greedy window"
+    assert all(r["promoted"] == "1" for r in rows)
+
+
 def test_extra_opponent_require_false_needs_the_greedy_gate(tmp_path):
     # The sampled gate reads margins off the rollout stream; an observe-only
     # opponent is never rolled out, so its window could never fill — reject the

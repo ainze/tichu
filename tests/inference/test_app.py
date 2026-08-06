@@ -435,3 +435,90 @@ def test_returned_action_is_decodable_and_legal(tmp_path):
     body = r.json()
     legal_kinds = {type(a).__name__ for a in legal}
     assert body["action"]["kind"] in legal_kinds
+
+
+# --- v7 strict mode (ADR-0044): require the Rich History Block on the wire -----
+#
+# The codec has always been able to reject a pre-v7 payload; until now nothing
+# could TURN THAT ON in a running server. These pin the switch end to end, both
+# decode sites, because a guard that covers /act but not /call would let a
+# half-updated client corrupt the call heads' inputs in silence — which is the
+# exact failure the switch exists to make impossible.
+
+def _strip_rich_history(ps_blob: dict) -> dict:
+    """A payload from a client that predates v7."""
+    blob = {**ps_blob, "public": {**ps_blob["public"]}}
+    blob["public"].pop("rich_history", None)
+    return blob
+
+
+def _v7_config(tmp_path: Path, *, require: bool) -> dict:
+    cfg = _make_config_with_calls(tmp_path)
+    cfg["require_v7"] = require
+    return cfg
+
+
+def test_pre_v7_payload_is_served_by_default(tmp_path):
+    """The default MUST stay lenient. The live client has not been updated yet,
+    and flipping this on by default would take the service down."""
+    app = create_app(_make_config(tmp_path))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    r = client.post("/act", json={
+        "difficulty": "master",
+        "private_state": _strip_rich_history(private_state_to_json(ps)),
+    })
+    assert r.status_code == 200
+
+
+def test_require_v7_rejects_a_pre_v7_payload_on_act(tmp_path):
+    """Serving it would feed the policy 233 zeroed dims that training saw
+    populated — a silent ~17-point strength leak. Fail loudly instead."""
+    app = create_app(_v7_config(tmp_path, require=True))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    r = client.post("/act", json={
+        "difficulty": "master",
+        "private_state": _strip_rich_history(private_state_to_json(ps)),
+    })
+    assert r.status_code == 400
+    assert "rich_history" in r.json()["detail"]
+
+
+def test_require_v7_still_serves_a_complete_payload(tmp_path):
+    """The guard must reject only what is actually missing."""
+    app = create_app(_v7_config(tmp_path, require=True))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    assert _post_act(client, "master", ps).status_code == 200
+
+
+def test_require_v7_also_guards_the_call_endpoint(tmp_path):
+    """/call decodes the same PrivateState and feeds the same trunk."""
+    app = create_app(_v7_config(tmp_path, require=True))
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    r = client.post("/call", json={
+        "difficulty": "hard", "kind": "tichu",
+        "private_state": _strip_rich_history(private_state_to_json(ps)),
+    })
+    assert r.status_code == 400
+    assert "rich_history" in r.json()["detail"]
+
+
+def test_health_advertises_whether_v7_is_required(tmp_path):
+    """So a client can negotiate against /health instead of hard-coding a
+    version and discovering the mismatch as a 400 mid-game."""
+    lenient = TestClient(create_app(_make_config(tmp_path)))
+    strict = TestClient(create_app(_v7_config(tmp_path, require=True)))
+
+    assert lenient.get("/health").json()["requires_v7"] is False
+    assert strict.get("/health").json()["requires_v7"] is True

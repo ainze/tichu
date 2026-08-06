@@ -1,0 +1,175 @@
+# v7 CO-TRAIN (ADR-0044): fresh from the v7 BC, greedy gate, cpfix3328 observe-only.
+#
+# Lineage: configs/cotrain_v6_pbrs_resid_wish_gated_wishfix.yaml. Gate settings,
+# KL targets, entropy, PPO block and PBRS are carried over UNCHANGED so this run
+# is comparable to it window-for-window. The deltas are:
+#
+#   1) featurizer v7 (824 dims) + the Legal-Mask Trunk Input (model.use_legal_mask)
+#   2) warm_start play <- the v7 BC; the other three nets WIDENED from v6
+#   3) schupfen warm-starts from the _cpfix Checkpoint (see the note below — the
+#      wishfix lineage warm-started from the PRE-fix one, a candidate cause of
+#      ADR-0040's -2.69)
+#   4) the cpfix3328 gate opponent is the WIDENED v7-shaped copy
+#
+# THE POINT OF THIS RUN. The ship bar is the served cpfix3328 export. It sits in
+# `extra_opponents` with require:false, so the greedy gate scores it every window
+# into promotion_gate.csv WITHOUT letting it block a promotion. Widening makes
+# that faithful across the featurizer bump: zero-initialised columns mean the
+# widened net ignores the 233 new dims and the mask entirely, so it is
+# behaviourally the SAME agent as the v6 export it came from
+# (tests/training/test_net_widening.py proves function-identity, including into a
+# mask-consuming model).
+#
+# PREREQUISITES — run scripts/widen_v6_to_v7.py for BOTH jobs first; the paths
+# under warm_start / extra_opponents point at its output and do not exist until
+# then. See that script's docstring for the two commands.
+#
+# ENV: this worktree's src MUST be first on PYTHONPATH. The editable install
+# resolves tichu_training to C:\workbench\tichu\src, which is still v6 — the
+# bundle pin would catch a v6 BC load, but the widening and gate paths would
+# silently build 591-dim nets.
+
+resume: auto
+
+warm_start:
+  # The v7 BC (play/wish/dragon heads, trained WITH the mask on the 756M-row
+  # forced-row-dropped corpus).
+  play:     C:\workbench\tichu\data\runs\bc_full_corpus_v7_memmap\checkpoints\step_e000_b00750000.bin
+  # Widened from v6. The Rich History Block is identically ZERO at Schupfen and
+  # Grand Tichu (nothing has been played), so widening those two is provably
+  # lossless, not an approximation. Tichu can be called mid-round so its block is
+  # partially live — widening it is a bet on the closed calls-null
+  # (docs/notes/2026-07-29-calls-are-not-a-lever.md), taken to avoid two corpus
+  # materialisations and two training runs on a measured-null axis.
+  #
+  # SCHUPFEN COMES FROM THE _cpfix CHECKPOINT. The wishfix config warm-started
+  # from schupfen_full_corpus_v6_resid (6/21, PRE-fix) rather than
+  # ..._resid_cpfix (6/23, post-fix, measured +4.03 on a head-swap A/B). Since
+  # `bc_models` is a frozen deepcopy of the warm-started nets, that pre-fix net
+  # was simultaneously the learner init, the schupfen KL anchor (tight:
+  # 0.008 -> 0.025) and the gate's "bc" floor. Fixed here.
+  schupfen: C:\workbench\tichu\data\widened_v7\schupfen_v7.bin
+  tichu:    C:\workbench\tichu\data\widened_v7\tichu_v7.bin
+  grand:    C:\workbench\tichu\data\widened_v7\grand_v7.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v7_gated
+
+promotion_gate:
+  enabled:             true
+  greedy:              true      # margin source = greedy mini-tournament (deployed MLAgent)
+  greedy_n_deals:      4096      # deals/opponent/window => 8192 seat-swapped obs/opp
+  greedy_every:        128       # run the eval every N iters
+  greedy_workers:      10        # tournament worker procs (rollout pool idle during eval)
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true      # opponent "bc" = the v7 BC (fixed human reference)
+  paired:              true      # seat-swap CLUSTER bootstrap (rho ~ -0.52 measured)
+  pooled:              true      # accumulate across windows vs an unchanged champion
+  # MOVING WINDOW of 10 evals (81,920 obs/opponent), set at iter ~2138.
+  #
+  # Unbounded pooling carries every margin since the last promotion forever. The
+  # first two windows after the 1280 promotion were -1.08 and -1.50 vs champion,
+  # i.e. ~3.7 points of debt the pool can never shed — so even a learner that is
+  # genuinely +1.0/window better needs ~15-20 further windows just to drag the
+  # cumulative mean positive, and at +0.5/window it never resolves at all. That is
+  # ADR-0040's stated hazard: the learner is NOT stationary over a long pooling
+  # stretch, so an early dip keeps poisoning the estimate long after the policy
+  # has moved on.
+  #
+  # The cap does NOT lower the bar — at 10 windows promotion still needs a
+  # sustained ~+0.8 mean vs champion. It bounds how long stale evidence votes.
+  pool_windows:        10
+  # THE SHIP BAR, NOW REQUIRED (flipped at iter 1280).
+  #
+  # It ran observe-only from iter 0 because a REQUIRED cpfix3328 hard-blocked every
+  # promotion in the v6 run (learner -9.9 at iter 512) — you cannot ratchet against
+  # a bar you are nowhere near. That stopped being true at iter 1280, where the gate
+  # promoted with cpfix3328 at +1.489 (ci_lo +0.276): the first window in which any
+  # lineage cleared the served export CI-clean. From here the requirement is not a
+  # blocker, it is the point — a promotion that does not clear cpfix3328 advances a
+  # champion that is not worth shipping, and advancing it also moves the KL anchor.
+  #
+  # rollout: false — HELD OUT ON PURPOSE. `require` alone would also drop it into
+  # the rollout cycle (champion/bc 50/50 -> thirds), which does two unwanted things:
+  # it changes the training distribution at the same moment the gate bar changes, so
+  # a stall afterwards could not be attributed; and it makes the learner best-respond
+  # to the exact opponent the ship decision is read off, inflating the very margin
+  # that is supposed to be evidence. Kept out, the cpfix3328 margin stays an
+  # out-of-distribution measurement.
+  #
+  # READ THIS STREAM, NOT THE CHAMPION STREAM. Beating your own moving champion
+  # is what the wishfix lineage did for 27k iterations while sitting -2.69 BELOW
+  # the served export (ADR-0040). The cpfix3328 margin crossing and holding above
+  # zero is the only thing that means this program worked.
+  extra_opponents:
+    - name: cpfix3328
+      path: C:\workbench\tichu\data\widened_v7\cpfix3328_v7_opponent.pt
+      require: true
+      rollout: false
+
+model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256, use_legal_mask: true }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # tichu — residual (PR #64)
+grand_model:    { skill_dim: 64, hidden: 256 }                              # grand — non-residual (irreducible)
+
+# Perfect-Info Critic. Deliberately does NOT get the legal mask: it sees every
+# hand and can derive legality exactly, so the mask adds no fit. PR #80's
+# +0.017 R2 was measured on a value head over the OBSERVABLE 591 features, a
+# different object. At lam=1 the critic is a pure variance-reducing baseline
+# anyway, so an input that does not improve its fit does nothing at all.
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  play:     { coef: 1.0, target: 0.12,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:                 # out-of-loop check_cotrain target = the current shipped champion
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                1.0    # at lam=1 the advantage is exactly R - V(s), so the critic is a
+                             # pure baseline and cannot bias the gradient. Expect value_loss at
+                             # ~Var(R|s) ~ 30-40k; that is the arm working, not a regression.
+                             # Read the greedy gate windows.
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
+  pbrs:
+    enabled:   true
+    potential: banked_points
