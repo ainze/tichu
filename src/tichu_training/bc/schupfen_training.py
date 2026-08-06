@@ -264,21 +264,11 @@ def _schupfen_examples_for_round(
     """
     import dataclasses
 
-    from tichu_engine.state import GameState, PublicState, SchupfenPending, Trick
+    from tichu_engine.state import schupfen_start_state
     from tichu_training.card_slots import card_slot
     from tichu_training.featurizer import featurize
 
     out: list[SchupfenExample] = []
-    public = PublicState(
-        current_player=0,  # overridden per acting seat below; see loop comment.
-        hand_sizes=(14, 14, 14, 14),
-        scores=(0, 0),
-        trick=Trick.empty(),
-        pending_decision=SchupfenPending(submitted=(None, None, None, None)),
-        grand_tichu_callers=parsed_round.grand_tichu_callers,
-        # tichu_callers: left at default frozenset() — empty at schupfen time
-    )
-    state = GameState(hands=parsed_round.start_hands, public=public)
     schupfen_by_seat = {a.player: a for a in parsed_round.schupfen}
     for seat in range(4):
         action = schupfen_by_seat.get(seat)
@@ -294,8 +284,14 @@ def _schupfen_examples_for_round(
         # unlearnable for seats 1..3 (3/4 of examples): the head could not tell
         # "partner called" from "opponent called" and collapsed to "any grand
         # call -> give Dog to partner". See tests/.../test_schupfen_training.py.
-        seat_public = dataclasses.replace(public, current_player=seat)
-        seat_state = dataclasses.replace(state, public=seat_public)
+        # v7 (ADR-0044): built by the ENGINE's own round-start constructor, not
+        # a hand-maintained literal, so a new PublicState field cannot silently
+        # default differently here than at inference.
+        seat_state = schupfen_start_state(
+            parsed_round.start_hands,
+            grand_tichu_callers=parsed_round.grand_tichu_callers,
+            acting_seat=seat,
+        )
         private = seat_state.private_view(seat)
         features = featurize(private)
         hand_mask = np.zeros(CARD_SLOTS, dtype=np.float32)

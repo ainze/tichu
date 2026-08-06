@@ -96,7 +96,7 @@ _Avoid_: observation, view, perspective, info-set.
 A field on PublicState that marks the engine as mid-resolving a special Decision (`DragonGivePending` | `MahjongWishPending` | `SchupfenPending`). Not a separate state type — a flag inside PublicState.
 
 **Feature Vector**:
-The fixed-shape float32 tensor produced by `featurize(PrivateState)`. Width is set by `FEATURIZER_OUTPUT_DIM` (224 at v5; **591 at v6 in design** — per-player `played_by` + self-only `schupfen_received` + cross-Trick negative-info channels + `trick_leader`, see [ADR-0038](docs/adr/0038-featurizer-v6-played-by-and-schupfen-received.md)). Version-pinned via the featurizer version stamped on every Checkpoint.
+The fixed-shape float32 tensor produced by `featurize(PrivateState)`. Width is set by `FEATURIZER_OUTPUT_DIM` (224 at v5; **591 at v6** — per-player `played_by` + self-only `schupfen_received` + cross-Trick negative-info channels + `trick_leader`, see [ADR-0038](docs/adr/0038-featurizer-v6-played-by-and-schupfen-received.md); **824 at v7 in design** — v6 plus the **Rich History Block**, appended so that `[:591]` stays byte-identical to v6, see [ADR-0044](docs/adr/0044-featurizer-v7-rich-history-legal-mask-forced-row-drop.md)). Version-pinned via the featurizer version stamped on every Checkpoint. Note the **Legal-Mask Trunk Input** is *not* part of it — that is a model-arch flag.
 _Avoid_: encoded state, observation, input, x, featurized state.
 
 **Wire PrivateState**:
@@ -537,6 +537,34 @@ _Avoid_: belief gain, belief lift, belief headroom.
 `(D_on − D_off) / (D_true − D_off)` — the share of the unreachable true-world advantage that an actual posterior recovers. Converts the structural "a distribution can never equal the truth" argument into a measured ratio on this game with this agent. The **Blunder Miner**'s **96–99% of tier-1 true-world-winning alternatives evaporate across observation-consistent worlds** (i.e. they are **Verified Non-Corrections**) ([note](docs/notes/2026-06-11-blunder-mining-counterfactual-replay.md)) is the prior estimate this quantity replaces with an EV-unit measurement.
 _Avoid_: information gap, belief loss, hindsight ratio.
 
+### Featurizer v7 terms
+
+**Rule:** v7 is **additive** — `featurize(...)[:591]` is byte-identical to a v6 **Feature Vector**. That is a load-bearing invariant, not a convenience: it is what lets a v6 **Checkpoint** (notably the served `cpfix3328`) stay in the co-train rollout and the promotion gate behind a **v6-View Prefix** instead of a frozen second featurizer. Proposed in the grilling session of 2026-08-01; see [ADR-0044](docs/adr/0044-featurizer-v7-rich-history-legal-mask-forced-row-drop.md).
+
+**Rich History Block**:
+The 233-dim v7 section (3 opponents × 59 + 56 play-order) recording decline **context** (who was winning when a seat declined), declined combo **length**, declined **bombs**, trick **stakes**, the **Wish Void**, and per-card play order — a strict superset of ADR-0028's 27-dim B-core, which v7 keeps rather than reclaims. Accumulated **engine-side** on `PublicState` like the v6 channels, stored raw and normalised by the featurizer.
+_Avoid_: history block (ambiguous with ADR-0028's deleted belief-input block), rich history features, opponent model.
+
+**Wish Void**:
+The one **certainty** in the **Rich History Block**: an opponent is proven void in the wished rank only when it **led** under an active Mahjong Wish without playing that rank. Following and passing are **evidence, not proof** — `_apply_wish` restricts to wish-fulfilling actions only *among already-legal ones*, so a seat that could not legally play the rank anyway proves nothing. The soundness is narrow and deliberate; widening it silently converts a certainty into a guess.
+_Avoid_: void, known void, wish evidence (the soft channel is separate and is not proof).
+
+**Legal-Mask Trunk Input**:
+The raw 1809-wide legal-**Intent** mask fed to the **Policy Network**'s trunk as *input*, in addition to its long-standing use as an *output* mask in `masked_cross_entropy` / `sample_masked`. A **model-arch flag**, not a featurizer section — the mask is already bit-packed in the bundle, so it costs no disk and no `FEATURIZER_VERSION` bump. Zero-filled on non-play rows. Never fed to the **Perfect-Info Critic**, which can derive legality exactly.
+_Avoid_: mask features, legal actions input, action mask (bare — say output mask or trunk input).
+
+**Forced Play Decision**:
+A **Play** Decision with exactly **one legal Intent** (`legal_mask.sum() == 1`) — ~39% of play rows. It carries **zero BC gradient** by construction (the masked softmax puts probability 1 on the single legal Intent, so `nll = 0`), inflates reported top-1, and diluted GAE credit before the rollout skip. Dropped from the v7 corpus at materialise time, skipped in the rollout, and skipped at inference.
+_Avoid_: singleton decision, trivial move, no-choice state.
+
+**v6-View Prefix**:
+`feats[:, :591]` — the slice of a v7 **Feature Vector** that reproduces a v6 one exactly, used to let a v6 **Checkpoint** act inside a v7 process. The cheap alternative to the `featurizer_v5_frozen.py` pattern, available only because v7 is additive.
+_Avoid_: v6 compatibility mode, featurizer downgrade, backward-compatible featurizer.
+
+**Net Widening**:
+Warm-starting a v7-shaped net from a v6 **Checkpoint** by copying the v6 weights into the new first layer and **zero-initialising** the added input columns — **exactly** function-preserving at init, not approximately. Used for the **Call Networks** at v7, and held in reserve as the fallback route for warm-starting the co-train from `cpfix3328` itself. The cost is that zero-initialised columns carry no supervised signal, so a widened net must discover the new inputs from the RL gradient alone.
+_Avoid_: net2net, transfer, resize, upcast.
+
 ### Endgame / claim terms
 
 These are **deterministic, card-counted certainties**, categorically distinct from the Monte-Carlo **PIMC** vocabulary (**Determinized World**, **Leaf Rollout**) — never describe a claim-solver result as a "search" or a "rollout". Proposed in the grilling session of 2026-06-05 as the direction after the entire Phase-2 search / search+learning line was empirically falsified (see [ADR-0031](docs/adr/0031-search-and-learning-loop.md) "Final synthesis").
@@ -597,6 +625,9 @@ _Avoid_: endgame search, solver (bare), lookahead, claim search.
 - "skill weight" vs "skill conditioning" — resolved: the model is **conditioned** on Skill Decile via the Skill Embedding; **Sample Weight is unrelated to skill** in BC Training (always `1.0`).
 - "deal" used as a noun in `tichu_eval` for "the synthetic starting position" — resolved: **Starting Position** is the noun; "deal" stays verb-only per §Game-layer terms. Module renamed to `tichu_eval/starting_position_pool.py` and `play_deal()` → `play_round()` in session 2026-05-25.
 - "player handle" treated as game-stable (one tuple per `ParsedGame`) — resolved: handles are **per-round** (`ParsedRound.handles`), not per-game. Captures BSW mid-game player substitutions and **Anonymous Seats** correctly. `ParsedGame.handles` removed in session 2026-05-26. BC ingestion tolerates anonymous / substituted seats (Neutral Skill Decile); TrueSkill ingestion rejects them (per-identified-stable-game invariant). See [ADR-0010](docs/adr/0010-per-round-handles-with-asymmetric-tolerance.md).
+- "forced" used for two different predicates — resolved: a **Forced Play Decision** is `legal_mask.sum() == 1` (one legal **Intent**, the BC/corpus predicate), while `rollout._forced_action` tests `len(legal_actions(state)) == 1` (one **ConcreteAction**). `|ConcreteAction| == 1` implies `|Intent| == 1` but **not the reverse** — one "Single 7" Intent can have two suited realisations — so the Intent-level set is strictly larger. Both are correct for their own purpose; neither may be assumed equal to the other. See [ADR-0044](docs/adr/0044-featurizer-v7-rich-history-legal-mask-forced-row-drop.md).
+- "featurizer v7" naming two different feature sets — resolved: **v7 is [ADR-0044](docs/adr/0044-featurizer-v7-rich-history-legal-mask-forced-row-drop.md)** (**Rich History Block**). [ADR-0039](docs/adr/0039-featurizer-v7-trick-point-stakes-and-current-winner.md) proposed an unrelated v7 (trick point-stakes + current-trick winner), was **Rejected**, and never built — no `FEATURIZER_VERSION` ever shipped as `"v7"`, so the stamp was free to reclaim.
+- "the legal mask is a featurizer change" — resolved: it is **not**. The **Legal-Mask Trunk Input** is a model-arch flag; the mask is already bit-packed in the materialised bundle, so it needs no `FEATURIZER_VERSION` bump, no re-materialisation, and no `SECTION_DIMS` entry.
 - "parquet shards are the BC training input" — resolved: **the BSW archive is the training input**; parquet shards are a per-decision manifest carrying labels, `sample_weight`, `round_outcome`, and `player_handle`. Feature Vector and legal Intent mask are computed at train time by replaying the round from the archive. The schema's reserved `state` / `legal_actions_mask` / `skill_decile` columns are dead weight in v1 and slated for removal. Skill Decile is joined live against the TrueSkill ratings table by `player_handle`. See [ADR-0011](docs/adr/0011-bc-training-replay-on-the-fly.md).
 - "parquet schema version is the same as featurizer version" — resolved: they are independent. `featurizer_version` versions the **Featurizer** (`featurize` function output) and nothing else. Parquet schema additions (e.g., `game_won` in v3) bump the **directory suffix** (`parquet_<scale>_v<N>`); featurizer_version is left untouched. Readers detect schema features by column-presence, not by string comparison. See [ADR-0013](docs/adr/0013-parquet-schema-versioned-by-directory.md).
 - "game" used loosely for either a `ParsedGame` or a Tichu Game-to-1000 — resolved: a **Game** is a sequence of Rounds played to 1000; a `ParsedGame` is a Game iff at least one team's cumulative `ergebnis` reaches ≥ 1000 (a **Complete Game**). The remainder are **Incomplete Sessions** — included in BC labels (round-level data is intact) but excluded from the `"game"` Value Target.

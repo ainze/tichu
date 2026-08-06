@@ -56,6 +56,18 @@ def create_app(config: dict) -> FastAPI:
     # they thought was bad. Lazy — costs nothing when the flag is off.
     tape = _TapeLogger(config["tape_log"]) if config.get("tape_log") else None
 
+    # v7 strict mode (ADR-0044). OFF by default: the live client predates the
+    # Rich History Block, and the codec's leniency is what keeps it working.
+    # That leniency is also the hazard — a missing accumulator decodes to zeros,
+    # so an out-of-date client degrades the policy's input silently and no metric
+    # moves. Flip this ON (serve --require-v7, or `require_v7: true` in the YAML)
+    # the moment the client sends the block, so a half-updated client is an
+    # immediate 400 instead of an invisible strength leak.
+    require_v7 = bool(config.get("require_v7", False))
+    if require_v7:
+        log.info("v7 strict mode: /act and /call reject payloads without "
+                 "public.rich_history")
+
     app = FastAPI()
     state = _AppState(agents=agents)
     app.state.agent_registry = agents
@@ -103,6 +115,9 @@ def create_app(config: dict) -> FastAPI:
             "agents": sorted(state.agents.keys()),
             "featurizer_version": FEATURIZER_VERSION,
             "action_space_version": ACTION_SPACE_VERSION,
+            # So a client can negotiate here rather than discover the mismatch
+            # as a 400 in the middle of a game.
+            "requires_v7": require_v7,
         }
 
     @app.post("/act")
@@ -118,7 +133,7 @@ def create_app(config: dict) -> FastAPI:
         if ps_blob is None:
             raise HTTPException(status_code=400, detail="private_state is required")
         try:
-            ps = private_state_from_json(ps_blob)
+            ps = private_state_from_json(ps_blob, require_v7=require_v7)
         except (ValueError, KeyError) as exc:
             raise HTTPException(status_code=400, detail=f"malformed private_state: {exc}")
 
@@ -156,7 +171,7 @@ def create_app(config: dict) -> FastAPI:
         if ps_blob is None:
             raise HTTPException(status_code=400, detail="private_state is required")
         try:
-            ps = private_state_from_json(ps_blob)
+            ps = private_state_from_json(ps_blob, require_v7=require_v7)
         except (ValueError, KeyError) as exc:
             raise HTTPException(status_code=400, detail=f"malformed private_state: {exc}")
 

@@ -1,0 +1,94 @@
+# BC training on the FULL corpus packed bundle, featurizer v7 (ADR-0044):
+# the Rich History Block + the Legal-Mask Trunk Input + the forced-row drop.
+#
+# Lineage: configs/bc_full_corpus_v6_wishfix_memmap.yaml. Arch / LR / batch /
+# seed / shuffle are IDENTICAL to it; the deltas are exactly three:
+#   1) the bundle path (v7, 824-dim features, forced Play rows dropped)
+#   2) model.use_legal_mask: true   (PR #80, +3.04% rel NLL, negative placebo)
+#   3) nothing else — see the LR note below.
+#
+# Row counts (v7 bundle manifest, vs the v6 wishfix bundle):
+#   play     756,291,715   (was 1,248,160,023 — -39.4%, the Forced Play rows)
+#   wish      21,489,724   (UNCHANGED — the drop is emission-only, play head only)
+#   dragon    19,887,678   (UNCHANGED)
+# 804 GiB on disk. ~40% fewer play rows per epoch than v6.
+#
+# LEARNING RATE — deliberately UNCHANGED at 3.0e-4.
+# Dropping 39% zero-loss rows does scale the play-head gradient by ~1.64x
+# (masked_cross_entropy reduces with .mean()), and ADR-0044 originally called for
+# scaling the play-head LR by 0.61 to compensate. That is RETRACTED: BC trains
+# with Adam, which is invariant to a constant loss scale. Measured at 50 steps,
+# 1.0x vs 1.64x loss differ by 3e-8 in parameters (float noise); under SGD the
+# same test gives 2e-3. Compensating here would have silently slowed the play
+# head by 39%.
+#
+# READING THE RESULT — top-1 will look ~15 points WORSE than v6 and will not be.
+# Forced rows are ~100% correct for free; removing them changes the denominator.
+# v6's ~0.75 overall corresponds to (0.75 - 0.39) / 0.61 ~ 0.59 on non-forced
+# rows, which is exactly PR #80's measured 0.5991 baseline. EVERY comparison
+# against a v6 number must be non-forced-rows-only on BOTH sides.
+#
+# ATTRIBUTION, if this disappoints. v7 is strictly additive and the mask is a
+# flag, so the isolating arms run against THIS SAME BUNDLE with no
+# re-materialisation:
+#   A0 v6-equivalent : feature_prefix 591, use_legal_mask false
+#   A1 mask only     : feature_prefix 591, use_legal_mask true
+#   A2 rich only     : (no prefix),        use_legal_mask false
+#   A3 ship candidate: this config
+# (A0-A2 need the trunk to consume a prefix; not wired — the point is the BUNDLE
+# does not have to be rebuilt to ask the question.)
+#
+# Prereq: the v7 bundle, materialised WITH --skip-forced-play. MUST run with this
+# worktree's src first on PYTHONPATH — the editable install shadows it and points
+# at the v6 featurizer, which would fail the bundle's manifest pin (or, worse,
+# silently train the wrong thing if the pin were ever relaxed):
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\tichu-featurizer-materialize-58baee\src"
+#   python -c "import tichu_training.featurizer as f; print(f.FEATURIZER_VERSION)"   # must print v7
+#
+# Use:
+#   python -m tichu_training.cli.train_bc `
+#     --config  configs\bc_full_corpus_v7_memmap.yaml `
+#     --run-dir C:\workbench\tichu\data\runs\bc_full_corpus_v7_memmap `
+#     --device  cuda -v
+
+dataset: memmap
+dataset_kwargs:
+  data_dir: C:\workbench\tichu\data\materialised_full_v7_wishfix\bc
+
+model:
+  trunk_hidden: 1024
+  trunk_depth: 4
+  trunk_out_dim: 512
+  skill_dim: 64
+  head_hidden: 256
+  # v7 (ADR-0044 / PR #80). Raw 1809-wide legal-Intent mask concatenated to the
+  # trunk input, so in_dim goes 824 + 64 -> 2697 and input_proj grows
+  # 909K -> 2.76M params. Costs no disk (the mask is already in every batch) and
+  # no featurizer bump. Zero-filled on wish/dragon rows: head masks are
+  # 1809/14/2 wide, the trunk is fixed-width, and padding a 14-wide wish mask
+  # into play's action-index space would be actively misleading.
+  use_legal_mask: true
+
+learning_rate: 3.0e-4
+batch_size: 1024
+epochs: 1
+head_weights:
+  play: 1.0
+  wish: 0.3
+  dragon_assignment: 0.2
+
+# REQUIRED at full-corpus scale (NOT optional). The bundle is emitted in game_id
+# order and sample_weight is a recency weight that flips 0.5 -> 1.0 at game_id
+# 1,855,844 (parse_bsw --recency-cutoff-game-id). Unshuffled, training crosses
+# that boundary mid-epoch: the weighted loss + effective LR double and the final
+# 1-epoch checkpoint is biased toward last-seen games. Shuffling interleaves
+# old/recent into weight-mixed, ~i.i.d. batches. Two-level knobs: large block
+# keeps order.dat reads near-sequential; buffer controls within-batch mixing.
+shuffle: true
+shuffle_buffer: 1048576           # rows held per drain (within-batch mixing)
+shuffle_block: 65536              # contiguous order.dat rows per read (I/O locality)
+
+checkpoint_every: 100000           # won't fire — epochs=1
+checkpoint_every_batches: 50000    # ~51M ex per save, ~15 mid-epoch checkpoints
+                                   # at v7's 756M play rows (was ~25 at v6)
+seed: 0

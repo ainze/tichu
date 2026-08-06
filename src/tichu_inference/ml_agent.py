@@ -46,6 +46,7 @@ from tichu_engine.legality import (
 )
 from tichu_engine.state import PrivateState
 from tichu_export.torchscript import (
+    exported_uses_legal_mask,
     VersionMismatchError,
     load_exported,
 )
@@ -125,6 +126,25 @@ def load_standalone_net(path: str | Path, *, featurizer=_DEFAULT_FEATURIZER):
     return load_exported(path, expected_featurizer_version=featurizer.FEATURIZER_VERSION)
 
 
+def _trunk_legal_mask(private_state: PrivateState, *, is_play_decision: bool):
+    """The 1809-wide play-legality mask a v7 policy trunk expects (ADR-0044).
+
+    Mirrors `bc.heads.play_mask_for_trunk` on the serving side: the real mask on
+    a Play Decision, ZEROS otherwise. Training fed zeros on wish / dragon rows —
+    head masks are 1809 / 14 / 2 wide and the trunk is fixed-width — so serving
+    must too, or the policy meets a distribution it never saw.
+    """
+    import torch as _torch
+
+    from tichu_training.action_space import ACTION_SPACE_SIZE, legal_mask
+
+    if not is_play_decision:
+        return _torch.zeros(1, ACTION_SPACE_SIZE)
+    mask = legal_mask("play", private_state, private_state.player,
+                      cached_actions=frozenset(legal_actions_for(private_state)))
+    return _torch.from_numpy(mask).unsqueeze(0).float()
+
+
 @register_agent("ml")
 class MLAgent(Agent):
     def __init__(
@@ -147,6 +167,9 @@ class MLAgent(Agent):
         # builder uses to share one already-loaded module across tier-views.
         # `featurizer` (default v6) selects the feature generation + load-guard
         # version — pass `featurizer_v5_frozen` to run a v5-trained export here.
+        # Read the mask stamp from the artifact BEFORE _init_with_modules, which
+        # only falls back to module introspection when this is unset.
+        self._uses_legal_mask = exported_uses_legal_mask(checkpoint_path)
         self._init_with_modules(
             load_policy_module(checkpoint_path, featurizer=featurizer),
             skill_decile=skill_decile,
@@ -235,6 +258,14 @@ class MLAgent(Agent):
         self._skill_decile = int(skill_decile)
         self._fz = featurizer  # injected featurizer (default v6); see __init__.
         self._module = policy_module
+        # v7 (ADR-0044): whether this policy takes the legal mask as a trunk
+        # input. Path loads read the artifact's stamp (set in __init__ before
+        # this runs); in-memory modules carry the flag as an attribute. Default
+        # False, which is correct for every pre-v7 export.
+        if getattr(self, "_uses_legal_mask", None) is None:
+            self._uses_legal_mask = bool(
+                getattr(policy_module, "use_legal_mask", False)
+            )
         self._schupfen = schupfen
         self._tichu_call = tichu_call
         self._grand_call = grand_call
@@ -405,7 +436,7 @@ class MLAgent(Agent):
 
     def wish_action_scores(self, private_state: PrivateState) -> list[tuple[ConcreteAction, float]]:
         """Legal Mahjong-Wish ranks with policy probability, sorted descending."""
-        out = self._policy_forward(private_state)
+        out = self._policy_forward(private_state, is_play_decision=False)
         wish_logits = out["wish"][0].detach().cpu().numpy()
         legal = [a for a in legal_actions_for(private_state) if isinstance(a, MahjongWish)]
         return _softmax_scores([(a, float(wish_logits[wish_intent_index(a)])) for a in legal])
@@ -414,7 +445,7 @@ class MLAgent(Agent):
         """The two DragonGive targets with policy probability, sorted descending."""
         pending = private_state.public.pending_decision
         winner = getattr(pending, "winner", None)
-        out = self._policy_forward(private_state)
+        out = self._policy_forward(private_state, is_play_decision=False)
         dl = out["dragon_assignment"][0].detach().cpu().numpy()
         legal = [a for a in legal_actions_for(private_state) if isinstance(a, DragonGive)]
         return _softmax_scores([(a, float(dl[dragon_intent_index(a, winner)])) for a in legal])
@@ -438,7 +469,7 @@ class MLAgent(Agent):
     # ------------------------------------------------------------
 
     def _act_wish(self, private_state: PrivateState) -> ConcreteAction:
-        out = self._policy_forward(private_state)
+        out = self._policy_forward(private_state, is_play_decision=False)
         wish_logits = out["wish"][0].detach().cpu().numpy()
         if not _is_finite(wish_logits):
             raise RuntimeError("non-finite wish logits")
@@ -450,7 +481,7 @@ class MLAgent(Agent):
     def _act_dragon(self, private_state: PrivateState) -> ConcreteAction:
         pending = private_state.public.pending_decision
         winner = pending.winner  # DragonGivePending
-        out = self._policy_forward(private_state)
+        out = self._policy_forward(private_state, is_play_decision=False)
         dragon_logits = out["dragon_assignment"][0].detach().cpu().numpy()
         if not _is_finite(dragon_logits):
             raise RuntimeError("non-finite dragon logits")
@@ -503,8 +534,14 @@ class MLAgent(Agent):
         skill = torch.tensor([self._skill_decile], dtype=torch.long)
         return features, skill
 
-    def _policy_forward(self, private_state: PrivateState) -> dict:
+    def _policy_forward(self, private_state: PrivateState,
+                        *, is_play_decision: bool = True) -> dict:
         features, skill = self._inputs(private_state)
+        if self._uses_legal_mask:
+            mask = _trunk_legal_mask(
+                private_state, is_play_decision=is_play_decision,
+            )
+            return self._module(features, skill, mask)
         return self._module(features, skill)
 
     def _run(self, module, private_state: PrivateState) -> np.ndarray:

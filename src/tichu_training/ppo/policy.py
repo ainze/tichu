@@ -17,6 +17,7 @@ from tichu_training.bc.heads import HEAD_LOGIT_DIMS
 from tichu_training.featurizer import featurize
 from tichu_training.perfect_info import featurize_perfect_info
 from tichu_training.ppo.rollout import PlayChoice
+from tichu_training.bc.heads import forward_play_model
 
 _PLAY_DIM = HEAD_LOGIT_DIMS["play"]
 
@@ -134,7 +135,8 @@ class BatchedPolicy:
         generator: torch.Generator | None = None,
     ) -> SampledBatch:
         with torch.no_grad():
-            play_logits = self._model(features, skill)["play"]
+            play_logits = forward_play_model(
+                self._model, features, skill, legal_masks)["play"]
             indices, logprobs = sample_masked(play_logits, legal_masks, generator=generator)
             # Asymmetric critic values the perfect-info features when given; else
             # the symmetric path values the same observable features (ADR-0033).

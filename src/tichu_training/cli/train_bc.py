@@ -663,6 +663,9 @@ def _build_model(feature_dim: int, config) -> BCModel:
         trunk_depth=int(m.get("trunk_depth", 4)),
         trunk_out_dim=int(m.get("trunk_out_dim", 512)),
         head_hidden=int(m.get("head_hidden", 256)),
+        # v7 (ADR-0044 / PR #80): default OFF, so a v6-equivalent arm is a
+        # config flip against the SAME bundle.
+        use_legal_mask=bool(m.get("use_legal_mask", False)),
     )
 
 

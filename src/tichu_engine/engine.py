@@ -14,6 +14,8 @@ from dataclasses import replace
 
 from tichu_engine.cards import Card, DOG, DRAGON, MAHJONG, PHOENIX, SpecialCard
 from tichu_engine.combinations import CardOrSpecial, Single, combo_type_and_rank
+from tichu_engine.card_slots import card_slot
+from tichu_engine.rich_history import RichHistory, context_for
 from tichu_engine.legality import (
     ConcreteAction,
     BombInterrupt,
@@ -109,7 +111,9 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
 
     # Dog short-circuits normal trick mechanics: lead passes to partner, trick clears.
     if isinstance(action, Single) and action.card is DOG:
-        dog_declined, dog_lead, dog_pass = _fold_decision(state.public, current, action)
+        dog_declined, dog_lead, dog_pass, dog_rich = _fold_decision(
+            state.public, current, action
+        )
         next_hands = _remove_from_hand(state.hands, current, frozenset({DOG}))
         next_hand_sizes = tuple(len(h) for h in next_hands)
         partner = _partner_target(partner=(current + 2) % NUM_PLAYERS, hand_sizes=next_hand_sizes)  # type: ignore[arg-type]
@@ -133,6 +137,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             declined_top_by_player=dog_declined,
             lead_summary_by_player=dog_lead,
             pass_stats_by_player=dog_pass,
+            rich_history=dog_rich,
         )
         new_state = replace(state, hands=next_hands, public=next_public)
         done = _round_done_state(new_state)  # capture before finalise resets out_order
@@ -153,7 +158,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     next_played_by = _add_played_by(
         state.public.played_cards_by_player, current, played_cards
     )
-    next_declined, next_lead_summary, next_pass_stats = _fold_decision(
+    next_declined, next_lead_summary, next_pass_stats, next_rich = _fold_decision(
         state.public, current, action
     )
 
@@ -184,6 +189,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             declined_top_by_player=next_declined,
             lead_summary_by_player=next_lead_summary,
             pass_stats_by_player=next_pass_stats,
+            rich_history=next_rich,
         )
         return replace(state, hands=next_hands, public=next_public), 0.0, _round_done(next_hand_sizes), {}  # type: ignore[arg-type]
 
@@ -259,6 +265,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         declined_top_by_player=next_declined,
         lead_summary_by_player=next_lead_summary,
         pass_stats_by_player=next_pass_stats,
+        rich_history=next_rich,
     )
     new_state = replace(state, hands=next_hands, public=next_public)
     # Capture done before finalise resets out_order (else a slam — partner pair
@@ -341,32 +348,88 @@ def _single_lead_rank(action: object) -> int | None:
     return None
 
 
+def _combo_length(combo: object) -> int:
+    """Declared length of a variable-length Combination, else 0.
+
+    `combo.length` — pairs for a PairStep, cards for a Straight — matching the
+    featurizer's own `length` subfield. NOT the raw card count: that would make a
+    3-long PairStep (6 cards) indistinguishable from a 6-long Straight.
+    """
+    length = getattr(combo, "length", None)
+    return int(length) if isinstance(length, int) else 0
+
+
 def _fold_decision(public: PublicState, seat: int, action: object) -> tuple:
     """v6 (ADR-0028 B-core): fold one Play/Pass Decision by `seat` into the
     decline / lead / pass accumulators — the canonical definition of these
     channels, read out by the featurizer for policy and belief alike.
     A Pass records the declined top (per type) and bumps pass + decision counts;
     a play leading a fresh Trick bumps lead count (and lowest single lead).
-    Returns (declined_top_by_player, lead_summary_by_player, pass_stats_by_player)."""
+    v7 (ADR-0044) folds the Rich History Block in the same pass — one traversal,
+    one definition, so the two can never disagree about what a Decision was.
+
+    Returns (declined_top_by_player, lead_summary_by_player, pass_stats_by_player,
+    rich_history)."""
     declined = [list(x) for x in public.declined_top_by_player]
     lead = [list(x) for x in public.lead_summary_by_player]
     passes = [list(x) for x in public.pass_stats_by_player]
+    rich = public.rich_history
     passes[seat][1] += 1  # every Decision counts toward pass pressure's denominator
+    # v7: stamp play ORDER onto each card played. `_cards_in` is the only safe
+    # unwrap — a BombInterrupt is not a Combination and raises, so the bomb fold
+    # site passes `action.bomb`, never the interrupt itself.
+    if not isinstance(action, Pass):
+        rich = rich.with_play(card_slot(c) for c in _cards_in(action))
     if isinstance(action, Pass):
         passes[seat][0] += 1
         tr = combo_type_and_rank(public.trick.top_combination)
-        if tr is not None:
+        if tr is None:
+            # A Bomb (or the Dog) — no (type, rank) among the six non-bomb Intent
+            # types, which is exactly why v6 drops it. v7 counts it instead of
+            # discarding it.
+            if public.trick.top_combination is not None:
+                rich = rich.with_declined_bomb(seat)
+        else:
             tidx, rank = tr
             declined[seat][tidx] = max(declined[seat][tidx], rank)
+            # v7: the same decline, but keyed by WHO was winning — the context
+            # v6's `declined_top` collapses away — plus frequency, the declined
+            # combination's length, and what the Trick was worth.
+            rich = rich.with_decline(
+                seat, tidx, context_for(seat, public.trick.leader), rank,
+                length=_combo_length(public.trick.top_combination),
+                stakes=trick_point_value(public.trick),
+            )
     elif public.trick.leader is None:  # a play leading a fresh Trick
         lead[seat][0] += 1
         rank = _single_lead_rank(action)
         if rank is not None:
             lead[seat][1] = rank if lead[seat][1] == 0 else min(lead[seat][1], rank)
+            rich = rich.with_lead_single(seat, rank)  # v7: the high end too
+        # v7: a lead that does NOT fulfil an active wish PROVES the seat is void
+        # in the wished rank — on a lead every Combination in hand is legal, so
+        # holding it would have forced a wish-fulfilling play. This is the only
+        # case that qualifies; see `RichHistory.with_proven_void`.
+        wish = public.mahjong_wish
+        if wish is not None and not _play_fulfils_wish(action, wish):
+            rich = rich.with_proven_void(seat, wish)
+
+    # v7: EVIDENCE — any Decision that passed up a chance to fulfil an active
+    # wish. Broader than the proof above (it includes Passes and follows, where
+    # the seat may hold the rank in no legal action) and deliberately kept in its
+    # own channel so the certainty is never diluted by the guess.
+    wish = public.mahjong_wish
+    if wish is not None:
+        declined_the_wish = isinstance(action, Pass) or not _play_fulfils_wish(
+            action, wish
+        )
+        if declined_the_wish:
+            rich = rich.with_wish_evidence(seat, wish)
     return (
         tuple(tuple(x) for x in declined),
         tuple(tuple(x) for x in lead),
         tuple(tuple(x) for x in passes),
+        rich,
     )
 
 
@@ -442,6 +505,9 @@ def _finalise_round(state: GameState) -> GameState:
         declined_top_by_player=((0, 0, 0, 0, 0, 0),) * 4,
         lead_summary_by_player=((0, 0),) * 4,
         pass_stats_by_player=((0, 0),) * 4,
+        # v7 (ADR-0044): round-only, like the v6 accumulators above. A void
+        # proven in this Round says nothing about the next — the hands are new.
+        rich_history=RichHistory(),
     )
     return GameState(hands=state.hands, public=next_public)
 
@@ -523,7 +589,7 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
     """Apply an out-of-turn bomb. The bomber becomes the new trick leader; previously
     passed players are cleared (everyone gets to react to the new top); turn advances
     clockwise from the bomber."""
-    bomb_declined, bomb_lead, bomb_pass = _fold_decision(
+    bomb_declined, bomb_lead, bomb_pass, bomb_rich = _fold_decision(
         state.public, action.player, action.bomb
     )
     played_cards = frozenset(_cards_in(action.bomb))  # type: ignore[arg-type]
@@ -580,6 +646,7 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
         declined_top_by_player=bomb_declined,
         lead_summary_by_player=bomb_lead,
         pass_stats_by_player=bomb_pass,
+        rich_history=bomb_rich,
     )
     new_state = replace(state, hands=next_hands, public=next_public)
     # Capture done before finalise resets out_order (else a slam — partner pair

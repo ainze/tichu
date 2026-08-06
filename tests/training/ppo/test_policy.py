@@ -225,3 +225,48 @@ def test_rollout_resolves_the_sampled_intent_without_spending_the_bomb(monkeypat
 
     assert choice.intent_index == pair_of_fives
     assert jade_five not in _cards_in(choice.concrete_action)
+
+
+def _tiny_policy_with_mask() -> BatchedPolicy:
+    """The v7 arch: a play trunk that CONSUMES the legal mask (ADR-0044)."""
+    model = BCModel(
+        FEATURIZER_OUTPUT_DIM, skill_dim=8, trunk_hidden=32, trunk_depth=1,
+        trunk_out_dim=16, head_hidden=16, use_legal_mask=True,
+    )
+    critic = ValueBaseline(FEATURIZER_OUTPUT_DIM, hidden=16)
+    return BatchedPolicy(model, critic, skill_decile=9)
+
+
+def test_a_mask_consuming_policy_drives_a_rollout_and_updates():
+    """Regression: every PPO forward of the play BCModel must supply the mask.
+
+    `BCModel(use_legal_mask=True)` RAISES on a missing mask rather than
+    zero-filling, so a missed call site is a hard crash — which is what happened
+    on the first v7 co-train launch. The forwards live in five places (rollout
+    sampling, the PPO re-forward, the KL-anchor forward, the wish head, vine) and
+    every PPO test until now used a mask-LESS model, so none of them covered it.
+
+    This drives a real round and then a real update, so all of the hot-path
+    forwards run.
+    """
+    torch.manual_seed(0)
+    policy = _tiny_policy_with_mask()
+    positions = generate_full_position_pool(seed=2, n=1)
+
+    trajs = collect_rollout(positions, policy, opponent_policy=policy,
+                            learner_team=0)
+    batch = build_batch(trajs, skill_decile=9, gamma=1.0, lam=1.0)
+    assert batch.features.shape[0] > 0
+
+    bc_model = copy.deepcopy(policy._model).eval()
+    for p in bc_model.parameters():
+        p.requires_grad_(False)
+    optimizer = torch.optim.Adam(
+        list(policy._model.parameters()) + list(policy._critic.parameters()),
+        lr=1e-4,
+    )
+    out = ppo_update(
+        policy._model, policy._critic, bc_model, optimizer, batch,
+        clip_eps=0.1, vf_coef=0.5, ent_coef=0.01, kl_coef=1.0, epochs=1,
+    )
+    assert all(math.isfinite(float(v)) for v in out.values())

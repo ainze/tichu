@@ -9,6 +9,7 @@ frozen BC policy that keeps the sharpened policy human-plausible.
 from typing import NamedTuple
 
 import torch
+from tichu_training.bc.heads import forward_play_model
 
 
 class PPOBatch(NamedTuple):
@@ -189,7 +190,8 @@ def ppo_update(
     loss components for logging.
     """
     with torch.no_grad():
-        bc_logits = bc_model(batch.features, batch.skill)["play"]
+        bc_logits = forward_play_model(
+            bc_model, batch.features, batch.skill, batch.legal_masks)["play"]
 
     advantages = batch.advantages
     if normalize_advantages:
@@ -204,7 +206,8 @@ def ppo_update(
 
     stats: dict[str, float] = {}
     for _ in range(epochs):
-        play_logits = model(batch.features, batch.skill)["play"]
+        play_logits = forward_play_model(
+            model, batch.features, batch.skill, batch.legal_masks)["play"]
         new_logp = _masked_logp_at(play_logits, batch.legal_masks, batch.actions)
         values = critic(critic_features)
 

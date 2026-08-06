@@ -62,19 +62,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-examples", type=int, default=None, metavar="N",
                    help="Optional cap on BCExamples to write. Default: "
                         "drain the stream until exhaustion. Use a small N "
-                        "for smoke (e.g. 250000 ≈ 17 GB) to validate the "
+                        "for smoke (e.g. 250000 ~ 17 GB) to validate the "
                         "pipeline end-to-end before committing to a full "
                         "pass; omit for production runs.")
     p.add_argument("--chunk-size", type=int, default=25_000, metavar="N",
                    help="Per-type buffer size before flushing to disk. "
-                        "Bounds peak RAM at ~chunk_size × 67 KB per type "
-                        "(default 25,000 → ~1.7 GB peak). Lower this on "
+                        "Bounds peak RAM at ~chunk_size x 67 KB per type "
+                        "(default 25,000 -> ~1.7 GB peak). Lower this on "
                         "small-RAM boxes; raise it to amortise flush "
                         "overhead on long runs.")
     p.add_argument("--workers", type=int, default=10, metavar="N",
                    help="ParallelParquetBCDataset worker processes "
                         "(default 10). Each owns a hash-sharded slice of "
                         "the game-id space.")
+    p.add_argument("--skip-forced-play", action="store_true",
+                   help="v7 (ADR-0044): drop Forced Play Decisions (exactly one "
+                        "legal Intent, ~39%% of play rows). They carry zero BC "
+                        "gradient by construction, inflate top-1, and dominate "
+                        "the bundle's disk. Emission-only: replay still steps "
+                        "them, so wish/dragon rows are unaffected. This is a "
+                        "MATERIALISE-time drop - the rows cannot be recovered "
+                        "without re-materialising.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -99,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_featurizer_version=FEATURIZER_VERSION,
         expected_action_space_version=ACTION_SPACE_VERSION,
         num_workers=args.workers,
+        skip_forced_play=args.skip_forced_play,
     )
 
     counts = materialise(

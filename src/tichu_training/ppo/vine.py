@@ -56,6 +56,7 @@ import torch
 from tichu_engine.legality import legal_actions_for
 from tichu_training.action_space import legal_mask
 from tichu_training.featurizer import _combination_to_action_index, featurize
+from tichu_training.bc.heads import forward_play_model
 from tichu_training.ppo.cotrain import NetBatch
 from tichu_training.search.blunder_miner import (
     candidate_alternatives,
@@ -186,9 +187,11 @@ def _vine_rows(models, agents, agent, decision, result, *, branches: int,
 
     features = featurize(pv)
     with torch.no_grad():
-        logits = models["play"](
+        logits = forward_play_model(
+            models["play"],
             torch.from_numpy(features).unsqueeze(0),
             torch.tensor([skill_decile], dtype=torch.long),
+            torch.as_tensor(mask, dtype=torch.bool).unsqueeze(0),
         )["play"][0]
         masked = logits.masked_fill(~torch.as_tensor(mask, dtype=torch.bool),
                                     float("-inf"))

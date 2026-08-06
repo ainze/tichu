@@ -65,12 +65,22 @@ def export_live_models(models: dict, out_dir) -> dict:
     paths: dict[str, str] = {}
     for net_key in _NET_TYPES:
         dest = out / _EXPORT_NAMES[net_key]
-        export_torchscript(
-            models[net_key], example_inputs=example,
-            featurizer_version=FEATURIZER_VERSION,
-            action_space_version=ACTION_SPACE_VERSION if net_key == "play" else "",
-            output_path=dest,
-        )
+        if net_key == "play":
+            # v7 (ADR-0044): the policy may take the legal mask as a third
+            # forward argument. `export_policy_module` picks the trace arity and
+            # writes the stamp MLAgent reads — sharing it with the CLI export is
+            # what stops the gate and the shipped bundle disagreeing about the
+            # contract.
+            from tichu_training.cli.export_model import export_policy_module
+
+            export_policy_module(models[net_key], dest)
+        else:
+            export_torchscript(
+                models[net_key], example_inputs=example,
+                featurizer_version=FEATURIZER_VERSION,
+                action_space_version="",
+                output_path=dest,
+            )
         paths[net_key] = str(dest)
     return _agent_kwargs(paths)
 

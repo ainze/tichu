@@ -5,6 +5,9 @@ import pytest
 from tichu_engine.cards import DRAGON, MAHJONG, PHOENIX, Card, Suit
 from tichu_engine.combinations import Pair, Single
 from tichu_engine.legality import DragonGive, MahjongWish, PASS, SchupfenPass
+from tichu_engine.rich_history import (
+    CTX_OPPONENT_WINNING, INTENT_SINGLE, RichHistory,
+)
 from tichu_engine.state import (
     DragonGivePending,
     GameState,
@@ -22,6 +25,8 @@ from tichu_inference.codec import (
     action_to_json,
     private_state_from_json,
     private_state_to_json,
+    public_state_from_json,
+    public_state_to_json,
 )
 
 
@@ -181,3 +186,50 @@ def test_special_cards_roundtrip():
         blob = private_state_to_json(ps)
         restored = private_state_from_json(blob)
         assert restored.hand == ps.hand
+
+
+def test_v7_rich_history_round_trips():
+    """v7 (ADR-0044): the Rich History Block accumulator must survive the wire,
+    or the served featurizer computes 233 dims of zeros while training saw real
+    values — the `team_scores` bug class, at 28% of the vector."""
+    rich = (
+        RichHistory()
+        .with_decline(2, INTENT_SINGLE, CTX_OPPONENT_WINNING, 13,
+                      length=0, stakes=20)
+        .with_proven_void(1, 9)
+        .with_wish_evidence(3, 11)
+        .with_declined_bomb(2)
+        .with_lead_single(3, 14)
+        .with_play([0, 5])
+    )
+    public = PublicState(
+        current_player=1, hand_sizes=(13, 14, 14, 14), scores=(0, 0),
+        trick=Trick.empty(), rich_history=rich,
+    )
+    ps = PrivateState(
+        player=0,
+        hand=frozenset({Card(Suit.SWORD, r) for r in range(2, 15)}),
+        public=public,
+    )
+    restored = private_state_from_json(private_state_to_json(ps))
+    assert restored.public.rich_history == rich
+    assert restored == ps
+
+
+def test_strict_mode_rejects_a_payload_without_the_v7_block():
+    """The v6 accumulators default to zeros on a missing key, which is why the
+    served agent can silently run on 42% zeroed inputs today. v7 keeps the
+    lenient default so the CURRENT client keeps working, but adds an explicit
+    strict switch: once the client is updated, flipping this turns a silent
+    degradation into a loud failure. That switch is the whole point — a
+    half-updated client must not be able to corrupt inputs undetectably.
+    """
+    ps = deal_initial_state(seed=0).private_view(0)
+    blob = public_state_to_json(ps.public)
+    del blob["rich_history"]
+
+    lenient = public_state_from_json(blob)
+    assert lenient.rich_history == RichHistory()  # today's behaviour, documented
+
+    with pytest.raises(ValueError, match="rich_history"):
+        public_state_from_json(blob, require_v7=True)

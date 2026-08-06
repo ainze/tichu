@@ -3,6 +3,11 @@
 `main(argv)` parses the YAML config, builds the app, and runs uvicorn.
 A `--no-serve` flag short-circuits before uvicorn binds a port so the
 integration tests can drive the app via `TestClient` instead.
+
+`--require-v7` is the deploy-time switch for the v7 wire contract (ADR-0044).
+It stays OFF until the client sends `public.rich_history`, because the codec
+decodes a missing accumulator to zeros — so an out-of-date client degrades the
+policy's input silently, with nothing in any metric to show it.
 """
 
 import argparse
@@ -38,6 +43,14 @@ def main(argv: list[str] | None = None) -> int:
                         "`replay:` of the verbatim /act request so a flagged blunder "
                         "can be re-fed to /act later. Off by default; for diagnosing "
                         "play while playing visually.")
+    p.add_argument("--require-v7", action="store_true",
+                   help="Reject /act and /call payloads whose public state omits "
+                        "`rich_history` (the v7 Rich History Block, ADR-0044). Off "
+                        "by default so a pre-v7 client keeps working — but a missing "
+                        "block decodes to 233 ZEROS that training saw populated, "
+                        "which degrades play with nothing in any metric to show it. "
+                        "Turn this on as soon as the client sends the block. Can "
+                        "also be set as `require_v7: true` in the config.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -55,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.tape_log:
         config["tape_log"] = args.tape_log
         log.info("decision tape -> %s", args.tape_log)
+    # The flag can only turn strict mode ON, never off: a deployment that has
+    # pinned `require_v7: true` in its config has an updated client, and letting
+    # a stray argv silently re-enable the degraded path is the failure this
+    # switch exists to prevent.
+    if args.require_v7:
+        config["require_v7"] = True
 
     app = build_app_for_config(config)
     if args.no_serve:

@@ -21,6 +21,7 @@ import csv
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import torch
 
@@ -87,6 +88,7 @@ def _build_models(config) -> dict:
             trunk_depth=int(m.get("trunk_depth", 4)),
             trunk_out_dim=int(m.get("trunk_out_dim", 512)),
             head_hidden=int(m.get("head_hidden", 256)),
+            use_legal_mask=bool(m.get("use_legal_mask", False)),
         ),
         "schupfen": SchupfenNetwork(
             FEATURIZER_OUTPUT_DIM, skill_dim=int(sm.get("skill_dim", 64)),
@@ -142,6 +144,75 @@ def _build_optimizer(models, critic, *, policy_lr: float, critic_lr: float,
     groups = [{"params": models[dt].parameters(), "lr": policy_lr} for dt in trainable]
     groups.append({"params": critic.parameters(), "lr": critic_lr})
     return torch.optim.Adam(groups), trainable
+
+
+class GateOpponents(NamedTuple):
+    """How `promotion_gate.extra_opponents` resolved into the three roles."""
+
+    opponents: tuple[str, ...]              # every scored margin stream, in order
+    opp_cycle: list[tuple[str, str]]        # what the ROLLOUT alternates over
+    eval_cycle: list[tuple[str, str]]       # what the greedy eval SCORES
+    observe_only: tuple[str, ...]           # scored, but never gates a promotion
+
+
+def resolve_gate_opponents(extra, *, base_cycle, greedy: bool) -> GateOpponents:
+    """Fold `extra_opponents` into the champion/bc cycle.
+
+    `extra_opponents` are additional FIXED external models (e.g. the currently
+    shipped champion). Each entry is `{name, path[, require][, rollout]}` where
+    path is a rollout-weights .pt ({"models": {net: state_dict}}) whose arch
+    matches THIS run's `_arch_cfg`, so both the rollout worker's
+    `_league_opponent` and the greedy gate's `export_opponent` rebuild it with
+    `_build_models(gate_arch_cfg)`. Unlike `bc`, these never advance.
+
+    TWO INDEPENDENT FLAGS, both defaulting to the historical coupled behaviour:
+
+      require (default true)     — a CI-validated win over it gates promotion
+                                   (beat-ALL). false = OBSERVE-ONLY: scored into
+                                   promotion_gate.csv every window, but it can
+                                   never hard-block the ratchet.
+      rollout (default =require) — the learner best-responds to it in turn.
+
+    `require: true, rollout: false` is the HELD-OUT SHIP BAR: promotion needs a
+    real win over it, but the policy is never fitted to it, so the margin stays
+    an out-of-distribution measurement rather than one the learner has been
+    trained to maximise against that specific opponent.
+
+    Any stream outside the rollout cycle needs the greedy gate: the sampled gate
+    reads margins off the rollout, so such a stream would never fill its window —
+    silently forever under observe-only, and as a hard deadlock under require.
+    """
+    opp_cycle = list(base_cycle)
+    opponents = [name for name, _ in opp_cycle]
+    eval_extras: list[tuple[str, str]] = []
+    observe_only: list[str] = []
+    off_cycle: list[str] = []
+    for spec in extra or []:
+        name, path = str(spec["name"]), str(spec["path"])
+        if name in opponents:
+            raise ValueError(f"duplicate gate opponent name {name!r}")
+        require = bool(spec.get("require", True))
+        opponents.append(name)
+        eval_extras.append((name, path))
+        if not require:
+            observe_only.append(name)
+        if bool(spec.get("rollout", require)):
+            opp_cycle.append((name, path))
+        else:
+            off_cycle.append(name)
+    if off_cycle and not greedy:
+        raise ValueError(
+            "extra_opponents outside the rollout cycle (require:false or "
+            "rollout:false) need the greedy gate — a sampled window reads the "
+            f"rollout stream and would never fill: {off_cycle}")
+    # The greedy eval scores EVERY opponent; the rollout alternates over opp_cycle.
+    off = set(off_cycle)
+    return GateOpponents(
+        opponents=tuple(opponents),
+        opp_cycle=opp_cycle,
+        eval_cycle=opp_cycle + [e for e in eval_extras if e[0] in off],
+        observe_only=tuple(observe_only),
+    )
 
 
 def _append_gate_row(path: Path, iteration: int, v: dict) -> None:
@@ -436,46 +507,22 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                     _save_champion(bc_opp_path, bc_models, critic)  # frozen BC opponent
                 gate_opp_cycle.append(("bc", bc_opp_path))
                 opponents.append("bc")
-            # extra_opponents: additional FIXED external models (e.g. the current
-            # shipped champion). Each entry is `{name, path[, require]}` where path is
-            # a rollout-weights .pt ({"models": {net: state_dict}}) whose arch matches
-            # THIS run's _arch_cfg (so both the rollout worker's _league_opponent and
-            # the greedy gate's export_opponent rebuild it with
-            # _build_models(gate_arch_cfg)). Unlike `bc`, these never advance (fixed
-            # reference points). Two modes per entry:
-            #   require: true (default) — joins the cycle exactly like champion/bc:
-            #     the rollout best-responds to it in turn AND promotion needs a
-            #     CI-validated win over it (beat-ALL).
-            #   require: false — OBSERVE-ONLY: the greedy gate scores it every window
-            #     (its margin lands in promotion_gate.csv → plot panel 6) but it is
-            #     excluded from the promote decision AND from the rollout opponent
-            #     cycle, so it never hard-blocks the ratchet and never shifts the
-            #     training distribution. Greedy gate only (a sampled window would
-            #     never fill an un-rolled-out stream).
-            gate_observe_only: list[str] = []
-            gate_eval_extras: list[tuple[str, str]] = []
-            for spec in gate_cfg.get("extra_opponents", []) or []:
-                name = str(spec["name"])
-                path = str(spec["path"])
-                if name in opponents:
-                    raise ValueError(f"duplicate gate opponent name {name!r}")
-                if not Path(path).exists():
+            # extra_opponents — see `resolve_gate_opponents` for the require /
+            # rollout semantics. Filesystem validation stays HERE (at setup, before
+            # the worker pool spins up) so a typo'd path fails immediately rather
+            # than mid-run; the resolver itself is pure policy over names and flags.
+            gate_extras = gate_cfg.get("extra_opponents", []) or []
+            for spec in gate_extras:
+                if not Path(str(spec["path"])).exists():
                     raise FileNotFoundError(
-                        f"extra_opponent {name!r} weights not found: {path}")
-                gate_eval_extras.append((name, path))
-                opponents.append(name)
-                if bool(spec.get("require", True)):
-                    gate_opp_cycle.append((name, path))
-                else:
-                    gate_observe_only.append(name)
-            if gate_observe_only and not gate_greedy:
-                raise ValueError(
-                    "extra_opponents with require:false need the greedy gate "
-                    f"(sampled windows never fill an observe-only stream): {gate_observe_only}")
-            # The greedy eval scores EVERY opponent (required + observe-only); the
-            # rollout alternates over gate_opp_cycle (required only).
-            gate_eval_cycle = gate_opp_cycle + [
-                e for e in gate_eval_extras if e[0] in gate_observe_only]
+                        f"extra_opponent {str(spec['name'])!r} weights not found: "
+                        f"{spec['path']}")
+            resolved = resolve_gate_opponents(
+                gate_extras, base_cycle=gate_opp_cycle, greedy=gate_greedy)
+            opponents = list(resolved.opponents)
+            gate_opp_cycle = resolved.opp_cycle
+            gate_eval_cycle = resolved.eval_cycle
+            gate_observe_only = list(resolved.observe_only)
             # A greedy window is ONE mini-tournament => 2*n_deals seat-swapped obs per
             # opponent, filled in a single eval (so gate.ready() trips immediately after
             # it); the sampled window instead accumulates positions_per_iter per iter.
@@ -512,6 +559,11 @@ def run_cotrain_training(config, *, restart: bool = False, on_iteration=None, pr
                        else "sampled rollout reward")
                 if gate_observe_only:
                     src += f", observe-only (never required): {gate_observe_only}"
+                rolled = {n for n, _ in gate_opp_cycle}
+                held_out = [o for o, _ in gate_eval_cycle
+                            if o not in rolled and o not in gate_observe_only]
+                if held_out:
+                    src += f", REQUIRED but held out of the rollout: {held_out}"
                 print(f"  promotion_gate ON: opponents={opponents}, window {gate.window_games} games/opp, "
                       f"threshold {gate.threshold:+g}, reanchor_on_promote={reanchor_on_promote}, "
                       f"margin source = {src}"

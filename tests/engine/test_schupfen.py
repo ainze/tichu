@@ -15,6 +15,8 @@ from tichu_engine.state import (
     deal_for_schupfen,
 )
 
+from tichu_inference.codec import card_to_id
+
 
 def _c(suit: Suit, rank: int) -> Card:
     return Card(suit=suit, rank=rank)
@@ -158,3 +160,32 @@ def test_schupfen_total_cards_preserved():
     for p in range(4):
         final_all |= state.hands[p]
     assert initial_all == final_all  # no cards added or lost
+
+
+def test_schupfen_start_state_matches_what_the_engine_actually_produces():
+    """Independent check on the shared round-start constructor (v7, ADR-0044).
+
+    `schupfen_start_state` is used by BOTH `deal_for_schupfen` and the BC
+    Schupfen emitter, which means a test comparing those two can only prove they
+    AGREE — never that either is right. This pins the constructor against engine
+    BEHAVIOUR instead: hand sizes follow the real hands, and `current_player`
+    advances through the seats as each seat submits, which is precisely the fact
+    the emitter's `acting_seat` pinning depends on (a3438f9, +4.03).
+    """
+    from tichu_engine.state import deal_for_schupfen, schupfen_start_state
+
+    dealt = deal_for_schupfen(seed=3)
+    built = schupfen_start_state(dealt.hands)
+    assert built.public.hand_sizes == tuple(len(h) for h in dealt.hands)
+    assert built.public.hand_sizes == (14, 14, 14, 14)
+
+    state = dealt
+    for expected_seat in range(4):
+        assert state.public.current_player == expected_seat, (
+            "the engine must advance current_player through the seats during "
+            "Schupfen — the emitter pins acting_seat on exactly this"
+        )
+        hand = sorted(state.hands[expected_seat], key=card_to_id)
+        state, _, _, _ = step(state, SchupfenPass(
+            to_next=hand[0], to_partner=hand[1], to_previous=hand[2],
+        ))

@@ -26,6 +26,7 @@ v3 over v2 (kept for context): dropped `play_history` (14,472 dims),
 import numpy as np
 
 from tichu_engine.cards import Card, DOG, DRAGON, MAHJONG, PHOENIX, SpecialCard, Suit
+from tichu_engine.rich_history import NUM_WISH_RANKS
 from tichu_engine.state import (
     DragonGivePending,
     MahjongWishPending,
@@ -39,7 +40,7 @@ from tichu_training.action_space import (
 )
 
 
-FEATURIZER_VERSION: str = "v6"
+FEATURIZER_VERSION: str = "v7"
 
 # v6 (ADR-0038): drops aggregate `seen_cards[56]`, adds per-player
 # `played_by[4][56]` (relative-seat [self, next, partner, previous]), re-adds
@@ -83,8 +84,43 @@ SECTION_DIMS: dict[str, int] = {
     "declined_top": 3 * 6,    # v6 (ADR-0028 B-core): 3 opp × 6 intent-types
     "lead_summary": 3 * 2,    # v6 (ADR-0028 B-core): 3 opp × (tricks_led, low-lead)
     "pass_pressure": 3 * 1,   # v6 (ADR-0028 B-core): 3 opp × pass-fraction
+    # ---- v7 (ADR-0044): the Rich History Block, 233 dims. -------------------
+    # APPEND-ONLY. Everything above is the v6 layout and `featurize(...)[:591]`
+    # must stay byte-identical to it — that invariant is what lets a v6
+    # Checkpoint (the served cpfix3328) act in a v7 rollout/gate behind a
+    # v6-View Prefix slice, and what makes the v6-equivalent control arm
+    # provable. Never insert or reorder above this line; pinned by
+    # tests/training/featurizer/test_v7_additive_prefix.py.
+    #
+    # The first nine supersede the three B-core sections above (kept: dropping
+    # them would cost the prefix, which is worth far more than 27 dims). Laid
+    # out per-CHANNEL (3 opp × k), matching the v6 convention — `rich_history`'s
+    # own per-opponent interleaving is a pure input permutation a dense trunk
+    # cannot distinguish, so house layout wins.
+    "declined_ctx": 3 * 18,      # 3 opp × 6 intent-types × {partner/opp/none} winning
+    "declined_count": 3 * 6,     # 3 opp × times declined, per intent-type
+    "declined_len": 3 * 2,       # 3 opp × max length declined (PairStep, Straight)
+    "declined_bomb": 3 * 1,      # 3 opp × times declined to beat a Bomb
+    "declined_stakes": 3 * 1,    # 3 opp × richest Trick declined
+    "wish_void": 3 * 13,         # 3 opp × ranks 2..14 — PROVEN void (led under a wish)
+    "wish_soft": 3 * 13,         # 3 opp × ranks 2..14 — evidence only, NOT proof
+    "lead_profile": 3 * 3,       # 3 opp × (tricks_led, lowest single, highest single)
+    "pressure_profile": 3 * 2,   # 3 opp × (pass fraction, decision count)
+    "card_play_time": 56,        # normalised play order per card slot
 }
 FEATURIZER_OUTPUT_DIM: int = sum(SECTION_DIMS.values())
+
+# v7 (ADR-0044). The v6 contract, frozen as a constant: `featurize(...)[:V6_DIM]`
+# is byte-identical to a v6 Feature Vector. Read by the v6-View Prefix slice that
+# keeps v6 Checkpoints (the served cpfix3328) playable inside a v7 process.
+V6_FEATURIZER_OUTPUT_DIM: int = 591
+_RICH_HISTORY_SECTIONS: tuple[str, ...] = (
+    "declined_ctx", "declined_count", "declined_len", "declined_bomb",
+    "declined_stakes", "wish_void", "wish_soft", "lead_profile",
+    "pressure_profile", "card_play_time",
+)
+_RICH_HISTORY_DIM: int = sum(SECTION_DIMS[s] for s in _RICH_HISTORY_SECTIONS)
+assert FEATURIZER_OUTPUT_DIM == V6_FEATURIZER_OUTPUT_DIM + _RICH_HISTORY_DIM
 
 # v6 (ADR-0028 B-core): fixed cap to normalise a per-opponent tricks-led count
 # into [0, 1]. A Round has at most a handful of tricks per seat in practice;
@@ -137,6 +173,14 @@ CONTINUOUS_SECTIONS: frozenset[str] = frozenset(
         "hand_sizes", "team_scores", "round_points",
         # v6 (ADR-0028 B-core): normalised ratios, not 0/1 indicators.
         "declined_top", "lead_summary", "pass_pressure",
+        # v7 (ADR-0044): the Rich History Block is mostly normalised ratios.
+        # 155 continuous dims here; the two wish channels are the only 0/1
+        # indicators in the block (78 dims) and stay bit-packable. This split
+        # drives the bundle's on-disk size directly — a continuous column costs
+        # float32 (4 bytes/row), an indicator costs one BIT.
+        "declined_ctx", "declined_count", "declined_len", "declined_bomb",
+        "declined_stakes", "lead_profile", "pressure_profile",
+        "card_play_time",
     }
 )
 
@@ -342,6 +386,75 @@ def featurize(private_state: PrivateState) -> np.ndarray:
         n_pass, n_dec = pub.pass_stats_by_player[seat]
         out[cursor + (rel - 1)] = n_pass / n_dec if n_dec else 0.0
     cursor += SECTION_DIMS["pass_pressure"]
+
+    # 19. The v7 Rich History Block (ADR-0044): a pure read-out of the engine's
+    # accumulator, relative-seat ordered (next / partner / previous) and
+    # normalised, with the raw values kept in engine state per the v6 convention.
+    # Self is excluded — this is a per-OPPONENT projection.
+    rich = pub.rich_history
+    opponents = tuple((private_state.player + rel) % 4 for rel in (1, 2, 3))
+
+    for i, seat in enumerate(opponents):  # declined_ctx: 18 per opponent
+        base = cursor + i * 18
+        for slot, raw in enumerate(rich.declined_ctx[seat]):
+            out[base + slot] = raw / 14.0
+    cursor += SECTION_DIMS["declined_ctx"]
+
+    for i, seat in enumerate(opponents):  # declined_count: 6 per opponent
+        base = cursor + i * 6
+        for t in range(6):
+            out[base + t] = min(rich.declined_count(seat, t), 10) / 10.0
+    cursor += SECTION_DIMS["declined_count"]
+
+    for i, seat in enumerate(opponents):  # declined_len: PairStep, Straight
+        base = cursor + i * 2
+        for slot, raw in enumerate(rich.declined_lengths[seat]):
+            out[base + slot] = raw / 14.0
+    cursor += SECTION_DIMS["declined_len"]
+
+    for i, seat in enumerate(opponents):
+        out[cursor + i] = min(rich.declined_bomb_count(seat), 5) / 5.0
+    cursor += SECTION_DIMS["declined_bomb"]
+
+    for i, seat in enumerate(opponents):
+        out[cursor + i] = min(max(rich.declined_stakes(seat), 0), 25) / 25.0
+    cursor += SECTION_DIMS["declined_stakes"]
+
+    for i, seat in enumerate(opponents):  # wish_void: PROVEN, 13 ranks
+        base = cursor + i * NUM_WISH_RANKS
+        for slot, flag in enumerate(rich.wish_void[seat]):
+            out[base + slot] = float(flag)
+    cursor += SECTION_DIMS["wish_void"]
+
+    for i, seat in enumerate(opponents):  # wish_soft: EVIDENCE, never proof
+        base = cursor + i * NUM_WISH_RANKS
+        for slot, flag in enumerate(rich.wish_soft[seat]):
+            out[base + slot] = float(flag)
+    cursor += SECTION_DIMS["wish_soft"]
+
+    for i, seat in enumerate(opponents):  # lead_profile: count, low, HIGH
+        tricks_led, lowest_single = pub.lead_summary_by_player[seat]
+        base = cursor + i * 3
+        out[base] = tricks_led / LEAD_TRICKS_CAP
+        out[base + 1] = lowest_single / 14.0
+        out[base + 2] = rich.lead_max_single(seat) / 14.0
+    cursor += SECTION_DIMS["lead_profile"]
+
+    for i, seat in enumerate(opponents):  # pressure_profile: fraction, volume
+        n_pass, n_dec = pub.pass_stats_by_player[seat]
+        base = cursor + i * 2
+        out[base] = n_pass / n_dec if n_dec else 0.0
+        out[base + 1] = min(n_dec, 20) / 20.0
+    cursor += SECTION_DIMS["pressure_profile"]
+
+    # card_play_time: RECENCY, not an absolute index — normalising by the plays
+    # so far keeps it comparable across Rounds of different lengths.
+    total_plays = rich.plays_so_far
+    if total_plays:
+        for slot, idx in enumerate(rich.card_play_order):
+            if idx:
+                out[cursor + slot] = idx / total_plays
+    cursor += SECTION_DIMS["card_play_time"]
 
     assert cursor == FEATURIZER_OUTPUT_DIM
     return out

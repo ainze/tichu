@@ -17,6 +17,7 @@ from typing import Union
 from tichu_engine.cards import Card, MAHJONG, SpecialCard
 from tichu_engine.combinations import CardOrSpecial
 from tichu_engine.deck import fresh_deck
+from tichu_engine.rich_history import RichHistory
 
 
 NUM_PLAYERS = 4
@@ -128,6 +129,12 @@ class PublicState:
     # v6 (ADR-0028 B-core): per-absolute-seat (n_passes, n_play_decisions).
     # pass_pressure = n_passes / n_play_decisions.
     pass_stats_by_player: tuple[tuple[int, int], ...] = ((0, 0),) * 4
+    # v7 (ADR-0044): the Rich History Block accumulator — the round-long,
+    # path-dependent facts (decline CONTEXT, proven wish voids, play order) that
+    # no snapshot can recover. One field, one canonical definition; see
+    # `tichu_engine/rich_history.py`. Reset per Round alongside the v6
+    # accumulators.
+    rich_history: RichHistory = RichHistory()
 
     def __post_init__(self) -> None:
         if not 0 <= self.current_player < NUM_PLAYERS:
@@ -227,11 +234,36 @@ def deal_for_schupfen(seed: int) -> GameState:
     for i in range(NUM_PLAYERS):
         chunk = deck[i * INITIAL_HAND_SIZE : (i + 1) * INITIAL_HAND_SIZE]
         hands.append(frozenset(chunk))
+    return schupfen_start_state(tuple(hands))
+
+
+def schupfen_start_state(
+    hands: tuple[frozenset[CardOrSpecial], ...],
+    *,
+    grand_tichu_callers: frozenset[int] = frozenset(),
+    acting_seat: int = 0,
+) -> GameState:
+    """The canonical round-start state at the Schupfen Decision.
+
+    ONE definition of what a pre-play state looks like, shared by
+    `deal_for_schupfen` and the BC Schupfen training emitter. The emitter used to
+    hand-build this `PublicState` literal, and every field in it was an
+    independent chance to skew from what the engine actually produces —
+    `current_player=0` was exactly that bug (a3438f9, worth +4.03 on a head-swap
+    A/B). Sharing the constructor means a new `PublicState` field is added once,
+    not once per caller. Round-only accumulators (including v7's Rich History
+    Block) take their defaults, which is correct: nothing has been played.
+
+    `acting_seat` sets `current_player`, which the engine advances through the
+    seats during Schupfen — the featurizer one-hots it at an ABSOLUTE slot, so a
+    training emitter MUST pin it to the seat it is featurising.
+    """
     public = PublicState(
-        current_player=0,
+        current_player=acting_seat,
         hand_sizes=tuple(len(h) for h in hands),  # type: ignore[arg-type]
         scores=(0, 0),
         trick=Trick.empty(),
         pending_decision=SchupfenPending(submitted=(None, None, None, None)),
+        grand_tichu_callers=grand_tichu_callers,
     )
     return GameState(hands=tuple(hands), public=public)

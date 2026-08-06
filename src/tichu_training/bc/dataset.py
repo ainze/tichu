@@ -186,7 +186,15 @@ class ParquetBCDataset(Iterable[BCExample]):
         recency_cutoff_game_id: int = _DEFAULT_RECENCY_CUTOFF,
         recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
         skill_buckets: int = 10,
+        skip_forced_play: bool = False,
     ) -> None:
+        # v7 (ADR-0044): drop Forced Play Decisions (exactly one legal INTENT).
+        # They carry zero BC gradient by construction, inflate top-1, and cost
+        # ~39% of the bundle's disk. EMISSION-only — replay still steps them, so
+        # wish / dragon rows and everything downstream are untouched. Note this
+        # predicate is Intent-level and deliberately BROADER than
+        # `rollout._forced_action`, which is ConcreteAction-level.
+        self.skip_forced_play = bool(skip_forced_play)
         self.shards_dir = Path(shards_dir)
         self.archive_path = Path(archive_path)
         self.expected_featurizer_version = expected_featurizer_version
@@ -223,8 +231,20 @@ class ParquetBCDataset(Iterable[BCExample]):
                 table = load_shards(
                     self.shards_dir,
                     decision_type,
-                    expected_featurizer_version=self.expected_featurizer_version,
+                    # WAIVED: the shards carry no featurized content — `state`
+                    # and `legal_actions_mask` are 100% null under ADR-0011's
+                    # replay-on-the-fly design, so their `featurizer_version`
+                    # stamp documents nothing. Pinning it would force a
+                    # multi-hour BSW re-parse on every featurizer bump. The real
+                    # guard is the BUNDLE manifest, stamped by `materialise()`
+                    # with the live FEATURIZER_VERSION and enforced by
+                    # `MemmapBCDataset`. The action-space pin DOES matter: the
+                    # `action_taken` labels are v1-encoded.
+                    expected_featurizer_version=None,
                     expected_action_space_version=self.expected_action_space_version,
+                    # The full play shard is ~1.45e9 rows x 15 columns; reading
+                    # it whole to extract two id columns exhausts RAM.
+                    columns=["game_id", "round_id"],
                 )
             except FileNotFoundError:
                 log.info("  %s: no shard found, skipping", decision_type)
@@ -234,8 +254,19 @@ class ParquetBCDataset(Iterable[BCExample]):
                 "  %s: %d rows; extracting (game_id, round_id) …",
                 decision_type, table.num_rows,
             )
-            game_ids = table.column("game_id").to_pylist()
-            round_ids = table.column("round_id").to_pylist()
+            # DISTINCT pairs first, in Arrow. The manifest is keyed by
+            # (game_id, round_id) and there are ~1e2 decisions per Round, so the
+            # distinct set is ~1e7 while the raw column is ~1.45e9. Calling
+            # `to_pylist()` on the raw column materialises 1.45 BILLION Python
+            # strings — MemoryError on the full corpus, and unusably slow well
+            # before that. Grouping is a C++ hash aggregate over Arrow buffers.
+            distinct = table.group_by(["game_id", "round_id"]).aggregate([])
+            log.info(
+                "  %s: %d rows -> %d distinct (game_id, round_id)",
+                decision_type, table.num_rows, distinct.num_rows,
+            )
+            game_ids = distinct.column("game_id").to_pylist()
+            round_ids = distinct.column("round_id").to_pylist()
             for g, r in zip(game_ids, round_ids):
                 if g is None or r is None or g == "":
                     continue
@@ -343,6 +374,12 @@ class ParquetBCDataset(Iterable[BCExample]):
                         decision_type, pre_state, player,
                         cached_actions=cached_actions,
                     )
+                    if (
+                        self.skip_forced_play
+                        and decision_type == "play"
+                        and int(mask.sum()) == 1
+                    ):
+                        continue  # zero-gradient row; see __init__
                     if not mask[target]:
                         # Defensive: target must be in the legal set. If it's
                         # not, the engine/action-space disagree and we'd be
