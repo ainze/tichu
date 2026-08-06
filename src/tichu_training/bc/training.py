@@ -37,6 +37,7 @@ from tichu_training.bc.dataset import BCExample
 from tichu_training.bc.heads import BCModel, HEAD_LOGIT_DIMS
 from tichu_training.bc.loss import masked_cross_entropy
 from tichu_training.checkpoint import Checkpoint
+from tichu_training.bc.heads import play_mask_for_trunk
 from tichu_training.featurizer import FEATURIZER_VERSION
 
 
@@ -158,7 +159,12 @@ def train_one_epoch(
         tensors = _to_tensors(batch)
         if model_device.type != "cpu":
             tensors = {k: v.to(model_device, non_blocking=True) for k, v in tensors.items()}
-        out = model(tensors["features"], tensors["skill_decile"])
+        out = model(
+            tensors["features"], tensors["skill_decile"],
+            # v7 (ADR-0044): only the play head's mask reaches the trunk;
+            # other heads pass zeros. No-op when the flag is off.
+            play_mask_for_trunk(head, tensors["legal_mask"]),
+        )
         logits = out[head]
         per_head_loss = masked_cross_entropy(
             logits, tensors["target"], tensors["legal_mask"], tensors["sample_weight"],
@@ -354,7 +360,12 @@ def train_one_epoch_batched(
                 k: v.to(model_device, non_blocking=True)
                 for k, v in tensors.items()
             }
-        out = model(tensors["features"], tensors["skill_decile"])
+        out = model(
+            tensors["features"], tensors["skill_decile"],
+            # v7 (ADR-0044): only the play head's mask reaches the trunk;
+            # other heads pass zeros. No-op when the flag is off.
+            play_mask_for_trunk(head, tensors["legal_mask"]),
+        )
         logits = out[head]
         per_head_loss = masked_cross_entropy(
             logits, tensors["target"], tensors["legal_mask"],

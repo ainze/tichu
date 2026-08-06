@@ -6,6 +6,8 @@ The synthetic dataset is the smoke-path equivalent of `SyntheticCallDataset`
 config trains against.
 """
 
+import dataclasses
+
 import numpy as np
 import torch
 
@@ -213,3 +215,45 @@ def test_per_round_current_player_matches_acting_seat():
             f"seat {seat}: current_player one-hot {cp_sec} != expected {expected}; "
             "training/inference skew on current_player would return"
         )
+
+
+def test_per_round_features_match_the_engines_own_schupfen_state():
+    """v7 (ADR-0044): build the Schupfen example from the ENGINE's state, not a
+    hand-built `PublicState` literal.
+
+    The literal has to re-state every field the engine would have set, and each
+    one is an independent chance to skew. `current_player=0` was one such field
+    and cost a measured +4.03 (a3438f9); `hand_sizes`, `tichu_callers` and
+    `trick` are the same shape of risk, and v7 adds the Rich History Block as
+    four more. Deriving from the engine kills the class rather than the instance.
+
+    Pinned as behaviour: the emitted features must equal `featurize()` of the
+    state the engine itself produces at that seat's Schupfen Decision.
+    """
+    from tichu_engine.state import schupfen_start_state
+    from tichu_training.featurizer import featurize
+
+    grand = {2}
+    parsed = _build_parsed_round(grand_callers=grand, tichu_callers=set(),
+                                 seat0_pass=(Card(Suit.JADE, 14),
+                                             Card(Suit.JADE, 13),
+                                             Card(Suit.JADE, 12)))
+    examples = _schupfen_examples_for_round(
+        parsed, skill_lookup={}, neutral_decile=10, sample_weight=1.0,
+    )
+
+    for seat, example in enumerate(examples):
+        expected = featurize(
+            schupfen_start_state(
+                parsed.start_hands,
+                grand_tichu_callers=parsed.grand_tichu_callers,
+                acting_seat=seat,
+            ).private_view(seat)
+        )
+        np.testing.assert_array_equal(
+            example.features, expected,
+            err_msg=f"seat {seat} features diverge from the engine's own state",
+        )
+        # And the v7 block is dead here, which is what licenses widening the
+        # Call Networks rather than retraining them.
+        assert not example.features[591:].any()

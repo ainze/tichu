@@ -18,6 +18,11 @@ import torch
 
 _EXTRA_FILE_FEATURIZER = "featurizer_version"
 _EXTRA_FILE_ACTION_SPACE = "action_space_version"
+# v7 (ADR-0044): whether the policy consumes the legal-Intent mask as a TRUNK
+# input. A traced module's arity is not introspectable, so the flag has to ride
+# with the artifact — otherwise a loader must guess, and guessing wrong either
+# crashes or (worse) silently feeds 1809 zeros where training saw the legal set.
+_EXTRA_FILE_LEGAL_MASK = "use_legal_mask"
 
 
 class VersionMismatchError(RuntimeError):
@@ -31,6 +36,7 @@ def export_torchscript(
     featurizer_version: str,
     action_space_version: str,
     output_path: str | Path,
+    use_legal_mask: bool = False,
 ) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,6 +48,7 @@ def export_torchscript(
     extra_files = {
         _EXTRA_FILE_FEATURIZER: featurizer_version.encode("utf-8"),
         _EXTRA_FILE_ACTION_SPACE: action_space_version.encode("utf-8"),
+        _EXTRA_FILE_LEGAL_MASK: (b"1" if use_legal_mask else b"0"),
     }
     torch.jit.save(traced, str(output_path), _extra_files=extra_files)
 
@@ -68,3 +75,14 @@ def load_exported(
             f"loader expected {expected_action_space_version!r}"
         )
     return module
+
+
+def exported_uses_legal_mask(path: str | Path) -> bool:
+    """Whether the exported policy at `path` expects a legal-mask argument.
+
+    Absent stamp = False, which is correct for every pre-v7 artifact: they were
+    traced with a two-argument forward.
+    """
+    extra_files = {_EXTRA_FILE_LEGAL_MASK: b""}
+    torch.jit.load(str(Path(path)), _extra_files=extra_files)
+    return extra_files[_EXTRA_FILE_LEGAL_MASK].decode("utf-8") == "1"

@@ -57,16 +57,41 @@ def test_synthetic_dataset_populates_game_won():
     assert None in states
 
 
-def test_parquet_dataset_raises_on_featurizer_version_mismatch(tmp_path):
+def test_parquet_dataset_ignores_the_shards_vestigial_featurizer_stamp(tmp_path):
+    """The shards' `featurizer_version` is NOT a pin (changed at v7, ADR-0044).
+
+    Under ADR-0011 the parquet is a per-decision manifest and features are
+    computed at train/materialise time by replaying the archive; `state` and
+    `legal_actions_mask` are 100% null. The stamp therefore describes columns
+    that do not exist, and pinning it forced a multi-hour BSW re-parse on every
+    featurizer bump for no safety gain.
+
+    The guarantee did not disappear, it MOVED: `materialise()` stamps the live
+    FEATURIZER_VERSION into the bundle manifest and `MemmapBCDataset` refuses to
+    load on mismatch — pinned by
+    `test_materialised.py::test_reader_rejects_featurizer_version_mismatch`.
+    The action-space pin, which describes the label encoding and therefore IS
+    real, stays (see below).
+    """
     _write_minimal_shard(tmp_path / "play_00000.parquet", featurizer_version="v1")
-    # archive_path is required by the new ADR-0011 constructor but is not
-    # touched during version-pin validation, so a dummy path is fine here.
+    ds = ParquetBCDataset(
+        shards_dir=tmp_path,
+        archive_path=tmp_path / "irrelevant.zst",
+        expected_featurizer_version="v2",  # deliberately different: not a pin
+        expected_action_space_version="v1",
+    )
+    assert ds.manifest_size >= 0
+
+
+def test_parquet_dataset_still_pins_the_action_space_version(tmp_path):
+    """`action_taken` IS version-encoded, so this pin stays real."""
+    _write_minimal_shard(tmp_path / "play_00000.parquet", featurizer_version="v1")
     with pytest.raises(VersionMismatchError):
         ParquetBCDataset(
             shards_dir=tmp_path,
             archive_path=tmp_path / "irrelevant.zst",
-            expected_featurizer_version="v2",
-            expected_action_space_version="v1",
+            expected_featurizer_version="v1",
+            expected_action_space_version="v-not-real",
         )
 
 

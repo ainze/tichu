@@ -23,6 +23,7 @@ from tichu_export.benchmark import benchmark_p99
 from tichu_export.torchscript import export_torchscript
 from tichu_training.action_space import ACTION_SPACE_VERSION
 from tichu_training.bc.call_model import GrandTichuCallNetwork, TichuCallNetwork
+from tichu_training.bc.decision_types import HEAD_LOGIT_DIMS
 from tichu_training.bc.heads import BCModel
 from tichu_training.bc.schupfen_model import SchupfenNetwork
 from tichu_training.bc.training import load_checkpoint
@@ -30,6 +31,31 @@ from tichu_training.featurizer import FEATURIZER_VERSION
 
 
 log = logging.getLogger("export_model")
+
+
+
+def export_policy_module(model, output_path) -> None:
+    """Trace + save a BCModel policy, with the right arity for its mask flag.
+
+    v7 (ADR-0044): a mask-consuming policy has a THREE-argument forward that
+    raises on a missing mask, so it must be traced with three example inputs and
+    stamped so the loader knows to supply one. One helper, so the CLI export and
+    the co-train greedy gate's live export cannot disagree about the contract.
+    """
+    feature_dim = model.trunk.input_proj.in_features - model.skill.embedding.embedding_dim
+    use_mask = bool(getattr(model, "use_legal_mask", False))
+    if use_mask:
+        feature_dim -= HEAD_LOGIT_DIMS["play"]
+    inputs = [torch.randn(1, feature_dim), torch.tensor([0], dtype=torch.long)]
+    if use_mask:
+        inputs.append(torch.zeros(1, HEAD_LOGIT_DIMS["play"]))
+    export_torchscript(
+        model, example_inputs=tuple(inputs),
+        featurizer_version=FEATURIZER_VERSION,
+        action_space_version=ACTION_SPACE_VERSION,
+        output_path=output_path,
+        use_legal_mask=use_mask,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,15 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     policy_arch = arch.get("policy", {})
     model = BCModel(**policy_arch)
     load_checkpoint(args.checkpoint, model)
-    feature_dim = int(policy_arch["feature_dim"])
-    inputs = (torch.randn(1, feature_dim), torch.tensor([0], dtype=torch.long))
     policy_out = out_dir / "policy.pt"
-    export_torchscript(
-        model, example_inputs=inputs,
-        featurizer_version=FEATURIZER_VERSION,
-        action_space_version=ACTION_SPACE_VERSION,
-        output_path=policy_out,
-    )
+    export_policy_module(model, policy_out)
     log.info("wrote %s (featurizer=%s, action_space=%s)",
              policy_out, FEATURIZER_VERSION, ACTION_SPACE_VERSION)
 

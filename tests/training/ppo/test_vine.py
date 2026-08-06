@@ -214,10 +214,17 @@ def test_stratified_budget_beyond_the_pool_falls_back_instead_of_truncating():
     # With a budget covering every eligible decision, stratify must merely
     # REORDER the picks (pool states first) — the probed set is identical to
     # uniform selection, proving nothing is dropped when the pool runs out.
+    #
+    # The budget must EXCEED the eligible count for that premise to hold, and the
+    # eligible count is a property of the round the (randomly initialised) nets
+    # happen to play — it moved 50 -> 53 when the featurizer widened at v7, which
+    # silently turned this into a test of truncation order. 500 is far above any
+    # single round's decision count, so the premise is now guaranteed rather than
+    # coincidental.
     positions = generate_full_position_pool(seed=31, n=1)
-    uni = collect_vine_rows(_models(), positions, decisions_per_game=50,
+    uni = collect_vine_rows(_models(), positions, decisions_per_game=500,
                             branches=3, skill_decile=9, seed=5)
-    strat = collect_vine_rows(_models(), positions, decisions_per_game=50,
+    strat = collect_vine_rows(_models(), positions, decisions_per_game=500,
                               branches=3, skill_decile=9, seed=5, stratify=True)
     assert len(strat) == len(uni) > 0
     assert {r["features"].tobytes() for r in strat} == \

@@ -17,6 +17,7 @@ from tichu_engine.legality import MahjongWish, SchupfenPass
 from tichu_training.card_slots import CARD_SLOTS, card_slot, slot_to_card
 from tichu_training.featurizer import featurize
 from tichu_training.perfect_info import featurize_perfect_info
+from tichu_training.bc.heads import forward_play_model
 from tichu_training.ppo.policy import BatchedPolicy
 from tichu_training.ppo.rollout import CallChoice, SchupfenChoice, WishChoice
 from tichu_training.ppo.update import (
@@ -183,13 +184,18 @@ def schupfen_logp(
     return total_logp
 
 
-def _net_logits(model, features: torch.Tensor, skill: torch.Tensor, decision_type: str) -> torch.Tensor:
+def _net_logits(model, features: torch.Tensor, skill: torch.Tensor,
+                decision_type: str, legal_masks=None) -> torch.Tensor:
     """Forward one net to logits, normalizing shapes across the three net families:
-    play -> (B, PLAY_DIM); schupfen -> (B, 3, CARD_SLOTS); call -> (B, 2)."""
+    play -> (B, PLAY_DIM); schupfen -> (B, 3, CARD_SLOTS); call -> (B, 2).
+
+    v7 (ADR-0044): `legal_masks` reaches the play trunk when the model consumes
+    it. The WISH head rides the play BCModel but is not a Play Decision, so it
+    passes None -> zeros, exactly as training fed it."""
     if decision_type == "play":
-        return model(features, skill)["play"]
+        return forward_play_model(model, features, skill, legal_masks)["play"]
     if decision_type == "wish":
-        return model(features, skill)["wish"]  # head on the play BCModel (option a)
+        return forward_play_model(model, features, skill)["wish"]  # zeros mask
     if decision_type == "schupfen":
         return torch.stack(model(features, skill), dim=1)
     return model(features, skill)  # tichu / grand Call Network
@@ -296,7 +302,8 @@ def _cotrain_update_body(
 ) -> dict:
     with torch.no_grad():
         bc_logits = {
-            dt: _net_logits(_net_for(bc_models, dt), nb.features, nb.skill, dt)
+            dt: _net_logits(_net_for(bc_models, dt), nb.features, nb.skill, dt,
+                            nb.masks)
             for dt, nb in batch.nets.items()
         }
     advs: dict[str, torch.Tensor] = {}
@@ -312,7 +319,12 @@ def _cotrain_update_body(
         vloss = value_loss(values, batch.returns)
         total = vf_coef * vloss
         for dt, nb in batch.nets.items():
-            logits = _net_logits(_net_for(models, dt), nb.features, nb.skill, dt)
+            # `nb.masks` MUST reach the play trunk: the rollout sampled with
+            # the real legal mask, so re-forwarding here without it evaluates a
+            # different input condition and the PPO ratio exp(new_logp-old_logp)
+            # compares two distributions the net never held at once.
+            logits = _net_logits(_net_for(models, dt), nb.features, nb.skill, dt,
+                                 nb.masks)
             new_logp, kl, ent = _policy_kl_entropy(dt, logits, bc_logits[dt], nb)
             ploss = clipped_policy_loss(new_logp, nb.old_logp, advs[dt], clip_eps=clip_eps)
             total = total + ploss - ent_coefs.get(dt, 0.0) * ent + kl_coefs.get(dt, 0.0) * kl
@@ -411,7 +423,7 @@ class BatchedCoTrainPolicy:
         the shared critic — same one-shot shape as a Call."""
         features, crit_in, skill = self._stack_features(decisions)
         with torch.no_grad():
-            logits = self.play_model(features, skill)["wish"]
+            logits = forward_play_model(self.play_model, features, skill)["wish"]
             logp_all = torch.log_softmax(logits, dim=-1)
             actions = torch.multinomial(
                 logp_all.exp(), num_samples=1, generator=self._gen

@@ -183,3 +183,46 @@ def test_n_rows_reports_parquet_shard_totals(smoke_setup):
     # It is independent of how many BCExamples actually get yielded — the
     # latter depends on replay-time filtering for None pre_decision_states.
     assert ds.n_rows >= len(list(ds))
+
+
+def test_forced_play_rows_are_dropped_from_emission_only(smoke_setup):
+    """v7 (ADR-0044): drop Forced Play Decisions from the BC corpus.
+
+    A Play Decision with exactly ONE legal Intent teaches nothing: the masked
+    softmax puts probability 1 on it, so `nll == 0` and the gradient is exactly
+    0. It also inflates reported top-1 and costs ~39% of the bundle's disk.
+
+    INTENT level, not ConcreteAction level — `rollout._forced_action` tests
+    `len(legal_actions(state)) == 1`, a strictly smaller set (one "Single 7"
+    Intent can have two suited realisations). The BC gradient flows through the
+    1809-way Intent softmax, so that is the predicate that matters here.
+
+    EMISSION only: replay still steps every Decision, so wish / dragon rows are
+    untouched and nothing downstream of a forced Play shifts.
+    """
+    def _rows(**kw):
+        return list(ParquetBCDataset(
+            smoke_setup["shards_dir"],
+            archive_path=smoke_setup["archive"],
+            expected_featurizer_version=FEATURIZER_VERSION,
+            expected_action_space_version=ACTION_SPACE_VERSION,
+            **kw,
+        ))
+
+    keep = _rows()
+    drop = _rows(skip_forced_play=True)
+
+    forced = [e for e in keep
+              if e.decision_type == "play" and int(e.legal_mask.sum()) == 1]
+    assert forced, "sample data must contain some Forced Play Decisions"
+
+    # Every surviving play row has a real choice ...
+    assert all(int(e.legal_mask.sum()) > 1
+               for e in drop if e.decision_type == "play")
+    # ... exactly the forced ones went ...
+    assert (len([e for e in keep if e.decision_type == "play"])
+            - len([e for e in drop if e.decision_type == "play"])) == len(forced)
+    # ... and no other head lost a single row.
+    for head in ("wish", "dragon_assignment"):
+        assert (len([e for e in keep if e.decision_type == head])
+                == len([e for e in drop if e.decision_type == head])), head

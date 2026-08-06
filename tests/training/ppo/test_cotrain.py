@@ -611,3 +611,47 @@ def test_train_cotrain_with_wish_enabled_trains_the_wish_head():
         not torch.equal(wish_head_before[k], v)
         for k, v in models["play"].heads["wish"].state_dict().items()
     ), "wish head did not train end-to-end"
+
+
+def test_cotrain_reforward_matches_the_rollout_input_condition():
+    """v7 (ADR-0044) regression — the bug that made the first v7 co-train run
+    degrade monotonically from parity to -19 over 2,300 iterations.
+
+    The rollout SAMPLES with the real legal-Intent mask on the trunk, but
+    `_cotrain_update_body` re-forwards the same states to compute `new_logp`, the
+    KL anchor and entropy. If that re-forward omits the mask, the play net is
+    evaluated under an input condition it never sampled under, so the PPO ratio
+    exp(new_logp - old_logp) compares two different distributions from the very
+    first epoch — and PPO faithfully optimises the wrong one.
+
+    KL stays inside its target ball the whole time (the controller sees a
+    perfectly normal-looking KL), which is why nothing in ppo_log.csv flags it.
+    The only visible symptom is EV collapse in the gate.
+
+    Pinned as behaviour: with an UNCHANGED policy, re-forwarding must reproduce
+    the log-probs the rollout recorded.
+    """
+    import torch
+    from tichu_training.bc.heads import BCModel, forward_play_model
+    from tichu_training.ppo.cotrain import _net_logits, _masked_logp_at
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+
+    torch.manual_seed(0)
+    model = BCModel(FEATURIZER_OUTPUT_DIM, skill_dim=8, trunk_hidden=32,
+                    trunk_depth=1, trunk_out_dim=16, head_hidden=16,
+                    use_legal_mask=True).eval()
+
+    n, dim = 4, HEAD_LOGIT_DIMS["play"]
+    features = torch.randn(n, FEATURIZER_OUTPUT_DIM)
+    skill = torch.zeros(n, dtype=torch.long)
+    masks = torch.zeros(n, dim, dtype=torch.bool)
+    masks[:, :7] = True
+    actions = torch.zeros(n, dtype=torch.long)
+
+    with torch.no_grad():
+        sampled = forward_play_model(model, features, skill, masks)["play"]
+        rollout_logp = _masked_logp_at(sampled, masks, actions)
+        reforward = _net_logits(model, features, skill, "play", masks)
+        update_logp = _masked_logp_at(reforward, masks, actions)
+
+    torch.testing.assert_close(update_logp, rollout_logp)

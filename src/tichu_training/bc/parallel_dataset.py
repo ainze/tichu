@@ -70,6 +70,7 @@ def _worker_loop(
     recency_cutoff: int,
     recency_weight: float,
     neutral_decile: int,
+    skip_forced_play: bool,
     queue: "mp.Queue",
     stop_event,
 ) -> None:
@@ -153,6 +154,12 @@ def _worker_loop(
                         decision_type, pre_state, player,
                         cached_actions=cached_actions,
                     )
+                    if (
+                        skip_forced_play
+                        and decision_type == "play"
+                        and int(mask.sum()) == 1
+                    ):
+                        continue  # v7 (ADR-0044): zero-gradient Forced Play row
                     if not mask[target]:
                         continue
                     handle = parsed_round.handles[player]
@@ -226,6 +233,7 @@ class ParallelParquetBCDataset:
         recency_cutoff_game_id: int = _DEFAULT_RECENCY_CUTOFF,
         recency_weight: float = _DEFAULT_RECENCY_WEIGHT,
         skill_buckets: int = 10,
+        skip_forced_play: bool = False,
         num_workers: int | None = None,
         queue_maxsize: int | None = None,
     ) -> None:
@@ -240,6 +248,7 @@ class ParallelParquetBCDataset:
             recency_cutoff_game_id=recency_cutoff_game_id,
             recency_weight=recency_weight,
             skill_buckets=skill_buckets,
+            skip_forced_play=skip_forced_play,
         )
         if num_workers is None:
             num_workers = max(1, (os.cpu_count() or 2) - 1)
@@ -291,6 +300,7 @@ class ParallelParquetBCDataset:
                     self._sequential.recency_cutoff_game_id,
                     self._sequential.recency_weight,
                     self._sequential._neutral_decile,
+                    self._sequential.skip_forced_play,
                     queue,
                     stop_event,
                 ),
