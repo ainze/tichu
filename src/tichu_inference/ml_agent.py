@@ -199,14 +199,23 @@ class MLAgent(Agent):
         partner_trick_guard: bool = True,
         bomb_preserving_resolver: bool = True,
         featurizer=_DEFAULT_FEATURIZER,
+        uses_legal_mask: bool | None = None,
     ) -> "MLAgent":
         """Build an agent over already-loaded modules, skipping disk I/O.
 
         Lets the serve builder load one policy module (and the shared standalone
         nets) a single time and construct several tier-views over it that differ
         only by `skill_decile` — one Model in memory, not one per tier (ADR-0027).
+
+        `uses_legal_mask` MUST be supplied for a v7 mask-consuming export. There
+        is no path here to read the stamp from, and a traced TorchScript module
+        does not carry the flag as an attribute — so left unset it defaults to
+        False, the 3-argument forward is called with 2 arguments, and every
+        decision degrades to a random legal action. Caller has the path; caller
+        reads the stamp (`exported_uses_legal_mask`).
         """
         self = cls.__new__(cls)
+        self._uses_legal_mask = uses_legal_mask
         self._init_with_modules(
             policy_module,
             skill_decile=skill_decile,

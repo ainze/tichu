@@ -75,14 +75,25 @@ def export_nets(config, *, snapshot_prefix: str, out_dir: str, progress: bool = 
         src = f"{snapshot_prefix}_{net_key}.bin"
         load_checkpoint(src, model)
         dest = out / _EXPORT_NAMES[net_key]
-        export_torchscript(
-            model, example_inputs=example,
-            featurizer_version=FEATURIZER_VERSION,
-            # Only the play policy consumes the play Action Space; standalone nets
-            # carry an empty stamp (matches export_model).
-            action_space_version=ACTION_SPACE_VERSION if net_key == "play" else "",
-            output_path=dest,
-        )
+        if net_key == "play":
+            # v7 (ADR-0044): the play policy may take the legal mask as a THIRD
+            # forward argument and RAISES without it, so its trace arity and its
+            # stamp both depend on the flag. `export_policy_module` owns that
+            # decision for the CLI export, the greedy gate and here alike —
+            # three copies of the arity rule is how the exported bundle and the
+            # loader end up disagreeing about the contract.
+            from tichu_training.cli.export_model import export_policy_module
+
+            export_policy_module(model, dest)
+        else:
+            export_torchscript(
+                model, example_inputs=example,
+                featurizer_version=FEATURIZER_VERSION,
+                # Only the play policy consumes the play Action Space; standalone
+                # nets carry an empty stamp (matches export_model).
+                action_space_version="",
+                output_path=dest,
+            )
         if progress:
             print(f"  export {net_key:8s} {src}  ->  {dest}", flush=True)
         paths[net_key] = str(dest)

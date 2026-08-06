@@ -1,0 +1,47 @@
+# Native serve spec for the CURRENTLY DEPLOYED champion: cotrain_v6_pbrs_resid_
+# wish_gated_cpfix, iter_03328 (exported 2026-06-24).
+#
+# This is the export every strength claim in the project is measured against —
+# `eval.master` in the cotrain configs, and the `cpfix3328` opponent in the v7
+# greedy gate — but it had no committed serve config, so what actually runs was
+# configured from something outside the repo. That is the gap this file closes.
+#
+# Lineage vs serve_cotrain_v6_pbrs_iter01200_resid.yaml: iter_03328 carries the
+# schupfen `current_player` fix (a3438f9, head-swap A/B +4.03) and the round-local
+# `team_scores` inference fix. It does NOT carry the wish-decline label fix — the
+# wishfix BC lineage postdates it — which is why that whole lineage sat -2.69
+# BELOW this export (ADR-0040) and never shipped.
+#
+# Featurizer v6 (591 dims). Do NOT run this with `--require-v7`: the flag rejects
+# clients that omit the v7 Rich History Block, and this policy could not read it
+# anyway. Strict mode belongs with a v7 export (ADR-0044).
+#
+# Single checkpoint serves all ML tiers; Difficulty = the Skill Decile fed to the
+# Skill Embedding (ADR-0027). `easy` is the RuleAgent baseline (ADR-0003).
+# Tier -> Skill Decile: medium=3, hard=6, master=9 (ascending strength).
+
+_shared_nets: &shared_nets
+  schupfen:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+  tichu_call: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+  grand_call: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+agents:
+  easy:
+    factory: rule
+  medium:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    skill_decile: 3
+    <<: *shared_nets
+  hard:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    skill_decile: 6
+    <<: *shared_nets
+  master:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    skill_decile: 9
+    <<: *shared_nets
+
+port: 8000
