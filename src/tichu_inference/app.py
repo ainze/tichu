@@ -28,6 +28,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from tichu_inference.codec import action_to_json, private_state_from_json
+from tichu_export.torchscript import exported_uses_legal_mask
 from tichu_inference.ml_agent import MLAgent, load_policy_module, load_standalone_net
 from tichu_ml.agent import Agent
 from tichu_ml.rule_agent import RuleAgent
@@ -209,9 +210,13 @@ def _build_agents(spec: dict) -> dict[str, Agent]:
     net_cache: dict[Path, object] = {}
 
     def _policy(path: str | Path):
+        # v7 (ADR-0044): the mask flag is stamped on the ARTIFACT, and
+        # `from_loaded` has no path to read it from. Cache it beside the module
+        # so it is read once per artifact and cannot go missing on the tier that
+        # happens to be built second.
         p = Path(path)
         if p not in policy_cache:
-            policy_cache[p] = load_policy_module(p)
+            policy_cache[p] = (load_policy_module(p), exported_uses_legal_mask(p))
         return policy_cache[p]
 
     def _net(sub: dict, key: str):
@@ -234,11 +239,13 @@ def _build_agents(spec: dict) -> dict[str, Agent]:
             kwargs: dict[str, Any] = {}
             if "skill_decile" in sub:
                 kwargs["skill_decile"] = int(sub["skill_decile"])
+            module, uses_mask = _policy(sub["checkpoint"])
             agents[difficulty] = MLAgent.from_loaded(
-                _policy(sub["checkpoint"]),
+                module,
                 schupfen=_net(sub, "schupfen"),
                 tichu_call=_net(sub, "tichu_call"),
                 grand_call=_net(sub, "grand_call"),
+                uses_legal_mask=uses_mask,
                 **kwargs,
             )
         else:

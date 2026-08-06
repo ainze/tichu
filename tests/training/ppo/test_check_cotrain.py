@@ -83,3 +83,69 @@ def test_check_exports_snapshot_and_reports_tournament_ci(tmp_path):
     from pathlib import Path
     for name in ("policy.pt", "schupfen.pt", "tichu_call.pt", "grand_tichu_call.pt"):
         assert (Path(config["run_dir"]) / "export" / "iter_00002" / name).exists()
+
+
+# --- v7 (ADR-0044): exporting a mask-consuming play policy ---------------------
+
+def test_export_nets_traces_a_mask_consuming_play_policy(tmp_path):
+    """`check_cotrain` is how a co-train snapshot becomes a servable bundle, so it
+    has to honour the same play-export contract as the CLI export and the greedy
+    gate. A v7 play net has a THREE-argument forward that raises on a missing
+    mask — tracing it with the two-argument example blows up, which means a v7 run
+    could not be exported at all.
+
+    The stamp is what tells `MLAgent` to supply the mask at serve time; an export
+    missing it would silently feed 1809 zeros where training saw the legal set.
+    """
+    from tichu_export.torchscript import exported_uses_legal_mask
+
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir(parents=True, exist_ok=True)
+    _save(BCModel(_D, skill_buckets=10, use_legal_mask=True, **_MODEL),
+          snaps / "iter_00002_play.bin")
+    _save(SchupfenNetwork(_D, skill_dim=8, hidden=16), snaps / "iter_00002_schupfen.bin")
+    _save(TichuCallNetwork(_D, skill_dim=8, hidden=16), snaps / "iter_00002_tichu.bin")
+    _save(GrandTichuCallNetwork(_D, skill_dim=8, hidden=16), snaps / "iter_00002_grand.bin")
+
+    paths = export_nets(
+        {"run_dir": str(tmp_path),
+         "model": {**_MODEL, "use_legal_mask": True},
+         "schupfen_model": {"skill_dim": 8, "hidden": 16},
+         "call_model": {"skill_dim": 8, "hidden": 16}},
+        snapshot_prefix=str(snaps / "iter_00002"),
+        out_dir=str(tmp_path / "export"),
+    )
+
+    assert exported_uses_legal_mask(paths["checkpoint_path"]) is True
+
+
+def test_exported_v7_snapshot_serves_through_ml_agent(tmp_path):
+    """End to end: the bundle `check_cotrain` writes is what gets served."""
+    from tichu_engine.state import deal_initial_state
+    from tichu_inference.ml_agent import MLAgent
+
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir(parents=True, exist_ok=True)
+    _save(BCModel(_D, skill_buckets=10, use_legal_mask=True, **_MODEL),
+          snaps / "iter_00002_play.bin")
+    _save(SchupfenNetwork(_D, skill_dim=8, hidden=16), snaps / "iter_00002_schupfen.bin")
+    _save(TichuCallNetwork(_D, skill_dim=8, hidden=16), snaps / "iter_00002_tichu.bin")
+    _save(GrandTichuCallNetwork(_D, skill_dim=8, hidden=16), snaps / "iter_00002_grand.bin")
+
+    paths = export_nets(
+        {"run_dir": str(tmp_path),
+         "model": {**_MODEL, "use_legal_mask": True},
+         "schupfen_model": {"skill_dim": 8, "hidden": 16},
+         "call_model": {"skill_dim": 8, "hidden": 16}},
+        snapshot_prefix=str(snaps / "iter_00002"),
+        out_dir=str(tmp_path / "export"),
+    )
+
+    agent = MLAgent(paths["checkpoint_path"], skill_decile=9)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+    assert agent.act(ps) is not None
+    assert agent.last_fallback_used is False, (
+        "a mask-consuming export must serve natively — the random-legal fallback "
+        "would hide a broken export behind plausible-looking play"
+    )

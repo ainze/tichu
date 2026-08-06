@@ -522,3 +522,45 @@ def test_health_advertises_whether_v7_is_required(tmp_path):
 
     assert lenient.get("/health").json()["requires_v7"] is False
     assert strict.get("/health").json()["requires_v7"] is True
+
+
+def _mask_policy_artifact(tmp_path: Path, name: str) -> Path:
+    """A REAL mask-consuming policy export (not the 2-arg dummy above)."""
+    from tichu_training.bc.heads import BCModel
+    from tichu_training.cli.export_model import export_policy_module
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+
+    torch.manual_seed(0)
+    model = BCModel(feature_dim=FEATURIZER_OUTPUT_DIM, trunk_hidden=16, trunk_depth=1,
+                    trunk_out_dim=8, head_hidden=8, use_legal_mask=True)
+    out = tmp_path / f"{name}.pt"
+    export_policy_module(model, out)
+    return out
+
+
+def test_serve_builder_feeds_the_mask_to_a_mask_consuming_export(tmp_path):
+    """The serve builder shares ONE loaded module across tiers (ADR-0027), so it
+    goes through `from_loaded` — which has no artifact path and therefore cannot
+    read the `use_legal_mask` stamp the way the path constructor does. A traced
+    TorchScript module does not carry the flag as an attribute either.
+
+    Without the stamp threaded through, the agent calls a 3-arg forward with 2
+    arguments, the call raises, and EVERY decision silently degrades to a random
+    legal action — a served policy that looks alive and plays noise.
+    """
+    cfg = {"agents": {
+        "easy": {"factory": "rule"},
+        "medium": {"factory": "ml", "checkpoint": str(_mask_policy_artifact(tmp_path, "m"))},
+        "hard": {"factory": "ml", "checkpoint": str(_mask_policy_artifact(tmp_path, "h"))},
+        "master": {"factory": "ml", "checkpoint": str(_mask_policy_artifact(tmp_path, "x"))},
+    }}
+    client = TestClient(create_app(cfg))
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    r = _post_act(client, "master", ps)
+    assert r.status_code == 200
+    assert r.json()["fallback_used"] is False, (
+        "the served policy fell back to a random legal action — the mask is not "
+        "reaching the module"
+    )
