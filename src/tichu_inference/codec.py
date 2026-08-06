@@ -37,6 +37,7 @@ from tichu_engine.legality import (
     Pass,
     SchupfenPass,
 )
+from tichu_engine.rich_history import RichHistory
 from tichu_engine.state import (
     DragonGivePending,
     MahjongWishPending,
@@ -247,10 +248,48 @@ def public_state_to_json(public: PublicState) -> dict:
         "declined_top_by_player": [list(t) for t in public.declined_top_by_player],
         "lead_summary_by_player": [list(t) for t in public.lead_summary_by_player],
         "pass_stats_by_player": [list(t) for t in public.pass_stats_by_player],
+        # v7 (ADR-0044): the Rich History Block accumulator.
+        "rich_history": _rich_history_to_json(public.rich_history),
     }
 
 
-def public_state_from_json(blob: dict) -> PublicState:
+def _rich_history_to_json(rich: RichHistory) -> dict:
+    return {
+        "declined_ctx": [list(r) for r in rich.declined_ctx],
+        "declined_counts": [list(r) for r in rich.declined_counts],
+        "declined_lengths": [list(r) for r in rich.declined_lengths],
+        "declined_stake": list(rich.declined_stake),
+        "declined_bomb": list(rich.declined_bomb),
+        "wish_void": [list(r) for r in rich.wish_void],
+        "wish_soft": [list(r) for r in rich.wish_soft],
+        "lead_high_single": list(rich.lead_high_single),
+        "card_play_order": list(rich.card_play_order),
+        "plays_so_far": rich.plays_so_far,
+    }
+
+
+def _rich_history_from_json(blob: dict) -> RichHistory:
+    def rows(key):
+        return tuple(tuple(int(x) for x in row) for row in blob[key])
+
+    def flat(key):
+        return tuple(int(x) for x in blob[key])
+
+    return RichHistory(
+        declined_ctx=rows("declined_ctx"),
+        declined_counts=rows("declined_counts"),
+        declined_lengths=rows("declined_lengths"),
+        declined_stake=flat("declined_stake"),
+        declined_bomb=flat("declined_bomb"),
+        wish_void=rows("wish_void"),
+        wish_soft=rows("wish_soft"),
+        lead_high_single=flat("lead_high_single"),
+        card_play_order=flat("card_play_order"),
+        plays_so_far=int(blob["plays_so_far"]),
+    )
+
+
+def public_state_from_json(blob: dict, *, require_v7: bool = False) -> PublicState:
     return PublicState(
         current_player=int(blob["current_player"]),
         hand_sizes=tuple(int(x) for x in blob["hand_sizes"]),  # type: ignore[arg-type]
@@ -280,7 +319,37 @@ def public_state_from_json(blob: dict) -> PublicState:
             tuple(int(x) for x in row)
             for row in blob.get("pass_stats_by_player", ((0, 0),) * 4)
         ),  # type: ignore[arg-type]
+        # v7 (ADR-0044): see `_decode_rich_history` for why this one has a strict
+        # mode when the v6 fields above do not.
+        rich_history=_decode_rich_history(blob, require_v7=require_v7),
     )
+
+
+def _decode_rich_history(blob: dict, *, require_v7: bool) -> RichHistory:
+    """Decode the Rich History Block, or fail loudly when asked to.
+
+    The v6 accumulators above default to zeros on a missing key. That
+    leniency is why the served agent can today run with ~42% of its Feature
+    Vector pinned to zero and nothing anywhere saying so — the same failure
+    shape as the `team_scores` train/inference skew. v7 would take that to ~59%.
+
+    The default stays lenient so the CURRENT client keeps working while the v7
+    lineage is being trained (ADR-0044: update the client only after beating
+    cpfix3328). `require_v7=True` is the switch to flip the moment it is updated:
+    it turns a silent, invisible degradation into an immediate, obvious failure,
+    which is the only way a half-updated client cannot quietly corrupt inputs.
+    """
+    raw = blob.get("rich_history")
+    if raw is None:
+        if require_v7:
+            raise ValueError(
+                "wire PublicState is missing 'rich_history': the client predates "
+                "featurizer v7 (ADR-0044). Serving it would feed the policy 233 "
+                "zeroed dims that training saw populated. Update the client, or "
+                "unset require_v7 to accept the degraded input deliberately."
+            )
+        return RichHistory()
+    return _rich_history_from_json(raw)
 
 
 def private_state_to_json(ps: PrivateState) -> dict:
@@ -296,7 +365,10 @@ def private_state_to_json(ps: PrivateState) -> dict:
     }
 
 
-def private_state_from_json(blob: dict) -> PrivateState:
+def private_state_from_json(blob: dict, *, require_v7: bool = False) -> PrivateState:
+    """`require_v7` is forwarded to `public_state_from_json` — see
+    `_decode_rich_history`. Every serving decode goes through here, so this is
+    the parameter the HTTP layer threads its strict-mode flag into."""
     if "player" not in blob or "hand" not in blob or "public" not in blob:
         raise ValueError(
             "private_state_from_json requires keys {'player', 'hand', 'public'}; "
@@ -306,7 +378,7 @@ def private_state_from_json(blob: dict) -> PrivateState:
     return PrivateState(
         player=int(blob["player"]),
         hand=frozenset(id_to_card(i) for i in blob["hand"]),
-        public=public_state_from_json(blob["public"]),
+        public=public_state_from_json(blob["public"], require_v7=require_v7),
         schupfen_received=tuple(
             None if i is None else id_to_card(i) for i in received
         ),  # type: ignore[arg-type]

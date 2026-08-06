@@ -51,9 +51,10 @@ def _simple_private_state(player: int = 0) -> PrivateState:
     return PrivateState(player=player, hand=hand, public=public)
 
 
-def test_version_is_pinned_to_v6():
+def test_version_is_pinned_to_v7():
     # v6 (ADR-0038): played_by + schupfen_received + B-core + trick_leader.
-    assert FEATURIZER_VERSION == "v6"
+    # v7 (ADR-0044): + the Rich History Block, appended.
+    assert FEATURIZER_VERSION == "v7"
 
 
 def test_dropped_sections_are_absent():
@@ -75,8 +76,10 @@ def test_dropped_sections_are_absent():
         )
 
 
-def test_v6_total_dim_is_591():
-    assert FEATURIZER_OUTPUT_DIM == 591
+def test_v7_total_dim_is_824():
+    # 591 (v6) + 233 (the v7 Rich History Block). The v6 prefix width itself is
+    # pinned in test_v7_additive_prefix.py, which also proves it byte-identical.
+    assert FEATURIZER_OUTPUT_DIM == 824
 
 
 def test_trick_top_combo_section_is_50_dims():

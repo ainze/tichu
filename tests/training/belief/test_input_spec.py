@@ -70,15 +70,21 @@ def test_emitted_belief_features_have_the_pinned_width():
 
 
 def test_bcore_history_channels_come_from_the_featurizer_not_a_suffix():
-    """The ADR-0028 B-core channels live INSIDE the emitted vector (v6 sections
-    564..591), not appended after it. Guards against the duplication the
-    History-block emit reintroduced at v6."""
+    """The ADR-0028 B-core channels live INSIDE the emitted vector, as featurizer
+    sections, not appended after it. Guards against the duplication the
+    History-block emit reintroduced at v6.
+
+    Containment is the invariant, not position. Through v6 B-core happened to
+    close the vector, and this test asserted that — an incidental layout fact. v7
+    (ADR-0044) appends the Rich History Block after it, so the positional form
+    would fail while the behaviour it guards is untouched.
+    """
     bcore_start = SECTION_OFFSETS["declined_top"]
     bcore_end = (
         SECTION_OFFSETS["pass_pressure"] + SECTION_DIMS["pass_pressure"]
     )
-    assert bcore_end == FEATURIZER_OUTPUT_DIM      # B-core closes the vector
-    assert bcore_end - bcore_start == 18 + 6 + 3   # H1 + H2 + H3
+    assert bcore_end - bcore_start == 18 + 6 + 3   # H1 + H2 + H3, contiguous
+    assert bcore_end <= FEATURIZER_OUTPUT_DIM      # inside the vector, not a suffix
 
 
 def test_bundle_manifest_records_the_pinned_dim(tmp_path):
