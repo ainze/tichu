@@ -1,0 +1,71 @@
+# Native serve spec for the v7 champion: cotrain_v7_gated, iter_15360.
+#
+# Supersedes iter_06400 (promotion #5). iter_15360 is promotion #6 and the last
+# GATE-PROMOTED champion — certified over the currently deployed export
+# (cpfix3328) at +8.257, ci_lo +7.175, n=81,920 seat-swapped games, alongside
+# +14.665 vs the v7 BC. That is ~+2.2 better than iter_06400's +6.107, so this
+# is the bundle to ship.
+#
+# WHY THE +8.257 IS TRUSTED. The champion stream cleared by ci_lo +0.005 — about
+# as marginal as a promotion gets — so promotion-selection bias is a live worry.
+# But cpfix3328 is REQUIRED and HELD OUT of the rollout (ADR-0044), and its
+# pooled mean over the five readings before the promotion was flat at
+# 8.02 / 8.09 / 7.85 / 8.04 / 8.26 — no spike into the promoting window. The
+# three streams also reconcile: the learner now sits +6.76/window vs cpfix3328
+# and -1.12/window vs this champion, i.e. champion ~ cpfix3328 + 7.9. Three
+# independently measured streams agreeing is the evidence, not any one of them.
+#
+# NOT the newest snapshot, deliberately. The run continues past 16k without a
+# further promotion, so any later snapshot is un-certified by the gate.
+#
+# Featurizer v7 (824 dims), and policy.pt is stamped `use_legal_mask` — MLAgent
+# reads that stamp and feeds the 1809-wide legal-Intent mask as a trunk input
+# (ADR-0044). NOTE this needs the serve-builder fix from PR #83: before it, the
+# stamp never reached `MLAgent.from_loaded` and every decision silently degraded
+# to a random legal action while still returning HTTP 200.
+#
+# --require-v7 : NOT YET. The wire client still omits public.rich_history, so
+# turning strict mode on today would 400 every request. Order of operations:
+#   1. ship the client change,
+#   2. confirm rich_history is arriving,
+#   3. THEN restart with --require-v7.
+# Until step 3 this policy runs with its 233 Rich History dims pinned to zero —
+# it will serve, but below strength, and nothing in any metric will say so.
+# GET /health reports `requires_v7` so the client can check where it stands.
+#
+# Single checkpoint serves all ML tiers; Difficulty = the Skill Decile fed to the
+# Skill Embedding (ADR-0027). `easy` is the RuleAgent baseline (ADR-0003).
+# Tier -> Skill Decile: medium=3, hard=6, master=9 (ascending strength).
+#
+# NOTE the co-train trained at skill_decile 9 only (`ppo.skill_decile: 9`), so the
+# medium/hard tiers are the same nets read at a decile the RL never optimised.
+# That is unchanged from every previous cotrain serve spec, not new here.
+#
+# Docker: docker\build.ps1 -ExportRoot C:\workbench\tichu\data\runs\cotrain_v7_gated\export `
+#                          -Model iter_15360 -Tag tichu-inference:cotrain-v7-iter15360
+
+_shared_nets: &shared_nets
+  schupfen:   C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\schupfen.pt
+  tichu_call: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\tichu_call.pt
+  grand_call: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\grand_tichu_call.pt
+
+agents:
+  easy:
+    factory: rule
+  medium:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\policy.pt
+    skill_decile: 3
+    <<: *shared_nets
+  hard:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\policy.pt
+    skill_decile: 6
+    <<: *shared_nets
+  master:
+    factory: ml
+    checkpoint: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\policy.pt
+    skill_decile: 9
+    <<: *shared_nets
+
+port: 8000
