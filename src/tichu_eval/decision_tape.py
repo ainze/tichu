@@ -193,6 +193,40 @@ def render_schupfen(agent, private_state, action, *, header: str | None = None) 
     return "\n".join(lines)
 
 
+def _any_action_str(action) -> str:
+    """`_action_str` for a Play combination, plus the three pending-decision
+    action types it cannot describe (they hold no playable combination)."""
+    if isinstance(action, MahjongWish):
+        return f"WISH[{action.rank}]"
+    if isinstance(action, DragonGive):
+        return f"DRAGON[seat{action.target}]"
+    if isinstance(action, SchupfenPass):
+        return (f"SCHUPFEN[next={_card(action.to_next)},"
+                f"partner={_card(action.to_partner)},"
+                f"previous={_card(action.to_previous)}]")
+    return _action_str(action)
+
+
+def render_fallback(private_state, action, *, header: str | None = None) -> str:
+    """A served Decision the network did NOT make: inference raised and the agent
+    fell back to a rule / random legal action.
+
+    There are no policy probabilities to render — and re-asking the agent for a
+    ranking would just re-run the forward that failed. The block exists so the
+    degradation is visible in the tape rather than hidden behind a plausible-
+    looking move; pair it with the caller's `replay:` line to reproduce it.
+    """
+    seat = private_state.player
+    head = f"{header}\n" if header else ""
+    kind = ("PLAY" if private_state.public.pending_decision is None
+            else type(private_state.public.pending_decision).__name__)
+    return (f"{head}FALLBACK  {kind}  seat {seat}  "
+            f"served={_any_action_str(action)}  (inference failed — NOT a policy "
+            f"decision; see the serve log for the error)\n"
+            f"{render_public_context(private_state, seat=seat)}\n"
+            f"{_hand_line(private_state)}")
+
+
 def _make_observer(agents, round_idx: int, sink: TapeSink, top_k: int):
     def observer(seat: int, private_state, action) -> None:
         rec = build_record(agents[seat], private_state, action,

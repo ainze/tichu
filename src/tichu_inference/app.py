@@ -150,7 +150,8 @@ def create_app(config: dict) -> FastAPI:
         # Live tape: every served Decision (Play / Wish / Dragon / Schupfen),
         # dispatched on the pending type by the logger.
         if tape is not None:
-            tape.log(agent, ps, action, difficulty, request_body=body)
+            tape.log(agent, ps, action, difficulty, request_body=body,
+                     fallback_used=fallback_used)
 
         return {
             "action": action_to_json(action),
@@ -270,13 +271,14 @@ class _TapeLogger:
             fh.write("\n# --- live decision tape opened ---\n")
 
     def log(self, agent: Agent, private_state, action, difficulty: str,
-            *, request_body: dict | None = None) -> None:
+            *, request_body: dict | None = None, fallback_used: bool = False) -> None:
         # Lazy import keeps the eval dependency off the default serve path.
         from tichu_engine.state import (
             DragonGivePending, MahjongWishPending, SchupfenPending,
         )
         from tichu_eval.decision_tape import (
-            build_record, render_dragon, render_record, render_schupfen, render_wish,
+            build_record, render_dragon, render_fallback, render_record,
+            render_schupfen, render_wish,
         )
 
         if not hasattr(agent, "play_action_scores"):
@@ -284,7 +286,14 @@ class _TapeLogger:
         ts = time.strftime("%H:%M:%S")
         header = f"--- #{self._seq + 1}  {ts}  difficulty={difficulty} ---"
         pending = private_state.public.pending_decision
-        if pending is None:
+        if fallback_used:
+            # The net raised and `act()` served a rule/random legal action. Asking
+            # the same agent to rank alternatives would re-run the forward that
+            # just failed — the failure would then escape the request as a 500,
+            # turning a degraded-but-served move into a dropped one. Record the
+            # degradation instead; the `replay:` line below makes it reproducible.
+            block = render_fallback(private_state, action, header=header)
+        elif pending is None:
             rec = build_record(agent, private_state, action,
                                seat=private_state.public.current_player)
             block = render_record(rec, header=header) if rec is not None else None

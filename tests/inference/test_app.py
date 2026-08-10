@@ -414,6 +414,64 @@ def test_tape_log_skips_baseline_agents(tmp_path):
     assert "chose:" not in text     # header may exist, but no decision block
 
 
+class _CountingModule:
+    """Wraps a loaded policy module and counts forwards (optionally failing)."""
+
+    def __init__(self, inner, *, fail: bool = False) -> None:
+        self.inner, self.fail, self.calls = inner, fail, 0
+
+    def __call__(self, *args):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("forward() is missing value for argument 'legal_mask'")
+        return self.inner(*args)
+
+
+def test_tape_records_fallback_instead_of_re_running_a_failed_forward(tmp_path):
+    # A policy whose forward raises must still SERVE (random legal action, the
+    # documented fallback) with the tape on. Before the fix the tape asked the
+    # agent to rank alternatives, which re-ran the same failing forward outside
+    # any guard and turned a degraded-but-served move into a 500.
+    cfg = _make_config(tmp_path)
+    tape = tmp_path / "tape.txt"
+    cfg["tape_log"] = str(tape)
+    app = create_app(cfg)
+    agent = app.state.agent_registry["master"]
+    broken = _CountingModule(agent._module, fail=True)
+    agent._module = broken
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    r = _post_act(client, "master", ps)
+
+    assert r.status_code == 200
+    assert r.json()["fallback_used"] is True
+    text = tape.read_text(encoding="utf-8")
+    assert "FALLBACK" in text and "served=" in text
+    assert "chose:" not in text        # no fabricated policy ranking
+    assert "replay:" in text           # still reproducible
+    assert broken.calls == 1           # the tape did not retry the forward
+
+
+def test_tape_reuses_the_forward_from_the_decision_it_records(tmp_path):
+    # The tape explains the move the agent JUST made; recomputing it would
+    # double the per-decision inference cost of playing with --tape-log on.
+    cfg = _make_config(tmp_path)
+    cfg["tape_log"] = str(tmp_path / "tape.txt")
+    app = create_app(cfg)
+    agent = app.state.agent_registry["master"]
+    counting = _CountingModule(agent._module)
+    agent._module = counting
+    client = TestClient(app)
+    state = deal_initial_state(seed=0)
+    ps = state.private_view(state.public.current_player)
+
+    assert _post_act(client, "master", ps).status_code == 200
+
+    assert counting.calls == 1
+
+
 def test_no_tape_log_by_default_is_harmless(tmp_path):
     app = create_app(_make_config(tmp_path))   # no tape_log key
     client = TestClient(app)
