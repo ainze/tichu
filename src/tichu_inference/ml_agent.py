@@ -278,6 +278,15 @@ class MLAgent(Agent):
         self._schupfen = schupfen
         self._tichu_call = tichu_call
         self._grand_call = grand_call
+        # One-slot memo of the last forward, keyed by the identity of the state
+        # it was run on (PrivateState is frozen, so identity implies equality).
+        # It exists for the diagnostic score methods: a decision tape asks the
+        # agent to explain the move it JUST made, and without this every taped
+        # decision pays a second forward — and a taped decision whose forward
+        # raised would re-raise out of the caller instead of being recorded.
+        # Holds the state object so its id() cannot be recycled while cached.
+        self._forward_memo: tuple | None = None
+        self._schupfen_memo: tuple | None = None
         self._rule_fallback = RuleAgent()
         self._rng = fallback_rng or random.Random(0)
         self._partner_trick_guard = bool(partner_trick_guard)
@@ -416,8 +425,12 @@ class MLAgent(Agent):
         legal set's logits), sorted descending. Diagnostic only (decision tapes
         / analysis) — NOT on the `act()` hot path. Unmapped actions get 0.0."""
         legal = list(legal_actions_for(private_state))
-        if not legal:
-            return []
+        if len(legal) < 2:
+            # Forced Decision (~39% of Play rows): the softmax over a one-element
+            # legal set is 1.0 whatever the logits say, and `act()` skips the
+            # forward on these — so running one here would be pure cost on the
+            # majority of taped rows, for a ranking with nothing to rank.
+            return [(a, 1.0) for a in legal]
         play_logits = self._play_logits(private_state)
         idxs = [_combination_to_action_index(a) for a in legal]
         scored = [
@@ -464,8 +477,7 @@ class MLAgent(Agent):
         Schupfen Network's three 56-way heads — {next/partner/previous: [(card, p)]}."""
         if self._schupfen is None:
             return {}
-        features, skill = self._inputs(private_state)
-        heads = self._schupfen(features, skill)
+        heads = self._schupfen_forward(private_state)
         hand = list(private_state.hand)
         out: dict[str, list[tuple]] = {}
         for name, head in zip(("next", "partner", "previous"), heads):
@@ -504,8 +516,7 @@ class MLAgent(Agent):
     # ------------------------------------------------------------
 
     def _act_schupfen(self, private_state: PrivateState) -> ConcreteAction:
-        features, skill = self._inputs(private_state)
-        h_next, h_partner, h_prev = self._schupfen(features, skill)
+        h_next, h_partner, h_prev = self._schupfen_forward(private_state)
         rows = [
             h_next[0].detach().cpu().numpy(),
             h_partner[0].detach().cpu().numpy(),
@@ -545,13 +556,31 @@ class MLAgent(Agent):
 
     def _policy_forward(self, private_state: PrivateState,
                         *, is_play_decision: bool = True) -> dict:
+        key = (id(private_state), is_play_decision)
+        memo = self._forward_memo
+        if memo is not None and memo[0] == key:
+            return memo[2]
         features, skill = self._inputs(private_state)
         if self._uses_legal_mask:
             mask = _trunk_legal_mask(
                 private_state, is_play_decision=is_play_decision,
             )
-            return self._module(features, skill, mask)
-        return self._module(features, skill)
+            out = self._module(features, skill, mask)
+        else:
+            out = self._module(features, skill)
+        self._forward_memo = (key, private_state, out)
+        return out
+
+    def _schupfen_forward(self, private_state: PrivateState):
+        """The Schupfen Network's three heads, memoised like `_policy_forward`."""
+        key = id(private_state)
+        memo = self._schupfen_memo
+        if memo is not None and memo[0] == key:
+            return memo[2]
+        features, skill = self._inputs(private_state)
+        heads = self._schupfen(features, skill)
+        self._schupfen_memo = (key, private_state, heads)
+        return heads
 
     def _run(self, module, private_state: PrivateState) -> np.ndarray:
         features, skill = self._inputs(private_state)
