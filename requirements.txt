@@ -43,7 +43,7 @@ packaging==26.2
     #   wheel
 pandas==3.0.3
     # via seaborn
-pillow==12.2.0
+pillow==12.3.0
     # via matplotlib
 pip-tools==7.5.3
     # via -r requirements.in
