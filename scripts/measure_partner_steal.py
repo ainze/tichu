@@ -3,8 +3,8 @@ r"""Measure the partner-overtake blunder head-to-head across agents.
 Profiles `partner_steal_rate` (following a winning partner with a legal beat, the
 fraction OVERTOOK instead of ceding) and `partner_steal_caller_rate` (the subset
 where the partner is a Tichu/Grand caller — the sharp blunder). Runs each agent
-guard-on and guard-off, because the shipped `suppress_partner_trick_bomb` guard
-(ml_agent.py) only covers BOMBs — so the guard-on vs guard-off gap isolates the
+guard-on and guard-off, because the (since retired, 2026-09-27) partner-trick guard
+(`heuristic_probes.partner_trick_guard`) only covers BOMBs — so the guard-on vs guard-off gap isolates the
 bomb blunder, and the guard-on `partner_steal_rate` is the *non-bomb* overtake the
 guard never touches.
 
@@ -26,6 +26,7 @@ def _ml_builder(export_dir: str, *, skill_decile: int, guard: bool):
     """Preload one MLAgent from an export dir; the zero-arg builder returns the
     shared instance (act() is seat-agnostic, safe for serial self-play)."""
     from tichu_inference.ml_agent import MLAgent
+    from tichu_training.search.heuristic_probes import PartnerTrickGuardAgent
 
     d = Path(export_dir)
 
@@ -39,8 +40,9 @@ def _ml_builder(export_dir: str, *, skill_decile: int, guard: bool):
         schupfen_path=opt("schupfen.pt"),
         tichu_call_path=opt("tichu_call.pt"),
         grand_call_path=opt("grand_tichu_call.pt"),
-        partner_trick_guard=guard,
     )
+    if guard:
+        agent = PartnerTrickGuardAgent.from_policy(agent)
     return lambda: agent
 
 

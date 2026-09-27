@@ -82,9 +82,7 @@ def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
     second net set that plays ALL FOUR seats of every branch continuation —
     including a replay of the chosen action, because the v2 parity trick
     (chosen return := trunk result) is only valid when field == trunk policy.
-    The field agent keeps the partner-trick guard ON (the greedy gate scores
-    deployed `MLAgent` semantics, and the field must be the same object the
-    gate promotes). The trunk game and the branch RANKING stay the learner's:
+    The trunk game and the branch RANKING stay the learner's:
     states are where the learner actually goes, `old_logp` is the learner's
     logprob (containment unchanged). `None` = v2 behavior, byte-identical.
 
@@ -100,7 +98,6 @@ def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
         tichu_call=models["tichu"],
         grand_call=models["grand"],
         skill_decile=skill_decile,
-        partner_trick_guard=False,  # train the NET; the guard rides at serving only
     )
     agents = [agent] * 4
     if reference_models is not None:
@@ -110,7 +107,6 @@ def collect_vine_rows(models: dict, positions, *, decisions_per_game: int,
             tichu_call=reference_models["tichu"],
             grand_call=reference_models["grand"],
             skill_decile=skill_decile,
-            partner_trick_guard=True,  # deployed semantics — mirror the gate
         )
         field_agents = [ref_agent] * 4
     else:

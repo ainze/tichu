@@ -34,6 +34,11 @@ The five probes, mapped to the surviving high-confidence findings:
   forced_keep_partner_trick -- "don't bomb a trick your own team already wins": when the
                          master would bomb while the PARTNER holds the trick top, force a
                          Pass (the bomb would only steal a lead from the partner).
+  partner_trick_guard  -- the RETIRED served guard (`MLAgent`, 2026-06-09 .. 2026-09-27):
+                         forced_keep_partner_trick plus the carve-out that a caller
+                         going OUT on the bomb keeps it. Removed from serving after the
+                         v7 A/B (`scripts/ab_partner_trick_guard.py`) found it worth
+                         +0.04/Round [-0.05, +0.16]; kept here so that A/B reproduces.
   forced_dragon_lastout-- Dragon trick-give: override the master's target with the simple
                          expert heuristic — give to the opponent expected to go out LAST
                          (the one holding more cards; tie-break to the player on the right,
@@ -215,6 +220,43 @@ class ForcedKeepPartnerTrickAgent(_MasterProbe):
         if private_state.public.trick.leader == partner and any(
             isinstance(a, Pass) for a in legal_actions_for(private_state)
         ):
+            self.interventions += 1
+            return PASS
+        return action
+
+
+def suppress_partner_trick_bomb(private_state, action, legal) -> bool:
+    """The retired served guard's trigger: True iff `action` bombs a trick the
+    agent's own partner already tops and a Pass is legal. Carve-out: a
+    (Grand-)Tichu caller going OUT on that bomb keeps it."""
+    if not isinstance(action, _BOMB_TYPES):
+        return False
+    pub = private_state.public
+    if pub.pending_decision is not None:
+        return False
+    partner = (private_state.player + 2) % 4
+    if pub.trick.leader != partner:
+        return False
+    if not any(isinstance(a, Pass) for a in legal):
+        return False
+    is_caller = (
+        private_state.player in pub.tichu_callers
+        or private_state.player in pub.grand_tichu_callers
+    )
+    if is_caller and len(_cards_in(action)) == len(private_state.hand):
+        return False
+    return True
+
+
+@register_agent("partner_trick_guard")
+class PartnerTrickGuardAgent(_MasterProbe):
+    """The retired served guard, as a probe: the master with every bomb over the
+    partner's winning trick turned into a Pass (caller-going-out carve-out kept)."""
+
+    def act(self, private_state):
+        action = self._policy.act(private_state)
+        if suppress_partner_trick_bomb(private_state, action,
+                                       list(legal_actions_for(private_state))):
             self.interventions += 1
             return PASS
         return action

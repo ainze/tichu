@@ -33,7 +33,7 @@ POOL = "C:/workbench/tichu/data/full_position_pool_s0_n20000.parquet"
 def main(n_deals: int = 20, k: int = 5, nmax: int = 30, max_dec: int = 100,
          seed: int = 0) -> None:
     from tichu_engine.legality import legal_actions_for
-    from tichu_inference.ml_agent import suppress_partner_trick_bomb
+    from tichu_training.search.heuristic_probes import suppress_partner_trick_bomb
     from tichu_eval.full_position_pool import load_full_position_pool
     from tichu_training.ppo.pmcpa import build_export_agent
     from tichu_training.search.blunder_miner import playout_from, record_round, team_relative

@@ -120,7 +120,7 @@ class piKLAgent(Agent):
 
 def build_pikl_agent(*, export_dir, skill_decile: int = 9, worlds: int = 20,
                      k: int = 8, lam: float = 0.1, q_scale: float = 22.0,
-                     seed: int = 0, partner_trick_guard: bool = True) -> "piKLAgent":
+                     seed: int = 0) -> "piKLAgent":
     """Module-level builder (a picklable Pool target, like the pMCPA builders) that
     wires a real MLAgent over the iter_06225 TorchScript export as the BC Anchor τ
     and serves it through piKL. The field defaults to this same anchor on all four
@@ -132,7 +132,6 @@ def build_pikl_agent(*, export_dir, skill_decile: int = 9, worlds: int = 20,
         d / "policy.pt", skill_decile=skill_decile,
         schupfen_path=d / "schupfen.pt", tichu_call_path=d / "tichu_call.pt",
         grand_call_path=d / "grand_tichu_call.pt",
-        partner_trick_guard=partner_trick_guard,
     )
     return piKLAgent(anchor, worlds=worlds, k=k, lam=lam, q_scale=q_scale, seed=seed)
 

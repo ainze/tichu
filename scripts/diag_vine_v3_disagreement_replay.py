@@ -65,11 +65,14 @@ def _load_nets(config, state_dicts):
 
 def _agent(models, *, skill_decile, guard):
     from tichu_inference.ml_agent import MLAgent
-    return MLAgent.from_loaded(
+    from tichu_training.search.heuristic_probes import PartnerTrickGuardAgent
+    agent = MLAgent.from_loaded(
         models["play"], schupfen=models["schupfen"], tichu_call=models["tichu"],
         grand_call=models["grand"], skill_decile=skill_decile,
-        partner_trick_guard=guard,
     )
+    # The partner-trick guard was retired from MLAgent (2026-09-27); the probe
+    # reproduces the guard-ON field this diagnosis was run with.
+    return PartnerTrickGuardAgent.from_policy(agent) if guard else agent
 
 
 def _boot_ci(x, iters=10_000, seed=0):

@@ -21,6 +21,8 @@ from tichu_training.search.heuristic_probes import (
     ForcedKeepPartnerTrickAgent,
     ForcedSplitAcesAgent,
     ForcedSupportTichuAgent,
+    PartnerTrickGuardAgent,
+    suppress_partner_trick_bomb,
 )
 
 
@@ -181,6 +183,51 @@ def test_keep_partner_trick_allows_bombing_an_opponent_trick():
     agent = ForcedKeepPartnerTrickAgent.from_policy(_Stub(BOMB_5S))
     assert agent.act(pv) is BOMB_5S
     assert agent.interventions == 0
+
+
+# --- partner_trick_guard (the retired served guard) --------------------------
+
+FIVES = {_card(Suit.JADE, 5), _card(Suit.SWORD, 5), _card(Suit.PAGODA, 5), _card(Suit.STAR, 5)}
+
+
+def _bomb_pv(*, leader, extra=frozenset(), tichu_callers=frozenset()):
+    hand = FIVES | set(extra)
+    pub = _following_public((len(hand), 5, 5, 5), leader=leader, top=Single(K_SWORD),
+                            tichu_callers=tichu_callers)
+    return _pv(0, hand, pub)
+
+
+def test_guard_suppresses_bomb_on_partners_trick():
+    pv = _bomb_pv(leader=2)
+    assert suppress_partner_trick_bomb(pv, BOMB_5S, legal_actions_for(pv)) is True
+
+
+def test_guard_allows_bombing_an_opponent_trick():
+    pv = _bomb_pv(leader=1)
+    assert suppress_partner_trick_bomb(pv, BOMB_5S, legal_actions_for(pv)) is False
+
+
+def test_guard_allows_non_bomb_actions():
+    pv = _bomb_pv(leader=2, extra={A_JADE})
+    assert suppress_partner_trick_bomb(pv, Single(A_JADE), legal_actions_for(pv)) is False
+
+
+def test_guard_carveout_lets_a_caller_go_out_on_the_bomb():
+    # Seat 0 called Tichu and the bomb is its whole hand: playing it goes out.
+    pv = _bomb_pv(leader=2, tichu_callers=frozenset({0}))
+    assert suppress_partner_trick_bomb(pv, BOMB_5S, legal_actions_for(pv)) is False
+
+
+def test_guard_still_fires_for_a_caller_not_going_out():
+    pv = _bomb_pv(leader=2, extra={_card(Suit.JADE, 3)}, tichu_callers=frozenset({0}))
+    assert suppress_partner_trick_bomb(pv, BOMB_5S, legal_actions_for(pv)) is True
+
+
+def test_partner_trick_guard_probe_turns_the_bomb_into_a_pass():
+    pv = _bomb_pv(leader=2)
+    agent = PartnerTrickGuardAgent.from_policy(_Stub(BOMB_5S))
+    assert isinstance(agent.act(pv), Pass)
+    assert agent.interventions == 1
 
 
 # --- forced_dragon_lastout ---------------------------------------------------

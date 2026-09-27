@@ -30,18 +30,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from tichu_engine.combinations import FourOfAKindBomb, StraightFlushBomb
 from tichu_engine.legality import (
-    PASS,
     ConcreteAction,
     DragonGive,
     DragonGivePending,
     MahjongWish,
     MahjongWishPending,
-    Pass,
     SchupfenPass,
     SchupfenPending,
-    _cards_in,
     legal_actions_for,
 )
 from tichu_engine.state import PrivateState
@@ -73,38 +69,6 @@ from tichu_training.featurizer import _combination_to_action_index
 log = logging.getLogger(__name__)
 
 _NEUTRAL_SKILL = 10  # the embedding's neutral / cold-start row
-
-_BOMB_TYPES = (FourOfAKindBomb, StraightFlushBomb)
-
-
-def suppress_partner_trick_bomb(private_state, action, legal) -> bool:
-    """Keep-partner-trick guard: True iff `action` bombs a trick the agent's own
-    partner already tops (the bomb would only steal the partner's lead) and a Pass
-    is legal. Carve-out: a (Grand-)Tichu caller going OUT on that bomb keeps it —
-    banking the call outweighs the stolen lead.
-
-    Shipped on logic + live observation per the 2026-06-08 probe arc
-    (`forced_keep_partner_trick`): the trigger fires ~3/200 deals, below what a
-    tournament CI can adjudicate, but the blunder was observed in real play and
-    passing is near-always correct in-trigger."""
-    if not isinstance(action, _BOMB_TYPES):
-        return False
-    pub = private_state.public
-    if pub.pending_decision is not None:
-        return False
-    partner = (private_state.player + 2) % 4
-    if pub.trick.leader != partner:
-        return False
-    if not any(isinstance(a, Pass) for a in legal):
-        return False
-    is_caller = (
-        private_state.player in pub.tichu_callers
-        or private_state.player in pub.grand_tichu_callers
-    )
-    if is_caller and len(_cards_in(action)) == len(private_state.hand):
-        return False
-    return True
-
 
 def load_policy_module(path: str | Path, *, featurizer=_DEFAULT_FEATURIZER):
     """Load an exported **policy** module, asserting featurizer + action-space versions.
@@ -158,7 +122,6 @@ class MLAgent(Agent):
         fallback_rng: random.Random | None = None,
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
-        partner_trick_guard: bool = True,
         bomb_preserving_resolver: bool = True,
         featurizer=_DEFAULT_FEATURIZER,
     ) -> None:
@@ -180,7 +143,6 @@ class MLAgent(Agent):
             fallback_rng=fallback_rng,
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
-            partner_trick_guard=partner_trick_guard,
             bomb_preserving_resolver=bomb_preserving_resolver,
         )
 
@@ -196,7 +158,6 @@ class MLAgent(Agent):
         fallback_rng: random.Random | None = None,
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
-        partner_trick_guard: bool = True,
         bomb_preserving_resolver: bool = True,
         featurizer=_DEFAULT_FEATURIZER,
         uses_legal_mask: bool | None = None,
@@ -226,7 +187,6 @@ class MLAgent(Agent):
             fallback_rng=fallback_rng,
             tichu_threshold=tichu_threshold,
             grand_threshold=grand_threshold,
-            partner_trick_guard=partner_trick_guard,
             bomb_preserving_resolver=bomb_preserving_resolver,
         )
         return self
@@ -243,7 +203,6 @@ class MLAgent(Agent):
         fallback_rng: random.Random | None,
         tichu_threshold: float = 0.5,
         grand_threshold: float = 0.5,
-        partner_trick_guard: bool = True,
         bomb_preserving_resolver: bool = True,
     ) -> None:
         # Skill Embedding input fed to every network at inference. 0..9 are the
@@ -289,7 +248,6 @@ class MLAgent(Agent):
         self._schupfen_memo: tuple | None = None
         self._rule_fallback = RuleAgent()
         self._rng = fallback_rng or random.Random(0)
-        self._partner_trick_guard = bool(partner_trick_guard)
         self._bomb_preserving_resolver = bool(bomb_preserving_resolver)
         self.last_fallback_used: bool = False
 
@@ -384,9 +342,8 @@ class MLAgent(Agent):
             # Forced Decision — the engine leaves exactly one action (almost always
             # a Pass the agent cannot beat; occasionally a last card or the only
             # wish-fulfilling combination). Ranking a one-element set can only
-            # return that element, and the partner-trick guard needs a legal Pass
-            # *alongside* a bomb, so it can never fire here either: the result is
-            # identical, the forward is pure cost. ~38-39% of Play Decisions are
+            # return that element: the result is identical, the forward is pure
+            # cost. ~38-39% of Play Decisions are
             # forced (measured on both the human corpus and self-play, 2026-07-31)
             # and act() costs ~2.0 ms against ~17 us for the enumeration alone.
             return legal[0]
@@ -397,12 +354,7 @@ class MLAgent(Agent):
         ranked = _rank_legal_by_logits(legal, play_logits, self._resolution_cost(private_state))
         if not ranked:
             raise RuntimeError("no legal action mapped into the action space")
-        choice = ranked[0]
-        if self._partner_trick_guard and suppress_partner_trick_bomb(
-            private_state, choice, legal
-        ):
-            return PASS
-        return choice
+        return ranked[0]
 
     def _rank_play_actions(self, private_state: PrivateState) -> list[ConcreteAction]:
         legal = list(legal_actions_for(private_state))

@@ -34,7 +34,7 @@ def _first_view(models, seat=0):
     agent = MLAgent.from_loaded(
         models["play"], schupfen=models["schupfen"],
         tichu_call=models["tichu"], grand_call=models["grand"],
-        skill_decile=9, partner_trick_guard=False,
+        skill_decile=9,
     )
     positions = generate_full_position_pool(seed=31, n=1)
     _, decisions = record_round([agent] * 4, positions[0])
@@ -93,7 +93,7 @@ def test_record_from_records_only_the_actor():
     agent = MLAgent.from_loaded(
         models["play"], schupfen=models["schupfen"],
         tichu_call=models["tichu"], grand_call=models["grand"],
-        skill_decile=9, partner_trick_guard=False,
+        skill_decile=9,
     )
     view = _first_view(models, seat=0)
     world = sample_determinized_world(view, None, random.Random(1))

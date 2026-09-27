@@ -77,7 +77,6 @@ def main() -> int:
     agent = MLAgent.from_loaded(
         models["play"], schupfen=models["schupfen"], tichu_call=models["tichu"],
         grand_call=models["grand"], skill_decile=skill_decile,
-        partner_trick_guard=False,  # vine trunk semantics
     )
     agents = [agent] * 4
 

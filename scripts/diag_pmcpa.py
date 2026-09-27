@@ -59,7 +59,7 @@ def main(argv=None) -> int:
     play_o = models["play"]
     agent_o = MLAgent.from_loaded(
         play_o, schupfen=models["schupfen"], tichu_call=models["tichu"],
-        grand_call=models["grand"], skill_decile=9, partner_trick_guard=False,
+        grand_call=models["grand"], skill_decile=9,
     )
     pool = load_full_position_pool(Path(args.pool))
 
