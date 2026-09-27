@@ -161,9 +161,6 @@ def test_reference_field_identical_to_learner_reproduces_v2_exactly():
     # With reference weights == learner weights the chosen replay retraces the
     # deterministic trunk continuation (the miner parity invariant), so v3 must
     # be byte-equal to v2 — the reference split changes nothing but the field.
-    # (Caveat pinned by seed: the field agent carries the partner-trick guard ON
-    # — deployed/gate semantics — so exact parity holds only when the guard
-    # never fires in these games, which these seeded rounds satisfy.)
     models = _models()
     reference = _models()  # same seed => identical weights, separate modules
     base = _rows(models)

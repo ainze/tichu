@@ -181,12 +181,10 @@ class PMCPAAgent(Agent):
                  decisions_per_world: int, branches: int, steps: int, lr: float,
                  kl_coef: float, clip_eps: float = 0.1, belief=None,
                  emit_branches: bool = False, min_abs_advantage: float = 0.0,
-                 adapt_trunk: bool = False, seed: int = 0,
-                 partner_trick_guard: bool = True) -> None:
+                 adapt_trunk: bool = False, seed: int = 0) -> None:
         self._models = models
         self._play_o = models["play"]
         self._skill_decile = int(skill_decile)
-        self._partner_trick_guard = bool(partner_trick_guard)
         self._cfg = dict(
             worlds=worlds, decisions_per_world=decisions_per_world, branches=branches,
             steps=steps, lr=lr, kl_coef=kl_coef, clip_eps=clip_eps, belief=belief,
@@ -209,7 +207,6 @@ class PMCPAAgent(Agent):
                 play_a, schupfen=self._models["schupfen"],
                 tichu_call=self._models["tichu"], grand_call=self._models["grand"],
                 skill_decile=self._skill_decile,
-                partner_trick_guard=self._partner_trick_guard,
             )
         return self._seat_agent[seat]
 
@@ -280,7 +277,6 @@ def collect_pmcpa_rows(models: dict, root_view, *, worlds: int,
                        seed: int, asked_tichu=frozenset(), initial_scores=None,
                        belief=None, emit_branches: bool = False,
                        min_abs_advantage: float = 0.0,
-                       partner_trick_guard: bool = True,
                        worlds_override=None) -> list[dict]:
     """Sample `worlds` Determinized Worlds from `root_view` (the actor's mid-Round
     PrivateState), play each out with the frozen `models` on all seats, and return
@@ -296,7 +292,7 @@ def collect_pmcpa_rows(models: dict, root_view, *, worlds: int,
     agent = MLAgent.from_loaded(
         models["play"], schupfen=models["schupfen"],
         tichu_call=models["tichu"], grand_call=models["grand"],
-        skill_decile=skill_decile, partner_trick_guard=partner_trick_guard,
+        skill_decile=skill_decile,
     )
     agents = [agent] * 4
     rng = random.Random(seed)

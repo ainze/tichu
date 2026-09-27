@@ -105,8 +105,8 @@ class ForcedYieldPartnerCallerAgent(_MasterProbe):
     """contest->pass: where the master would beat (non-bomb) a winning partner who has
     CALLED, force a Pass — cede the trick to the calling partner. Measures the EV cost of
     the observed 'overtake a calling, winning partner' blunder (the non-bomb case the
-    shipped `suppress_partner_trick_bomb` guard does not cover). Bombs are left alone — the
-    bomb-guard is the separate lever for those."""
+    `partner_trick_guard` bomb guard, served until 2026-09-27, does not cover). Bombs
+    are left alone — the bomb-guard is the separate lever for those."""
 
     def act(self, private_state):
         action = self._policy.act(private_state)

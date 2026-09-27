@@ -141,9 +141,8 @@ class _FixedCall:
         return torch.tensor([[0.0, self._call_logit]]).repeat(n, 1)
 
 
-def _bomb_state(*, leader, hand_extra=frozenset(), tichu_callers=frozenset(),
-                grand_tichu_callers=frozenset()):
-    """Seat 0 follows a King single with a 4x5 bomb in hand (+ hand_extra).
+def _bomb_state(*, leader):
+    """Seat 0 follows a King single holding only a 4x5 bomb.
     `leader` is who holds the trick top: 2 = partner, 1 = opponent."""
     from tichu_engine.cards import Card, Suit
     from tichu_engine.combinations import FourOfAKindBomb, Single
@@ -153,11 +152,10 @@ def _bomb_state(*, leader, hand_extra=frozenset(), tichu_callers=frozenset(),
     bomb = FourOfAKindBomb(Card(suit=Suit.JADE, rank=5), Card(suit=Suit.SWORD, rank=5),
                            Card(suit=Suit.PAGODA, rank=5), Card(suit=Suit.STAR, rank=5))
     top = Single(Card(suit=Suit.SWORD, rank=13))
-    hand = frozenset(_cards_in(bomb)) | frozenset(hand_extra)
+    hand = frozenset(_cards_in(bomb))
     trick = Trick(plays=(Play(player=leader, combination=top),), leader=leader)
     pub = PublicState(
         current_player=0, hand_sizes=(len(hand), 5, 5, 5), scores=(0, 0), trick=trick,
-        tichu_callers=tichu_callers, grand_tichu_callers=grand_tichu_callers,
     )
     return PrivateState(player=0, hand=hand, public=pub), bomb
 
@@ -290,49 +288,10 @@ def test_resolver_never_overrides_the_networks_intent_choice(tmp_path, monkeypat
     assert agent.rank_actions(pv)[0] == Single(jade_five)
 
 
-def test_guard_suppresses_bomb_on_partners_trick():
-    from tichu_inference.ml_agent import suppress_partner_trick_bomb
-    pv, bomb = _bomb_state(leader=2)
-    assert suppress_partner_trick_bomb(pv, bomb, legal_actions_for(pv)) is True
-
-
-def test_guard_allows_bombing_an_opponent_trick():
-    from tichu_inference.ml_agent import suppress_partner_trick_bomb
-    pv, bomb = _bomb_state(leader=1)
-    assert suppress_partner_trick_bomb(pv, bomb, legal_actions_for(pv)) is False
-
-
-def test_guard_allows_non_bomb_actions():
-    from tichu_engine.cards import Card, Suit
-    from tichu_engine.combinations import Single
-    from tichu_inference.ml_agent import suppress_partner_trick_bomb
-    ace = Card(suit=Suit.JADE, rank=14)
-    pv, _ = _bomb_state(leader=2, hand_extra={ace})
-    assert suppress_partner_trick_bomb(pv, Single(ace), legal_actions_for(pv)) is False
-
-
-def test_guard_carveout_lets_a_caller_go_out_on_the_bomb():
-    # Seat 0 called Tichu and the bomb is its whole hand: playing it goes out and
-    # banks the call — the one justified bomb over the partner's top.
-    from tichu_inference.ml_agent import suppress_partner_trick_bomb
-    pv, bomb = _bomb_state(leader=2, tichu_callers=frozenset({0}))
-    assert suppress_partner_trick_bomb(pv, bomb, legal_actions_for(pv)) is False
-
-
-def test_guard_still_fires_for_a_caller_not_going_out():
-    # Caller, but the bomb leaves a card behind -> no go-out, guard still applies.
-    from tichu_engine.cards import Card, Suit
-    from tichu_inference.ml_agent import suppress_partner_trick_bomb
-    pv, bomb = _bomb_state(leader=2, tichu_callers=frozenset({0}),
-                           hand_extra={Card(suit=Suit.JADE, rank=3)})
-    assert suppress_partner_trick_bomb(pv, bomb, legal_actions_for(pv)) is True
-
-
-def test_act_applies_partner_trick_guard(tmp_path, monkeypatch):
-    # Wire-through: with the policy ranking the bomb first, act() must return Pass
-    # when the partner holds the trick top — and the bomb when the guard is off.
+def test_act_plays_a_top_ranked_bomb_over_partners_trick(tmp_path, monkeypatch):
+    # The served partner-trick guard is retired (2026-09-27, v7 A/B +0.04/Round):
+    # act() returns the network's top choice even when it bombs the partner.
     import tichu_inference.ml_agent as ml
-    from tichu_engine.legality import Pass
     from tichu_training.action_space import ACTION_SPACE_SIZE
     from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
 
@@ -344,8 +303,7 @@ def test_act_applies_partner_trick_guard(tmp_path, monkeypatch):
         return sorted(legal, key=lambda a: 0 if a == bomb else 1)
     monkeypatch.setattr(ml, "_rank_legal_by_logits", bomb_first)
 
-    assert isinstance(MLAgent(artifact).act(pv), Pass)
-    assert MLAgent(artifact, partner_trick_guard=False).act(pv) == bomb
+    assert MLAgent(artifact).act(pv) == bomb
 
 
 def test_call_threshold_controls_should_call(tmp_path):
