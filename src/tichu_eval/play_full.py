@@ -17,8 +17,15 @@ from typing import NamedTuple, Sequence
 
 from tichu_engine.combinations import FourOfAKindBomb, StraightFlushBomb
 from tichu_engine.engine import step
-from tichu_engine.legality import Pass, legal_actions
-from tichu_engine.state import GameState, PublicState, Trick
+from tichu_engine.legality import Pass, _cards_in, legal_actions
+from tichu_engine.state import (
+    DragonGivePending,
+    GameState,
+    MahjongWishPending,
+    PublicState,
+    SchupfenPending,
+    Trick,
+)
 from tichu_ml.agent import Agent
 
 
@@ -82,6 +89,7 @@ def play_full_round(
     collect_telemetry: bool = False,
     observer=None,
     state_observer=None,
+    decision_observer=None,
 ) -> FullRoundResult:
     """`observer`, if given, is called `observer(seat, private_state, action)` at
     every Play Decision (pending_decision is None) right after the agent chooses,
@@ -91,12 +99,20 @@ def play_full_round(
     `state_observer`, if given, is called `state_observer(seat, game_state, action)`
     at the same point with the full **GameState** (all four hands) — the
     perfect-information hook the Perfect-Info Critic collector needs (ADR-0033).
-    `game_state.private_view(seat)` reproduces what `observer` sees."""
+    `game_state.private_view(seat)` reproduces what `observer` sees.
+
+    `decision_observer`, if given, is called `decision_observer(seat, kind,
+    game_state, action)` for **every one of the 6 Decisions** — `kind` is one of
+    `DECISION_KINDS` — with the full GameState the Decision was taken in and the
+    chosen Action (a bool for the two Calls). The Grand-Tichu Call reports the
+    synthetic `(8,8,8,8)` state it is asked on; the Tichu Call reports the state of
+    the Play it is attached to. The Behavioral Drift Benchmark's recorder hook;
+    pure side-channel."""
     if len(agents) != 4:
         raise ValueError(f"expected 4 agents (one per seat), got {len(agents)}")
     initial_scores = start_state.public.scores
 
-    grand_callers = _ask_grand(agents, grand_prefixes)
+    grand_callers = _ask_grand(agents, grand_prefixes, decision_observer)
     tichu_callers: set[int] = set()
     state = _with_callers(start_state, grand=grand_callers)
 
@@ -191,6 +207,10 @@ def play_full_round(
                     partner_steal_events[current] += 1
                 if steal_caller:
                     partner_steal_caller_events[current] += 1
+        if decision_observer is not None:
+            decision_observer(
+                current, _decision_kind(state.public.pending_decision), state, action
+            )
         if observer is not None and state.public.pending_decision is None:
             observer(current, private, action)
         if state_observer is not None and state.public.pending_decision is None:
@@ -204,9 +224,21 @@ def play_full_round(
             and current not in grand_callers
         ):
             asked_tichu.add(current)
-            if _calls(agents[current], private, "tichu"):
+            called = _calls(agents[current], private, "tichu")
+            if decision_observer is not None:
+                decision_observer(current, "tichu", state, called)
+            if called:
                 tichu_callers.add(current)
                 state = _with_callers(state, tichu=frozenset(tichu_callers))
+        # Does this Play empty the actor's Hand? Needed because the step that
+        # ends the Round also runs `_finalise_round`, which resets `out_order` —
+        # so the Round-ending finisher never appears in any post-step state.
+        goes_out = (
+            collect_telemetry
+            and state.public.pending_decision is None
+            and not isinstance(action, Pass)
+            and len(state.hands[current]) == len(_cards_in(action))
+        )
         state, _, done, info = step(state, action)
         if first_out is None and state.public.out_order:
             first_out = state.public.out_order[0]
@@ -215,9 +247,13 @@ def play_full_round(
                 tricks_won[info["trick_winner"]] += 1
                 tricks_total += 1
             # out_order is reset to () by _finalise_round; keep the last
-            # non-empty value so the slam check survives round end.
+            # non-empty value, and append the finisher whose Play ended the
+            # Round (absent from every post-step state), so a Slam records both
+            # partners and a played-out Round all three finishers.
             if state.public.out_order:
                 last_out_order = state.public.out_order
+            elif goes_out and current not in last_out_order:
+                last_out_order = last_out_order + (current,)
     else:
         raise RuntimeError(
             f"play_full_round exceeded {_MAX_STEPS} steps without resolving — "
@@ -251,7 +287,7 @@ def play_full_round(
 
 
 def _ask_grand(
-    agents: Sequence[Agent], grand_prefixes: Sequence[frozenset]
+    agents: Sequence[Agent], grand_prefixes: Sequence[frozenset], decision_observer=None
 ) -> frozenset[int]:
     """Ask each seat for a Grand-Tichu Call on its synthetic (8,8,8,8) deal-time
     state, independently (no prior callers visible — matching training)."""
@@ -267,9 +303,29 @@ def _ask_grand(
     )
     callers: set[int] = set()
     for seat in range(4):
-        if _calls(agents[seat], grand_state.private_view(seat), "grand"):
+        called = _calls(agents[seat], grand_state.private_view(seat), "grand")
+        if decision_observer is not None:
+            decision_observer(seat, "grand", grand_state, called)
+        if called:
             callers.add(seat)
     return frozenset(callers)
+
+
+# The 6 Decisions, as `decision_observer` names them.
+DECISION_KINDS = ("grand", "schupfen", "tichu", "play", "wish", "dragon")
+
+
+def _decision_kind(pending) -> str:
+    """Which Decision an `act` call answers, from the pending decision it faced."""
+    if pending is None:
+        return "play"
+    if isinstance(pending, SchupfenPending):
+        return "schupfen"
+    if isinstance(pending, MahjongWishPending):
+        return "wish"
+    if isinstance(pending, DragonGivePending):
+        return "dragon"
+    raise TypeError(f"unknown pending decision {pending!r}")
 
 
 def _calls(agent: Agent, private_state, kind: str) -> bool:

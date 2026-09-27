@@ -55,7 +55,8 @@ call shards (positives only); bombs detected structurally from the play shard
 - `trick_win` / `out_first` are degenerate (≡0.25) in self-play and need
   head-to-head profiling; `slam_rate` has a capture bug (out_order reset by
   `_finalise_round` before the round-end step is observed). Neither affects the
-  call/bomb conclusions above.
+  call/bomb conclusions above. *(Capture bug fixed 2026-09-26, alongside the
+  Behavioral Drift Benchmark.)*
 
 ## Bearing on the plan
 

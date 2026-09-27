@@ -182,3 +182,21 @@ def test_profile_agent_self_play_accumulates_all_seat_rounds():
     assert p.seat_rounds == 5 * 4                 # 4 seats per Round
     assert 0.0 <= p.trick_win_rate <= 1.0
     assert p.tricks_available > 0
+
+
+def test_telemetry_out_order_keeps_the_round_ending_finisher():
+    # Regression: `_finalise_round` resets `out_order` in the SAME step that ends
+    # the Round, so the telemetry used to drop the last finisher — a Slam's out
+    # order held one seat and `slam_rate` read 0 on every run. A Slam must record
+    # both partners; any other played-out Round records three finishers.
+    slams = 0
+    for pos in generate_full_position_pool(seed=0, n=60):
+        agents = tuple(RuleAgent() for _ in range(4))
+        result = play_full_round(agents, pos.state, pos.grand_prefixes, collect_telemetry=True)
+        out = result.telemetry.out_order
+        if sorted(result.total) == [0, 200]:   # no calls here, so ±200 alone is a Slam
+            slams += 1
+            assert len(out) == 2 and out[0] % 2 == out[1] % 2
+        else:
+            assert len(out) == 3
+    assert slams > 0
