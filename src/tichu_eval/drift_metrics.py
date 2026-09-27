@@ -343,6 +343,17 @@ def _phoenix_use(log) -> pd.DataFrame:
     return _distribution(p, pd.Series(how, index=p.index))
 
 
+def _phoenix_combination_when_legal(log) -> pd.DataFrame:
+    """Of non-forced Play Decisions where a Phoenix Combination was legal, the
+    fraction that played one — the rate the `phoenix_in_combination` lever moves
+    (`phoenix_use` is conditioned on playing the Phoenix at all)."""
+    p = _subject_plays(log)
+    if "phoenix_combo_legal" not in p:     # a log recorded before the field existed
+        return _empty()
+    p = p[_flag(p, "phoenix_combo_legal")]
+    return _tally(p, _const(p, "all"), _flag(p, "plays_phoenix") & (p.action != "single"))
+
+
 def _dragon_play(log) -> pd.DataFrame:
     p = _subject(log, "play")
     p = p[_flag(p, "plays_dragon")]
@@ -444,6 +455,8 @@ METRICS: list[Metric] = [
            conditional=False),
     Metric("bomb_unplayed", _E, "Seat-Rounds holding a Bomb that never play one.", _bomb_unplayed),
     Metric("phoenix_use", _E, "How the Phoenix is played.", _phoenix_use),
+    Metric("phoenix_combination_when_legal", _E,
+           "Plays a Phoenix Combination when one is legal.", _phoenix_combination_when_legal),
     Metric("dragon_play", _E, "When the Dragon is played.", _dragon_play),
     Metric("wish_rank", _F, "Wished rank (none = declined).", _wish_rank),
     Metric("wish_gave_opponent", _F,

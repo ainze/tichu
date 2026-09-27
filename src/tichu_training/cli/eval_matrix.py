@@ -54,6 +54,8 @@ import tichu_training.search.heuristic_probes  # noqa: F401,E402
 # Registers the caller-pressure probes (forced_press_opp_caller, forced_yield_opp_caller)
 # — 2026-06-08 divergence-mined premise tests.
 import tichu_training.search.caller_pressure_probes  # noqa: F401,E402
+# Registers `ml_biased` (Behavior Sensitivity Probe, 2026-09-27).
+import tichu_training.search.behavior_bias_agent  # noqa: F401,E402
 
 
 log = logging.getLogger("eval_matrix")
