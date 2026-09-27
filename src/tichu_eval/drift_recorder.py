@@ -185,6 +185,11 @@ def _play_facts(seat: int, game_state, action) -> dict:
         "holds_bomb": bool(_bombs(hand)),
         "plays_dragon": DRAGON in cards,
         "plays_phoenix": PHOENIX in cards,
+        # A multi-card Combination containing the Phoenix is legal: the situation
+        # of the `phoenix_in_combination` Behavior Sensitivity lever.
+        "phoenix_combo_legal": any(
+            not isinstance(a, Pass) and len(c := _cards_in(a)) > 1 and PHOENIX in c
+            for a in legal),
         "action": _action_label(action),
     }
 

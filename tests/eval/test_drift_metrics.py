@@ -149,3 +149,17 @@ def test_every_metric_runs_on_a_real_log():
         counts = m.fn(log)
         assert list(counts.columns[:5]) == ["deal", "arm", "cell", "events", "opportunities"], m.name
         assert (counts.events <= counts.opportunities).all() or not m.conditional, m.name
+
+
+def test_phoenix_combination_when_legal_counts_only_decisions_where_one_was_legal():
+    log = _log(decisions=[
+        _play("bc", 0, holder="none", action="pair", plays_phoenix=True, phoenix_combo_legal=True),
+        _play("bc", 0, holder="none", action="single", plays_phoenix=True, phoenix_combo_legal=True),
+        _play("bc", 0, holder="none", action="pair", plays_phoenix=False, phoenix_combo_legal=True),
+        _play("bc", 0, holder="none", action="single", plays_phoenix=True,
+              phoenix_combo_legal=False),                                  # none legal: out
+        _play("bc", 0, holder="none", action="pair", plays_phoenix=True,
+              phoenix_combo_legal=True, forced=True),                      # forced: out
+    ])
+    got = _cells(metric("phoenix_combination_when_legal").fn(log))
+    assert got == {("bc", "all"): (1, 3)}

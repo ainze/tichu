@@ -1,0 +1,54 @@
+# Behavior Sensitivity Probe (pre-registered 2026-09-27):
+#   docs/notes/2026-09-27-behavior-sensitivity-preregistration.md
+#
+# Which of the champion's behaviors, nudged, change its strength? Each treatment
+# arm is the champion with δ added to one lever's target-action play logits (in
+# that lever's situation only); it and the unbiased reference arm each play the
+# champion's BC over the same Pool deals with Seat-Swap, paired deal-for-deal.
+#
+# ORDER OF OPERATIONS:
+#   1. py -3.14 -m tichu_training.cli.behavior_sensitivity calibrate --config configs/behavior_sensitivity_v7_iter15360.yaml
+#      (baseline logit gaps on a SEPARATE deal set -> freezes δ± per lever; no EV read)
+#   2. py -3.14 -m tichu_training.cli.behavior_sensitivity run --config ...
+#      (reference arm, δ = 0 identity check, 8 treatment arms; resumable)
+#   3. py -3.14 -m tichu_training.cli.behavior_sensitivity summarise --config ...
+#
+# ENV: this worktree's src MUST be first on PYTHONPATH (editable-install shadowing).
+
+champion:
+  name: champion-v7-iter15360
+  factory: ml
+  kwargs:
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\grand_tichu_call.pt
+    skill_decile: 9
+
+# The champion's own warm-start stack, as in the drift benchmark (NOT _bc_opponent.pt).
+opponent:
+  name: bc-v7-warmstart
+  factory: ml
+  kwargs:
+    checkpoint_path: C:\workbench\tichu\data\export\bc_v7_warmstart_cotrain_v7_gated\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\export\bc_v7_warmstart_cotrain_v7_gated\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\export\bc_v7_warmstart_cotrain_v7_gated\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\export\bc_v7_warmstart_cotrain_v7_gated\grand_tichu_call.pt
+    skill_decile: 9
+
+levers: [pass_vs_opponent, phoenix_in_combination, dog_lead, single_lead]
+
+pool_seed: 0
+n_deals: 20000            # per arm; x2 Seat-Swap halves = 40,000 Rounds per arm
+identity_check_deals: 200
+workers: 10
+n_boot: 10000             # primary ΔEV CI (Holm over 8 arms needs p resolution)
+floor: 200
+
+calibration:
+  pool_seed: 100000       # disjoint from the measured Pool [0, 20000)
+  n_deals: 2000
+  share: 0.10             # δ flips 10 pt of the lever's situations (first order)
+  cap: 8.0                # logits
+
+output_dir: C:\workbench\tichu\data\runs\behavior_sensitivity_v7_iter15360

@@ -126,3 +126,44 @@ def test_a_saved_log_reloads_to_the_same_summary(tmp_path):
     a = summarise(log, n_boot=50, seed=0, floor=0)
     b = summarise(back, n_boot=50, seed=0, floor=0)
     pd.testing.assert_frame_equal(a, b, check_dtype=False)
+
+
+# --- a single Fixed-Opponent arm (Behavior Sensitivity Probe) -----------------
+
+def test_a_single_arm_equals_the_subject_arm_of_the_full_run():
+    from tichu_eval.drift_arms import run_fixed_opponent_arm
+
+    positions = generate_full_position_pool(seed=0, n=8)
+    full = run_drift_arms(SUBJECT, BC, positions)
+    one = run_fixed_opponent_arm(SUBJECT, BC, positions, arm="treatment")
+    assert set(one.rounds.arm) == {"treatment"} and set(one.decisions.arm) == {"treatment"}
+    ref = full.rounds[full.rounds.arm == "subject"].drop(columns="arm").reset_index(drop=True)
+    pd.testing.assert_frame_equal(one.rounds.drop(columns="arm").reset_index(drop=True), ref)
+    ref_d = full.decisions[full.decisions.arm == "subject"].drop(columns="arm")
+    pd.testing.assert_frame_equal(one.decisions.drop(columns="arm").reset_index(drop=True),
+                                  ref_d.reset_index(drop=True))
+
+
+def test_two_single_arms_pair_into_a_summarisable_log():
+    # The probe's reference arm is the unbiased agent vs the opponent, relabelled
+    # "bc"; the treatment arm is "subject". Same agent in both => every Δ is 0.
+    from tichu_eval.drift_arms import DriftLog, run_fixed_opponent_arm
+    from tichu_eval.drift_metrics import metric, summarise
+
+    positions = generate_full_position_pool(seed=0, n=10)
+    ref = run_fixed_opponent_arm(SUBJECT, BC, positions, arm="bc")
+    treat = run_fixed_opponent_arm(SUBJECT, BC, positions, arm="subject")
+    log = DriftLog(decisions=pd.concat([ref.decisions, treat.decisions], ignore_index=True),
+                   rounds=pd.concat([ref.rounds, treat.rounds], ignore_index=True))
+    s = summarise(log, [metric("round_points")], n_boot=50, seed=0, floor=0)
+    d = s[(s.metric == "round_points") & (s.arm == "delta")]
+    assert (d.rate == 0).all()
+
+
+def test_a_single_arm_in_parallel_equals_serial():
+    from tichu_eval.drift_arms import run_fixed_opponent_arm
+
+    positions = generate_full_position_pool(seed=0, n=9)
+    serial = run_fixed_opponent_arm(SUBJECT, BC, positions, arm="x")
+    parallel = run_fixed_opponent_arm(SUBJECT, BC, positions, arm="x", workers=3)
+    pd.testing.assert_frame_equal(serial.rounds, parallel.rounds)

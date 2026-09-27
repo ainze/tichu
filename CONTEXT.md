@@ -443,6 +443,18 @@ _Avoid_: steal, taking over, overtrumping.
 The **Behavioral Drift Benchmark**'s acceptance gate: the BC arm played on two **disjoint** deal sets (Pool seeds `s` and `s + n` — a Pool deals `seed + i`, so seed `s + 1` would overlap almost entirely) and paired by deal index. Never the BC as its own Subject on shared deals: greedy agents make that the same games twice, every Δ exactly 0, which tests nothing. Passes only if ~95%+ of Δ CIs cover 0, zero metrics survive Benjamini–Hochberg, the Synthetic-Game win rate is 50% within CI, and the shared rates match **Behavioral Telemetry** on the same Rounds. Exists because a pairing or denominator bug across ~60 metrics would manufacture confident false drift (the gate-CI false-null history).
 _Avoid_: sanity run, null test (bare).
 
+**Behavior Sensitivity Probe**:
+The interventional follow-up to the **Behavioral Drift Benchmark**: which of a Subject's behaviors, nudged, change its strength? Each treatment arm is the Subject with a **Behavior Bias** on one **Lever**, at +δ or −δ; it and an unbiased reference arm each play the same opponents (the Subject's BC) over the same Pool deals with **Seat-Swap**, paired deal-for-deal, and are read through the drift benchmark's statistics (ΔEV per Round, Δ of the Lever's **Conditional Rate**, their ratio as the slope; Holm across arms). Never a regression of Round EV on the drift metrics — that measures deal quality. δ is frozen per Lever by a calibration pass over baseline logit gaps on a disjoint deal set, before any EV is read. Pre-registered 2026-09-27 ([note](docs/notes/2026-09-27-behavior-sensitivity-preregistration.md)); built as `tichu_eval.behavior_sensitivity` + `tichu_training.cli.behavior_sensitivity`.
+_Avoid_: sensitivity analysis (bare), ablation, heuristic probe (those force one prescribed action).
+
+**Behavior Bias**:
+δ added to the play logits of a **Lever**'s target actions, in that Lever's situation only, before the greedy argmax (`ml_biased`). Flips exactly the Decisions whose best target and best non-target action are within δ — the marginal ones — and leaves every other Decision the Subject's own. δ = 0 is the Subject exactly.
+_Avoid_: logit bias (bare), nudge, forced action.
+
+**Lever**:
+One behavior as a situation plus a target class of Play actions (e.g. "an opponent holds the Trick and a beat is legal" + Pass). The Lever's **Conditional Rate** is the drift metric cell the bias moves.
+_Avoid_: knob, metric (a metric measures; a Lever is what is perturbed).
+
 ### Phase 2 / search terms
 
 **Rule:** "search" used bare for the Phase-2 lever is banned — it is **PIMC** (the algorithm) producing a **Search Agent** (the strategy). All terms below are proposed in [ADR-0030](docs/adr/0030-phase-2-search-design.md); v1 is a latency-free offline strength experiment, not a served tier.

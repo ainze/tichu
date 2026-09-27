@@ -1,0 +1,28 @@
+pass_vs_opponent:
+  plus: 3.4792
+  minus: -4.2457
+  predicted_plus_share: 0.1
+  predicted_minus_share: 0.1
+  situations: 34550
+  baseline_rate: 0.2634
+phoenix_in_combination:
+  plus: 5.1497
+  minus: -8.0
+  predicted_plus_share: 0.1001
+  predicted_minus_share: 0.0807
+  situations: 5764
+  baseline_rate: 0.128
+dog_lead:
+  plus: 1.6002
+  minus: -1.5146
+  predicted_plus_share: 0.1001
+  predicted_minus_share: 0.1001
+  situations: 1779
+  baseline_rate: 0.5306
+single_lead:
+  plus: 3.0096
+  minus: -2.7368
+  predicted_plus_share: 0.1
+  predicted_minus_share: 0.1
+  situations: 21040
+  baseline_rate: 0.4622

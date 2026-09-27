@@ -69,8 +69,28 @@ def run_drift_arms(subject_builder, bc_builder, positions, *, workers: int = 1,
     stitched back in Position order, so the log equals the serial run's.
     `progress(n)`, if given, is called as each chunk of n Positions finishes.
     `subject_builder=None` plays the BC arm alone (the A/A Null Run's building block)."""
+    return _run(subject_builder, bc_builder, positions, bc_arm=True, workers=workers,
+                progress=progress)
+
+
+def run_fixed_opponent_arm(builder, opponent_builder, positions, *, arm: str,
+                           workers: int = 1, progress=None) -> DriftLog:
+    """One Fixed-Opponent arm alone: `builder`'s team vs `opponent_builder`'s over
+    `positions`, both Seat-Swap halves, labelled `arm` — `run_drift_arms`'s
+    subject arm without its BC arm. The Behavior Sensitivity Probe plays its
+    reference arm (the unbiased agent) once this way and pairs every treatment
+    arm against it; the BC arm's one-game shortcut does not apply there, because
+    the measured team is not the opponent."""
+    log = _run(builder, opponent_builder, positions, bc_arm=False, workers=workers,
+               progress=progress)
+    return DriftLog(decisions=log.decisions.assign(arm=arm), rounds=log.rounds.assign(arm=arm))
+
+
+def _run(subject_builder, bc_builder, positions, *, bc_arm: bool, workers: int,
+         progress) -> DriftLog:
     if workers <= 1:
-        decisions, rounds = _play_chunk(_build(subject_builder), bc_builder(), positions, 0)
+        decisions, rounds = _play_chunk(_build(subject_builder), bc_builder(), positions, 0,
+                                        bc_arm=bc_arm)
         if progress is not None:
             progress(len(positions))
         return _to_log(decisions, rounds)
@@ -78,7 +98,7 @@ def run_drift_arms(subject_builder, bc_builder, positions, *, workers: int = 1,
     bounds = _chunk_bounds(len(positions), workers, max_chunk=64)
     ctx = mp.get_context("spawn")
     with ctx.Pool(processes=workers, initializer=_worker_init,
-                  initargs=(subject_builder, bc_builder, positions)) as pool:
+                  initargs=(subject_builder, bc_builder, positions, bc_arm)) as pool:
         pending = [
             pool.apply_async(_worker_chunk, (start, end),
                              callback=None if progress is None
@@ -98,9 +118,9 @@ def _build(builder):
     return None if builder is None else builder()
 
 
-def _play_chunk(subject, bc, positions, first_deal: int):
+def _play_chunk(subject, bc, positions, first_deal: int, *, bc_arm: bool = True):
     """Both arms over a contiguous slice of the Pool; `subject=None` skips the
-    Subject arm."""
+    Subject arm, `bc_arm=False` the BC arm."""
     decisions: list[dict] = []
     rounds: list[dict] = []
     for i, pos in enumerate(positions):
@@ -110,6 +130,8 @@ def _play_chunk(subject, bc, positions, first_deal: int):
                 agents = tuple(subject if s in seats else bc for s in range(4))
                 log = record_round(agents, pos, deal=deal, half=half, subject_seats=seats)
                 _extend(decisions, rounds, log, arm="subject")
+        if not bc_arm:
+            continue
         bc_log = record_round((bc,) * 4, pos, deal=deal, half=0, subject_seats=_HALF_SEATS[0])
         _extend(decisions, rounds, bc_log, arm="bc")
         _extend(decisions, rounds, _relabel(bc_log, half=1), arm="bc")
@@ -124,7 +146,7 @@ def _to_log(decisions, rounds) -> DriftLog:
 _WORKER: dict = {}
 
 
-def _worker_init(subject_builder, bc_builder, positions) -> None:
+def _worker_init(subject_builder, bc_builder, positions, bc_arm: bool = True) -> None:
     # One torch thread per worker, so W processes don't each spin up W intra-op
     # threads (the Tournament's setting). Guarded: baseline agents have no torch.
     try:
@@ -133,11 +155,13 @@ def _worker_init(subject_builder, bc_builder, positions) -> None:
         torch.set_num_threads(1)
     except Exception:  # pragma: no cover
         pass
-    _WORKER.update(subject=_build(subject_builder), bc=bc_builder(), positions=positions)
+    _WORKER.update(subject=_build(subject_builder), bc=bc_builder(), positions=positions,
+                   bc_arm=bc_arm)
 
 
 def _worker_chunk(start: int, end: int):
-    return _play_chunk(_WORKER["subject"], _WORKER["bc"], _WORKER["positions"][start:end], start)
+    return _play_chunk(_WORKER["subject"], _WORKER["bc"], _WORKER["positions"][start:end], start,
+                       bc_arm=_WORKER["bc_arm"])
 
 
 def _relabel(log, *, half: int):

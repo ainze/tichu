@@ -310,3 +310,16 @@ def test_recorder_agrees_with_behavioral_telemetry_on_the_same_rounds():
     assert profile.slam_for == 2 * sum(r["slam_team"] is not None for r in rounds)
     assert profile.tichu_called == sum(len(r["tichu_callers"]) for r in rounds)
     assert profile.caller_pass_opportunities > 0 and profile.slam_for > 0
+
+
+def test_play_row_flags_a_legal_phoenix_combination():
+    from tichu_engine.cards import PHOENIX
+
+    # Leading with the Phoenix and a 9: Phoenix+9 is a legal Pair.
+    pos = _mid_trick(holder=0, current=2, current_hand={PHOENIX, _c(9), _c(3)})
+    empty = pos.state.public.__class__(**{**pos.state.public.__dict__, "trick": Trick.empty()})
+    pos.state = GameState(hands=pos.state.hands, public=empty)
+    assert _first_play_row(pos)["phoenix_combo_legal"]
+    # Following a lone King: only singles (and Pass) can be played.
+    row = _first_play_row(_mid_trick(holder=1, current=2, current_hand={PHOENIX, _c(9)}))
+    assert not row["phoenix_combo_legal"]
