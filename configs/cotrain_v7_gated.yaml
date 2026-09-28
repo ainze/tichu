@@ -107,8 +107,20 @@ promotion_gate:
       path: C:\workbench\tichu\data\widened_v7\cpfix3328_v7_opponent.pt
       require: true
       rollout: false
+    # REGRESSION GUARD vs this run's own iter-15360 champion (added at iter ~36000,
+    # after the 34304 promotion). The ratchet only ever checks the CURRENT champion,
+    # so a non-transitive cycle could promote a policy that has quietly lost ground to
+    # an older one; requiring a CI-clean win over 15360 closes that. Held out of the
+    # rollout for the same reason as cpfix3328. Its stream starts empty on resume
+    # (PromotionGate.load_state), so the first verdict waits for one full window.
+    # The bundle was rebuilt from export/iter_15360 (its .bin snapshots were pruned);
+    # verified bit-identical round-trip through export_opponent.
+    - name: iter15360
+      path: C:\workbench\tichu\data\runs\cotrain_v7_gated\iter15360_opponent.pt
+      require: true
+      rollout: false
 
-model:          { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256, use_legal_mask: true }
+model:         { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256, use_legal_mask: true }
 schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
 call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # tichu — residual (PR #64)
 grand_model:    { skill_dim: 64, hidden: 256 }                              # grand — non-residual (irreducible)
