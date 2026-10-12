@@ -451,6 +451,10 @@ _Avoid_: sensitivity analysis (bare), ablation, heuristic probe (those force one
 δ added to the play logits of a **Lever**'s target actions, in that Lever's situation only, before the greedy argmax (`ml_biased`). Flips exactly the Decisions whose best target and best non-target action are within δ — the marginal ones — and leaves every other Decision the Subject's own. δ = 0 is the Subject exactly.
 _Avoid_: logit bias (bare), nudge, forced action.
 
+**Shrink-and-Perturb Probe** (pre-registered 2026-10-10; CLOSED 2026-10-12: arm P v2 slid from −5.3 to −11.0 vs the source champion and never recovered, so training from random and reset-style levers are dead and the plateau is signal-limited):
+Tests whether the co-train plateau is set by **where training started** (a basin around the BC, or lost plasticity) or by the learning signal. It is the deciding experiment for training from random (tabula rasa), which only helps in the first case. Arm P blends the champion's play net toward a fresh init (`p ← α·p + β·p_fresh`) and re-trains with the co-train recipe, leash off, with the run's champion seeded as the unperturbed source. Arm C is the same run with the champion unperturbed (α=1). α is chosen by the **Blend Calibration** before training: the smallest α whose blend scores in [−15, −3] vs the source at iteration 0 (v7: α=0.9, −5.3; the uncalibrated α=0.6 scored −120.6 and confounded arm P v1). Read by a 40k-deal paired ship-check of each arm's final champion vs the source champion. [memo](docs/notes/2026-10-10-train-from-random-options-memo.md); built as `tichu_training.shrink_perturb` + `scripts/shrink_perturb_champion.py` + `scripts/calibrate_shrink_perturb.py`.
+_Avoid_: reset, re-init (a full reset is training from random; this keeps most of the weights).
+
 **Lever**:
 One behavior as a situation plus a target class of Play actions (e.g. "an opponent holds the Trick and a beat is legal" + Pass). The Lever's **Conditional Rate** is the drift metric cell the bias moves.
 _Avoid_: knob, metric (a metric measures; a Lever is what is perturbed).
