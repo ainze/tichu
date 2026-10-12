@@ -1,0 +1,133 @@
+# SHRINK-AND-PERTURB PROBE, arm C (control) (alpha=1.0, beta=0.0).
+#
+# Pre-registration + decision rule: docs/notes/2026-10-10-train-from-random-options-memo.md
+# The question: does the v7 co-train plateau (~+15 vs the v7 BC since iter ~12k)
+# come from WHERE training started (basin / lost plasticity) or from the learning
+# signal? Arm P perturbs the v7 champion's play net (p <- 0.9 p + 0.1 p_fresh) and
+# re-trains; arm C is the same run with the champion UNPERTURBED, so anything a fresh
+# run resets (Adam state, critic, KL controller, gate pool) is controlled for.
+#
+# Everything from `model:` down is the v7 recipe (configs/cotrain_v7_gated.yaml)
+# EXCEPT: play+wish KL leash off, a 6144-iter budget, and the gate opponents below.
+#
+# PREREQUISITE: build the warm-starts and seed the run dir (worktree src first on
+# PYTHONPATH):
+#   python scripts/shrink_perturb_champion.py `
+#     --weights     C:\workbench\tichu\data\runs\cotrain_v7_gated\_champion.pt `
+#     --config      configs\cotrain_v7_snp_a100.yaml `
+#     --alpha 1.0 --beta 0.0 --seed 0 `
+#     --out-dir     C:\workbench\tichu\data\snp_v7\a100 `
+#     --run-dir     C:\workbench\tichu\data\runs\cotrain_v7_snp_a100 `
+#     --bc-opponent C:\workbench\tichu\data\runs\cotrain_v7_gated\_bc_opponent.pt `
+#     --seed-champion
+# The --bc-opponent seed matters: otherwise the "bc" gate opponent is built from the
+# warm-start (= the champion here) and the vs-BC stream stops measuring the plateau.
+# --seed-champion is a no-op here (the warm-start IS the champion) and is passed
+# only so both arms are staged by the same command.
+#
+# Run the two arms SEQUENTIALLY, never alongside another heavy job (ADR-0034).
+
+resume: auto
+
+warm_start:
+  play:     C:\workbench\tichu\data\snp_v7\a100\play.bin
+  schupfen: C:\workbench\tichu\data\snp_v7\a100\schupfen.bin
+  tichu:    C:\workbench\tichu\data\snp_v7\a100\tichu.bin
+  grand:    C:\workbench\tichu\data\snp_v7\a100\grand.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v7_snp_a100
+
+promotion_gate:
+  enabled:             true
+  greedy:              true
+  greedy_n_deals:      4096
+  greedy_every:        128
+  greedy_workers:      10
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true      # "bc" = the v7 run's _bc_opponent.pt (seeded above)
+  paired:              true
+  pooled:              true
+  pool_windows:        10
+  # THE READOUT. The v7 champion (promoted at iter 34304), frozen, observe-only:
+  # require:false so it cannot block the arm's own ratchet while arm P recovers,
+  # rollout:false so the learner never best-responds to the opponent the verdict is
+  # read off. cpfix3328 / iter15360 are dropped to keep gate windows short; the v7
+  # champion already beats cpfix3328 by +7.4.
+  extra_opponents:
+    - name: v7champ
+      path: C:\workbench\tichu\data\snp_v7\a100\source_opponent.pt
+      require: false
+      rollout: false
+
+model:         { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256, use_legal_mask: true }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # tichu — residual (PR #64)
+grand_model:    { skill_dim: 64, hidden: 256 }                              # grand — non-residual (irreducible)
+
+# Perfect-Info Critic. Deliberately does NOT get the legal mask: it sees every
+# hand and can derive legality exactly, so the mask adds no fit. PR #80's
+# +0.017 R2 was measured on a value head over the OBSERVABLE 591 features, a
+# different object. At lam=1 the critic is a pure variance-reducing baseline
+# anyway, so an input that does not improve its fit does nothing at all.
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  # PLAY + WISH LEASH OFF (coef pinned at the controller's 1e-4 floor; target
+  # unreachable). The anchor would be the warm-start, i.e. the PERTURBED net in
+  # arm P: a leash there would trap the learner near the weakened init and the
+  # probe would measure the leash, not the plateau. The v7 run's play coef sat at
+  # 1e-4..0.0256 for 40k iters, so this matches it in practice. Same in both arms.
+  play:     { coef: 1.0e-4, target: 100.0, factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.008, factor: 2.0, target_final: 0.025, anneal_start: 750, anneal_iters: 2000 }
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0e-4, target: 100.0, factor: 2.0 }   # rides the play net; see above
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:                 # out-of-loop check_cotrain target = the current shipped champion
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328\grand_tichu_call.pt
+
+ppo:
+  iterations:         6144     # pre-registered budget (48 gate windows); see the memo
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                1.0    # at lam=1 the advantage is exactly R - V(s), so the critic is a
+                             # pure baseline and cannot bias the gradient. Expect value_loss at
+                             # ~Var(R|s) ~ 30-40k; that is the arm working, not a regression.
+                             # Read the greedy gate windows.
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
+  pbrs:
+    enabled:   true
+    potential: banked_points
