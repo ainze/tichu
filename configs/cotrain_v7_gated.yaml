@@ -119,6 +119,14 @@ promotion_gate:
       path: C:\workbench\tichu\data\runs\cotrain_v7_gated\iter15360_opponent.pt
       require: true
       rollout: false
+    # REGRESSION GUARD vs the iter-26880 promotion (added at iter ~40750), same
+    # rationale as iter15360 above: a closer, stronger rung on the ladder. Rebuilt
+    # from export/iter_26880 (snapshots pruned); round-trip through export_opponent
+    # verified bit-identical on all four nets.
+    - name: iter26880
+      path: C:\workbench\tichu\data\runs\cotrain_v7_gated\iter26880_opponent.pt
+      require: true
+      rollout: false
 
 model:         { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256, use_legal_mask: true }
 schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
