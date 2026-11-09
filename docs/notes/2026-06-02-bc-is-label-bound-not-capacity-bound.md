@@ -58,4 +58,4 @@ skip capacity"*).
 Confirms the bottleneck is not representational capacity — imitation is at its
 intrinsic ceiling. Strengthens the case for **PPO Refine** (online self-play
 sharpening) over any further BC scaling. Trunk size is settled: **do not touch
-it.** See [CONTEXT.md](../../CONTEXT.md) §"Phase 2 / online-RL terms".
+it.** See [GLOSSARY.md](../../GLOSSARY.md) §"Phase 2 / online-RL terms".

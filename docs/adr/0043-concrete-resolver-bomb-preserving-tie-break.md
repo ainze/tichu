@@ -17,7 +17,7 @@ position in `list(legal_actions_for(...))` — and `legal_actions_for` returns a
 **frozenset**. The realisation was picked by set-iteration order, which encodes
 nothing about the Hand.
 
-[CONTEXT.md](../../CONTEXT.md) §Resolver already flagged this: *"The picks are
+[GLOSSARY.md](../../GLOSSARY.md) §Resolver already flagged this: *"The picks are
 heuristic — that heuristic is itself a design surface."* There was no heuristic.
 This ADR fills that surface in.
 
@@ -41,7 +41,7 @@ way to say which, and the tie-break did not look.
 a frozenset. Fixing only serving would have trained the policy against a world
 that plays the learner's own Hand worse than the exported agent does — the same
 train/infer skew shape as
-[`team_scores`](../../CONTEXT.md) and the schupfen `current_player` bug.
+[`team_scores`](../../GLOSSARY.md) and the schupfen `current_player` bug.
 
 ## Decision
 
@@ -58,7 +58,7 @@ Lexicographic, lower is better, computed as before-minus-after on `hand` vs
 
 It lives in `tichu_training/` rather than `tichu_engine/` because it is a policy
 heuristic, not a rule, and `tichu_inference` already imports from
-`tichu_training`. This **supersedes CONTEXT.md §Resolver's** claim that the
+`tichu_training`. This **supersedes GLOSSARY.md §Resolver's** claim that the
 forward direction lives only in `tichu_inference/ml_agent.py`.
 
 ### Two properties that fell out of the design, both load-bearing

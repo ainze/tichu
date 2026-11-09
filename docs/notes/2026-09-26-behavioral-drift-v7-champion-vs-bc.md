@@ -16,7 +16,7 @@ calls at no gain.
 
 ## Setup
 
-**Behavioral Drift Benchmark** (CONTEXT.md), Fixed-Opponent design: the Subject team
+**Behavioral Drift Benchmark** (GLOSSARY.md), Fixed-Opponent design: the Subject team
 (Champion+Champion) and the BC team (BC+BC) each play the **same** BC opponents over
 the **same** 20,000 Pool deals with Seat-Swap; only the Subject team's seats are
 measured, so a Δ is the Subject's own behavior. "The BC" is the champion's own

@@ -15,7 +15,7 @@ ADR records the **build design** for that co-training run, locked in the grillin
 of 2026-06-07. The owner's directive: **go all-in** — one multi-day run, no cheap gating,
 the bar relaxed to *any* seat-swap Tournament 95% CI excluding 0 (positive). New
 vocabulary (**Full-Stack Co-Training**, **Resume Bundle**) is glossed in
-[CONTEXT.md](../../CONTEXT.md) §"Phase 2 / online-RL terms".
+[GLOSSARY.md](../../GLOSSARY.md) §"Phase 2 / online-RL terms".
 
 ## Decisions
 

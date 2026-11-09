@@ -7,7 +7,7 @@ Metrics read **Subject seats only** (`is_subject`) — the opponents are the sam
 BC team in both arms — and Play metrics skip **Forced Play Decisions**, which
 carry no choice. `summarise` runs the whole panel through `drift_stats` and
 flags which Δs survive Benjamini–Hochberg across it. Adding a metric is adding a
-function here; the log never needs replaying. See CONTEXT.md §"Behavioral Drift
+function here; the log never needs replaying. See GLOSSARY.md §"Behavioral Drift
 Benchmark".
 """
 

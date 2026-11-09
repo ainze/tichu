@@ -118,7 +118,7 @@ the mis-attribution silent at corpus scale.
   way to salvage substituted games — apply a 2v2 TrueSkill event per
   round with that round's seating. Rejected because it changes rating
   semantics (`n_games` becomes `n_rounds`; convergence dynamics
-  differ), and the CONTEXT.md `Player Rating` glossary entry would
+  differ), and the GLOSSARY.md `Player Rating` glossary entry would
   need re-defining. Migrate later if substitution frequency turns out
   to be high enough to matter.
 - **Keep `ParsedGame.handles` as a round-0 snapshot for back-compat.**

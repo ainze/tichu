@@ -6,7 +6,7 @@
 
 ## Context
 
-CONTEXT.md's **Belief Model** entry has long stated it is *"trained on
+GLOSSARY.md's **Belief Model** entry has long stated it is *"trained on
 the BSW corpus using … hidden hands as labels."* But the only dataset
 that ships
 ([`belief/dataset.py`](../../src/tichu_training/belief/dataset.py)) is
@@ -121,7 +121,7 @@ behind explicit `--bundle-tasks belief` until its reader and a real
 - **Belief is opt-in only** (`--bundle-tasks belief`), never in `all`,
   until the reader + real `train_belief` path are proven
   ([ADR-0020](0020-one-parse-pass-many-task-bundles.md)).
-- **`SyntheticBeliefDataset` stays** as the smoke source; CONTEXT.md's
+- **`SyntheticBeliefDataset` stays** as the smoke source; GLOSSARY.md's
   Belief Model entry is updated to name the relative-seat ordering, the
   per-Play-Decision sampling, and the synthetic-placeholder distinction.
 - **Schupfen-passed-card knowledge is out of scope for v1.** The acting
@@ -136,7 +136,7 @@ behind explicit `--bundle-tasks belief` until its reader and a real
 
 - **Keep belief synthetic-only / defer entirely.** Rejected: the
   hidden-Hand labels are free *only* during this pass; deferring re-incurs
-  a full-corpus replay and leaves CONTEXT.md's promise unmet.
+  a full-corpus replay and leaves GLOSSARY.md's promise unmet.
 - **A belief-specific input encoding.** Rejected: forks the feature codec,
   forfeits the shared packing and the BC-feature reuse, for no shown gain
   — the 224-dim vector already encodes `seen_cards` / `out_order`, the

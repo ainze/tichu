@@ -56,7 +56,7 @@ class ParsedGame:
 
 # Tichu Game-to-1000 threshold. A `ParsedGame` is a Complete Game when at
 # least one team's cumulative ergebnis reaches this value; otherwise the
-# log represents an Incomplete Session (abandoned mid-game). See CONTEXT.md.
+# log represents an Incomplete Session (abandoned mid-game). See GLOSSARY.md.
 _COMPLETE_GAME_THRESHOLD: int = 1000
 
 

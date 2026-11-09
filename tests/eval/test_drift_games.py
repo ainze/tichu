@@ -2,7 +2,7 @@
 
 Every current net is score-blind (round-local scores only), so a Game is a
 sequence of independent Rounds: chaining benchmark Round results until a team
-reaches 1000 is exact. See CONTEXT.md §"Synthetic Game".
+reaches 1000 is exact. See GLOSSARY.md §"Synthetic Game".
 """
 
 from functools import partial

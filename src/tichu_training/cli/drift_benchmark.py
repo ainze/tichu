@@ -16,7 +16,7 @@ optional `human` block — `source` (the zstd `.tch` archive, or a directory of
 optional `min_decile`, and `sample_games`: how many archive Games to spread the
 sample over — enough to yield `n_rounds` qualifying Rounds). Human logs do not depend on the Subject: each is cached
 under `<output_dir>/human/<group>/` and reused until deleted.
-See CONTEXT.md §"Behavioral Drift Benchmark" / §"A/A Null Run".
+See GLOSSARY.md §"Behavioral Drift Benchmark" / §"A/A Null Run".
 """
 
 from __future__ import annotations

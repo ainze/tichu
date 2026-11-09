@@ -20,7 +20,7 @@ move past that impasse. It does **not** lock numbers; it records the reframe, th
 decision, the rejected alternatives, and the falsification criteria so the build
 (and the eventual results) proceed from a shared picture. The vocabulary
 (**Unbeatable Lead**, **Unseen Cards**, **Guaranteed Out**, **Claim Solver**,
-**Slam**) is glossed in [CONTEXT.md](../../CONTEXT.md) §"Endgame / claim terms".
+**Slam**) is glossed in [GLOSSARY.md](../../GLOSSARY.md) §"Endgame / claim terms".
 
 ## The reframe — why owner-free, decision-level
 

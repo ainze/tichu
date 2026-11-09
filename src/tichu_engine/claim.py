@@ -2,7 +2,7 @@
 
 Card-counting the **Unseen Cards** and certifying an **Unbeatable Lead** — the
 deterministic, exact building blocks of the endgame Claim Solver (ADR-0032;
-CONTEXT.md "Endgame / claim terms"). These are pure rules queries, not strategy.
+GLOSSARY.md "Endgame / claim terms"). These are pure rules queries, not strategy.
 
 A lead into an empty Trick can only be beaten by a combination of its **own type**
 (same length, higher rank) or by a **Bomb** — never by another type. So unbeatability

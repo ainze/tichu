@@ -3,7 +3,7 @@
 Every metric reduces to per-deal `(events, opportunities)` counts per arm (and per
 cell for a distribution). `summarise_cells` turns those into the tidy table:
 Exposure + Conditional Rate per arm (ratio of sums), a paired Δ, deal-cluster
-bootstrap 95% CIs, suppression below the opportunity floor. See CONTEXT.md
+bootstrap 95% CIs, suppression below the opportunity floor. See GLOSSARY.md
 §"Exposure" / §"Conditional Rate".
 """
 

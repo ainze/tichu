@@ -13,7 +13,7 @@ built ([ADR-0021](0021-belief-trains-on-a-replay-derived-bundle.md)) to bridge t
 it. This ADR records the v1 design locked in the grilling session of 2026-06-04.
 The vocabulary (**PIMC**, **Determinized World**, **Search Agent**, **Leaf
 Rollout**, and the now-resolved **Observation**) is glossed in
-[CONTEXT.md](../../CONTEXT.md) §"Phase 2 / search terms".
+[GLOSSARY.md](../../GLOSSARY.md) §"Phase 2 / search terms".
 
 The unifying principle across every decision below: **v1 isolates exactly one new
 variable — look-ahead — and is the cheapest possible falsification of "can search
@@ -146,7 +146,7 @@ ADR-0029 set its iteration budget.
   searched calls/Schupfen, and the full multi-agent best-response tree — each a
   named Phase-2b/2c escalation, not a discarded idea.
 - The reserved **Observation** term is now resolved to the PIMC search root
-  (PrivateState + belief distribution); CONTEXT.md updated.
+  (PrivateState + belief distribution); GLOSSARY.md updated.
 
 ## Prototype throughput read (2026-06-04)
 

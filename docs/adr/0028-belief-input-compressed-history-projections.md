@@ -127,7 +127,7 @@ as the existing BC bundle, none near the terabyte raw-history figure.
   the ordered decision walk.
 - `BeliefModel(feature_dim=...)` takes the wider input; no architecture change.
 - A new belief bundle must be materialised (none exists on disk today); start at 100k.
-- The CONTEXT.md Belief Model entry and ADR-0021's "same 224-dim vector" line are updated.
+- The GLOSSARY.md Belief Model entry and ADR-0021's "same 224-dim vector" line are updated.
 
 ## Implementation status (2026-07-27)
 

@@ -5,7 +5,7 @@ reaches 1000 (the higher total wins; a tie plays on). It is exact only for
 **score-blind** Agents — every current net sees round-local scores only
 (`round_local_team_scores`), so a Round plays out identically at 0–0 and 950–900
 and a Game is a sequence of independent Rounds. A score-aware Checkpoint breaks
-that and needs a real game loop. See CONTEXT.md §"Synthetic Game".
+that and needs a real game loop. See GLOSSARY.md §"Synthetic Game".
 
 **One Round per deal.** A deal's two Seat-Swap halves are the same cards with
 the teams swapped — near-mirror images (exact mirrors in the BC arm, measured

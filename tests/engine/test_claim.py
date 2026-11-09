@@ -5,7 +5,7 @@ An Unbeatable Lead is a Combination that, led into an empty Trick, no opponent
 can legally beat from the Unseen Cards. The check pools all Unseen Cards into one
 worst-case responder and asks the engine's own `legal_actions` — so Phoenix-
 following and bomb rules come from the single source of truth, never a
-reimplementation. See ADR-0032 and CONTEXT.md "Endgame / claim terms".
+reimplementation. See ADR-0032 and GLOSSARY.md "Endgame / claim terms".
 """
 
 from tichu_engine.cards import Card, DRAGON, PHOENIX, Suit

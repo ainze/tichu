@@ -22,7 +22,7 @@
 # game_won=NULL and are filtered out of the baseline fit and the AWR
 # refine pass under value_target=game. They still contribute to BC-only
 # training paths and to the held-out scan for win_rate_proxy.
-# See ADR-0013 and CONTEXT.md (Value Target, Complete Game / Incomplete
+# See ADR-0013 and GLOSSARY.md (Value Target, Complete Game / Incomplete
 # Session) for the schema-version + filter mechanics.
 
 dataset: parquet

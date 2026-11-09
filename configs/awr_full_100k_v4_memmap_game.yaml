@@ -59,7 +59,7 @@ awr:
   max_weight: 20.0
 
   # Fit V on game_won (team-relative bool) rather than round_outcome.
-  # See ADR-0013 and CONTEXT.md's Value Target entry.
+  # See ADR-0013 and GLOSSARY.md's Value Target entry.
   value_target: game
 
   baseline_hidden: 128

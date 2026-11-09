@@ -15,7 +15,7 @@ module reports, per cell:
   nulls, see project history). Resampling both arms with the same deal draw is
   what makes Δ paired.
 
-See CONTEXT.md §"Exposure" / §"Conditional Rate".
+See GLOSSARY.md §"Exposure" / §"Conditional Rate".
 """
 
 from __future__ import annotations

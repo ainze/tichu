@@ -3,7 +3,7 @@
 Subject arm: the Subject team (both partner seats) vs a BC opponent team, each
 Pool deal played twice with Seat-Swap. BC arm: BC+BC vs BC+BC — deterministic, so
 both Seat-Swap halves are the same game; it is played once and read from both
-teams. See CONTEXT.md §"Behavioral Drift Benchmark".
+teams. See GLOSSARY.md §"Behavioral Drift Benchmark".
 """
 
 from functools import partial

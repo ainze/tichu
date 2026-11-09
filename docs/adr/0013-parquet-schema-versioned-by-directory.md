@@ -26,7 +26,7 @@ didn't). Or — alternative — keep featurizer at v2 and bump a separate
 Both options are wrong:
 
 1. **Bumping `featurizer_version` corrupts the term.** Per
-   [CONTEXT.md](../../CONTEXT.md), the Featurizer is "the pure function
+   [GLOSSARY.md](../../GLOSSARY.md), the Featurizer is "the pure function
    `featurize(PrivateState) -> Feature Vector`." Bumping the version
    string to signal a schema change would invalidate previously-trained
    v2 Checkpoints at load time even though their features are bit-

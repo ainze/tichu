@@ -2,7 +2,7 @@
 
 Human Rounds are replayed through the engine and every Decision is logged by the
 SAME row builder the agents use, so a human rate is the same definition as the
-agents' rate. See CONTEXT.md §"Behavioral Drift Benchmark".
+agents' rate. See GLOSSARY.md §"Behavioral Drift Benchmark".
 """
 
 from collections import Counter

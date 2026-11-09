@@ -1,7 +1,7 @@
 """Behavioral Drift Benchmark — metric definitions and the panel summary.
 
 Each metric is a pure function of the `DriftLog`, tested here on small hand-built
-logs whose answer is known. See CONTEXT.md §"Behavioral Drift Benchmark".
+logs whose answer is known. See GLOSSARY.md §"Behavioral Drift Benchmark".
 """
 
 from functools import partial
