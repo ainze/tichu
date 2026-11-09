@@ -36,8 +36,12 @@ Concretely:
    `_finalise_round`):
    - **Grand-Tichu:** build the synthetic `(8,8,8,8)` deal-time state from each
      seat's **Grand-Tichu Prefix** (first 8 cards in deal order) and ask each
-     seat `should_call(ps, "grand")` independently — no prior callers visible,
-     matching `grand_tichu_examples_for_round`.
+     seat `should_call(ps, "grand")` in seat order, each seeing the Grand
+     callers asked before it, as the live client does. *(Amended 2026-11-09:
+     originally independent with no callers visible. The Grand-Tichu Network
+     ignores the caller list, so the ask order only matters for MLAgent's
+     rule never to call Grand over its partner's: +181/round on the 0.40% of
+     rounds with a blind same-team double Grand, ≈ +0.73/round overall.)*
    - **Schupfen:** engine-driven from a `deal_for_schupfen` start state.
    - **Tichu:** the first time a non-grand-caller seat makes a non-Pass Play,
      ask `should_call(ps, "tichu")` on that pre-play state (ADR-0018) and inject

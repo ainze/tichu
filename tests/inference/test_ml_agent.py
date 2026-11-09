@@ -329,6 +329,32 @@ def test_call_threshold_controls_should_call(tmp_path):
     assert a_def.should_call(ps, "tichu") is False
 
 
+def test_never_calls_grand_over_a_partners_grand(tmp_path):
+    """Grand calls are asked in turn, so a seat can see its partner already
+    called. A second same-team grand only adds a -200 unless THIS seat goes out
+    first, and the grand network ignores the caller list (trained on an empty
+    one), so the decline is a rule. Opponents' grands do not block a call."""
+    from dataclasses import replace
+
+    from tichu_engine.state import GameState
+    from tichu_training.action_space import ACTION_SPACE_SIZE
+    from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM
+    artifact = _export_dummy(tmp_path, feature_dim=FEATURIZER_OUTPUT_DIM,
+                             action_space_size=ACTION_SPACE_SIZE)
+    agent = MLAgent(artifact)
+    agent._grand_call = _FixedCall(0.99)
+    state = deal_initial_state(seed=0)
+
+    def view(seat, callers):
+        public = replace(state.public, grand_tichu_callers=frozenset(callers))
+        return GameState(hands=state.hands, public=public).private_view(seat)
+
+    assert agent.should_call(view(0, ()), "grand") is True
+    assert agent.should_call(view(0, {2}), "grand") is False
+    assert agent.should_call(view(3, {1}), "grand") is False
+    assert agent.should_call(view(0, {1, 3}), "grand") is True
+
+
 def test_call_threshold_out_of_range_raises(tmp_path):
     from tichu_training.action_space import ACTION_SPACE_SIZE
     from tichu_training.featurizer import FEATURIZER_OUTPUT_DIM

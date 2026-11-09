@@ -167,7 +167,9 @@ def test_call_rows_carry_the_answer_and_the_hand_power():
             if r["kind"] == "grand":
                 hand = pos.grand_prefixes[r["seat"]]
                 assert r["called"] == (r["seat"] == 0)
-                assert r["partner_called"] is False and r["opponent_called"] is False
+                # Grand is asked in seat order: seats after 0 see its call.
+                assert r["partner_called"] == (r["seat"] == 2)
+                assert r["opponent_called"] == (r["seat"] in (1, 3))
             elif r["kind"] == "tichu":
                 assert r["called"] == (r["seat"] == 2)
                 # Only seat 2's partner (seat 0) called — a Grand caller, visible.

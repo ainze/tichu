@@ -296,6 +296,14 @@ class MLAgent(Agent):
             raise ValueError(f"unknown call kind: {kind!r} (expected 'tichu' or 'grand')")
         if module is None:
             return False
+        # Never stack a Grand on the partner's. The second grand only pays if
+        # THIS seat goes out first and costs 200 otherwise. The network cannot
+        # make this choice: it was trained on an empty caller list and ignores
+        # it (served v7: 8.36% call rate blind vs 8.33% with the partner listed).
+        if kind == "grand" and (
+            (private_state.player + 2) % 4 in private_state.public.grand_tichu_callers
+        ):
+            return False
         try:
             logits = self._run(module, private_state)
             if not _is_finite(logits):

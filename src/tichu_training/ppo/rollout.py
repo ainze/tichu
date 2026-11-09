@@ -411,33 +411,40 @@ def _solicit_grand(
     learner_team: int,
 ) -> None:
     """Decide every seat's Grand-Tichu Call on its synthetic deal-time state and
-    inject the callers. Call-capable models decide (and learner seats record) via a
-    per-model batched `act_call_batch("grand", ...)`; the rest fall back to the
-    seat agent's `should_call`. Mirrors `play_full_round`'s independent per-seat ask."""
-    groups: dict[RolloutPolicy, list] = {policy: [], opponent_policy: []}
-    fallback: list[tuple[_GameRun, int, object]] = []
+    inject the callers. Seats are asked in order 0->3, each seeing the Grand
+    callers before it, and a seat whose partner already called is not asked (no
+    decision, nothing recorded) — mirroring `play_full_round` and MLAgent's rule
+    never to call Grand over the partner's. Per seat, call-capable models decide
+    (and learner seats record) via one batched `act_call_batch("grand", ...)`
+    across all games; the rest fall back to the seat agent's `should_call`."""
     callers: dict[int, set[int]] = {id(run): set() for run in runs}
-    for run, prefixes in zip(runs, grand_prefixes):
-        grand_state = _grand_state(prefixes)
-        for seat in range(_NUM_PLAYERS):
-            private = grand_state.private_view(seat)
-            model = policy if seat % 2 == learner_team else opponent_policy
-            if _supports_calls(model):
-                groups[model].append((run, seat, private, grand_state))
-            else:
-                fallback.append((run, seat, private))
-    for model, items in groups.items():
+    model_for = {
+        seat: (policy if seat % 2 == learner_team else opponent_policy)
+        for seat in range(_NUM_PLAYERS)
+    }
+    for seat in range(_NUM_PLAYERS):
+        model = model_for[seat]
+        items = []
+        for run, prefixes in zip(runs, grand_prefixes):
+            seen = callers[id(run)]
+            if (seat + 2) % _NUM_PLAYERS in seen:
+                continue
+            grand_state = _grand_state(prefixes, seen)
+            items.append((run, grand_state.private_view(seat), grand_state))
         if not items:
             continue
-        decisions = [(seat, private, gs) for _run, seat, private, gs in items]
-        choices = model.act_call_batch("grand", decisions)
-        for (run, seat, _private, _gs), choice in zip(items, choices):
-            _record_call(run, seat, choice, "grand")
-            if choice.called:
-                callers[id(run)].add(seat)
-    for run, seat, private in fallback:
-        if _calls(run.seat_agents[seat], private, "grand"):
-            callers[id(run)].add(seat)
+        if _supports_calls(model):
+            choices = model.act_call_batch(
+                "grand", [(seat, private, gs) for _run, private, gs in items]
+            )
+            for (run, _private, _gs), choice in zip(items, choices):
+                _record_call(run, seat, choice, "grand")
+                if choice.called:
+                    callers[id(run)].add(seat)
+        else:
+            for run, private, _gs in items:
+                if _calls(run.seat_agents[seat], private, "grand"):
+                    callers[id(run)].add(seat)
     for run in runs:
         run.state = _inject_callers(run.state, grand=frozenset(callers[id(run)]))
 
@@ -492,9 +499,10 @@ def _maybe_solicit_tichu(
         )
 
 
-def _grand_state(grand_prefixes: Sequence) -> GameState:
-    """The synthetic (8,8,8,8) deal-time state the Grand-Tichu Call is decided on —
-    no prior callers visible, matching how the Grand-Tichu Network was trained."""
+def _grand_state(grand_prefixes: Sequence, callers=frozenset()) -> GameState:
+    """The synthetic (8,8,8,8) deal-time state the Grand-Tichu Call is decided on,
+    with the Grand callers already asked (`current_player` pinned to 0, as in
+    training)."""
     hands = tuple(frozenset(p) for p in grand_prefixes)
     return GameState(
         hands=hands,
@@ -503,6 +511,7 @@ def _grand_state(grand_prefixes: Sequence) -> GameState:
             hand_sizes=tuple(len(h) for h in hands),
             scores=(0, 0),
             trick=Trick.empty(),
+            grand_tichu_callers=frozenset(callers),
         ),
     )
 
