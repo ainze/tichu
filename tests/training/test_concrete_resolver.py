@@ -39,10 +39,11 @@ def test_cost_prefers_the_pair_that_keeps_a_straight_flush_bomb():
     assert cost(keeps_bomb) < cost(breaks_bomb)
 
 
-def test_cheapest_straight_variant_is_the_one_that_spares_a_bomb():
-    # The motivating case: jade 3-7 and sword 3-7 are both straight-flush bombs,
-    # and 32 concrete 3-4-5-6-7 straights collapse to a single Intent slot. 30 of
-    # them shred both bombs; the two single-suit ones spend only their own.
+def test_no_straight_variant_is_a_disguised_straight_flush():
+    # jade 3-7 and sword 3-7 are both straight-flush bombs. The 32 rank-wise
+    # 3-4-5-6-7 picks used to include the two one-suit runs as "straights" that
+    # spared the other bomb; those are bombs, not straights, so only the 30
+    # mixed-suit variants remain and every one of them breaks both bombs.
     from tichu_engine.legality import _enumerate_all
     from tichu_training.action_space import play_intent_index
 
@@ -59,12 +60,9 @@ def test_cheapest_straight_variant_is_the_one_that_spares_a_bomb():
         c for c in _enumerate_all(hand)
         if type(c).__name__ == "Straight" and play_intent_index(c) == target
     ]
-    assert len(variants) == 32  # the tie group the network sees as one logit
-
-    best = min(variants, key=cost)
-    assert len({c.suit for c in best.cards}) == 1  # single-suit: spares the other bomb
-    assert cost(best)[0] == 1
-    assert max(cost(v)[0] for v in variants) == 2
+    assert len(variants) == 30
+    assert all(len({c.suit for c in v.cards}) == 2 for v in variants)
+    assert {cost(v)[0] for v in variants} == {2}
 
 
 def test_cost_prefers_the_variant_that_fragments_a_suit_run_least():

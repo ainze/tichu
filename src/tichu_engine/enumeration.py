@@ -199,8 +199,10 @@ def _no_straight_possible(
     ~65% of decision hands with no straight bail before the nested
     window/product loop below — that loop costs ~30 µs/call building and
     discarding per-window candidates even when nothing is emittable. The
-    precheck is exact: it returns False whenever the loop would emit at
-    least one Straight, so it never skips real output. See the
+    precheck is safe: it returns False whenever the loop would emit at
+    least one Straight, so it never skips real output. It is rank-only,
+    so a hand whose only runs are one suit (bombs, not straights) gets
+    False and the loop emits nothing. See the
     2026-05-29 enumerate-straights spike notes.
     """
     coverable = ranks_present | {1} if has_mahjong else ranks_present
@@ -270,6 +272,12 @@ def enumerate_straights(hand: frozenset[CardOrSpecial]) -> frozenset[Straight]:
                         )
                 else:
                     for picked in product(*rank_choices):
+                        # All one suit = straight-flush bomb, never a
+                        # plain Straight (it must not be beatable by a
+                        # higher unsuited straight). Phoenix/Mahjong
+                        # have no suit, so only this branch can hit it.
+                        if len({c.suit for c in picked}) == 1:
+                            continue
                         straights.add(
                             Straight._from_canonical_cards(picked, None),
                         )

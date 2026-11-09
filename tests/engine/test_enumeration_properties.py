@@ -143,13 +143,19 @@ def test_no_straight_possible_predicate_is_exact(hand):
     would emit nothing. A false positive (predicate True but a straight
     exists) would silently drop legal straights from the legal-action
     set — the one failure mode this optimization could introduce.
+
+    The predicate is rank-only, so it may say "possible" for a hand whose
+    only runs are one suit (those are bombs, not straights). That is the
+    one allowed miss in the other direction.
     """
     predicted_empty = _no_straight_possible(*_predicate_inputs(hand))
     actual_empty = len(enumerate_straights(hand)) == 0
-    assert predicted_empty == actual_empty, (
-        f"predicate said empty={predicted_empty} but actual empty="
-        f"{actual_empty} for hand {sorted(map(repr, hand))}"
-    )
+    if predicted_empty:
+        assert actual_empty, f"predicate dropped straights for {sorted(map(repr, hand))}"
+    elif actual_empty:
+        assert enumerate_straight_flush_bombs(hand), (
+            f"predicate said possible but no straight or flush for {sorted(map(repr, hand))}"
+        )
 
 
 def _h(*cards):
@@ -166,7 +172,7 @@ _S = Suit.SWORD
         # No specials, no run of 5 -> impossible.
         (_h(Card(_J, 2), Card(_J, 4), Card(_J, 6), Card(_J, 8), Card(_J, 10)), True),
         # Five consecutive naturals -> possible.
-        (_h(Card(_J, 2), Card(_J, 3), Card(_J, 4), Card(_J, 5), Card(_J, 6)), False),
+        (_h(Card(_J, 2), Card(_J, 3), Card(_S, 4), Card(_J, 5), Card(_J, 6)), False),
         # Single gap bridged by Phoenix (2,3,_,5,6 + Ph) -> possible.
         (_h(Card(_J, 2), Card(_J, 3), Card(_J, 5), Card(_J, 6), PHOENIX), False),
         # Two gaps, only one Phoenix -> impossible (2,_,4,_,6 + Ph).
@@ -177,7 +183,7 @@ _S = Suit.SWORD
         # (1=Ma, 2, _, 4, 5 with Ph filling rank 3) -> possible.
         (_h(MAHJONG, Card(_J, 2), Card(_J, 4), Card(_J, 5), PHOENIX), False),
         # Top-end window 10..14 -> possible.
-        (_h(Card(_J, 10), Card(_J, 11), Card(_J, 12), Card(_J, 13), Card(_J, 14)), False),
+        (_h(Card(_J, 10), Card(_J, 11), Card(_S, 12), Card(_J, 13), Card(_J, 14)), False),
         # Phoenix alone, scattered ranks, no fillable window -> impossible.
         (_h(Card(_J, 2), Card(_J, 5), Card(_J, 9), Card(_J, 14), PHOENIX), True),
         # Empty hand -> impossible.
