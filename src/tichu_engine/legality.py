@@ -265,10 +265,21 @@ def legal_actions_for(private_state: PrivateState) -> frozenset[ConcreteAction]:
     own `PrivateState`. For the player's own turn, the legal-action set depends
     only on their hand and the public state, so this helper synthesises a
     placeholder `GameState` to reuse the same logic.
+
+    Out of turn (a Play Decision where `player` is not `current_player`), the
+    only moves are to wait (Pass) or to bomb now: Pass plus every
+    `BombInterrupt` the engine allows. Clients use this to poll idle seats for
+    a bomb; enumerating for `current_player` instead would read an empty hand.
     """
     hands: list = [frozenset() for _ in range(NUM_PLAYERS)]
     hands[private_state.player] = private_state.hand
     synthetic = GameState(hands=tuple(hands), public=private_state.public)
+    public = private_state.public
+    if public.pending_decision is None and private_state.player != public.current_player:
+        bombs = legal_bomb_interrupts(synthetic, private_state.player)
+        return frozenset[ConcreteAction](
+            {PASS} | {BombInterrupt(player=private_state.player, bomb=b) for b in bombs}
+        )
     return legal_actions(synthetic)
 
 
