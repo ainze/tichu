@@ -40,7 +40,7 @@ from tichu_engine.legality import (
     SchupfenPending,
     legal_actions_for,
 )
-from tichu_engine.state import PrivateState
+from tichu_engine.state import NUM_PLAYERS, GameState, PrivateState
 from tichu_export.torchscript import (
     exported_uses_legal_mask,
     VersionMismatchError,
@@ -104,7 +104,12 @@ def _trunk_legal_mask(private_state: PrivateState, *, is_play_decision: bool):
 
     if not is_play_decision:
         return _torch.zeros(1, ACTION_SPACE_SIZE)
-    mask = legal_mask("play", private_state, private_state.player,
+    # `legal_mask` reads `state.hands` on an out-of-turn poll, so give it the
+    # same one-hand GameState `legal_actions_for` builds.
+    hands = [frozenset()] * NUM_PLAYERS
+    hands[private_state.player] = private_state.hand
+    state = GameState(hands=tuple(hands), public=private_state.public)
+    mask = legal_mask("play", state, private_state.player,
                       cached_actions=frozenset(legal_actions_for(private_state)))
     return _torch.from_numpy(mask).unsqueeze(0).float()
 

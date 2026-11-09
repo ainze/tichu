@@ -622,3 +622,46 @@ def test_serve_builder_feeds_the_mask_to_a_mask_consuming_export(tmp_path):
         "the served policy fell back to a random legal action — the mask is not "
         "reaching the module"
     )
+
+
+# ---- Out-of-turn bomb polls ----
+#
+# Bug report (2026-11): an integrating website polls the seats that are NOT on
+# turn to ask "bomb now?". Sent honestly (current_player = the true seat), /act
+# could only answer Pass while following and returned HTTP 500 on an empty
+# trick, so the integrator spoofed current_player to the polled seat instead.
+
+def _out_of_turn_state(top):
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.state import GameState, PublicState, Trick
+
+    bomb = tuple(Card(suit=s, rank=5) for s in (Suit.JADE, Suit.SWORD, Suit.PAGODA, Suit.STAR))
+    hands = [
+        frozenset({Card(Suit.SWORD, 2)}),
+        frozenset({Card(Suit.SWORD, 3)}),
+        frozenset({Card(Suit.SWORD, 4)}),
+        frozenset(bomb + (Card(Suit.JADE, 12), Card(Suit.JADE, 13))),
+    ]
+    trick = Trick.empty() if top is None else Trick.empty().add_play(player=1, combination=top)
+    public = PublicState(current_player=2, hand_sizes=tuple(len(h) for h in hands),
+                         scores=(0, 0), trick=trick)
+    return GameState(hands=tuple(hands), public=public)
+
+
+@pytest.mark.parametrize("trick_kind", ["following", "empty"])
+def test_act_answers_honest_out_of_turn_poll(tmp_path, trick_kind):
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.combinations import Single
+
+    top = Single(Card(Suit.JADE, 9)) if trick_kind == "following" else None
+    state = _out_of_turn_state(top)
+    ps = state.private_view(3)  # seat 3 polled; seat 2 is on turn
+    client = TestClient(create_app(_make_config(tmp_path)))
+    for difficulty in ("easy", "medium", "hard", "master"):
+        r = _post_act(client, difficulty, ps)
+        assert r.status_code == 200, (difficulty, r.text)
+        body = r.json()
+        assert body["fallback_used"] is False, difficulty
+        assert body["action"]["kind"] in ("Pass", "BombInterrupt"), (difficulty, body)
+        if body["action"]["kind"] == "BombInterrupt":
+            assert body["action"]["player"] == 3

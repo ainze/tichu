@@ -477,3 +477,70 @@ def test_legal_actions_repeated_calls_are_stable_under_memo():
     again = legal_actions(state_a)
     distinct = legal_actions(state_b)
     assert first == again == distinct
+
+
+# ---- Out-of-turn polls: legal_actions_for for a non-current player ----
+#
+# A client may ask a seat that is NOT on turn whether it wants to bomb now
+# (Tichu bombs are playable at any time). `legal_actions_for` used to enumerate
+# for `public.current_player` while only the polled seat's hand was filled in,
+# so the poll could only ever Pass — and on an empty trick it returned NOTHING
+# (no Pass when leading), which crashed /act with a 500.
+
+def _private(state: GameState, player: int):
+    return state.private_view(player)
+
+
+def test_out_of_turn_following_offers_pass_and_bomb_interrupts():
+    from tichu_engine.legality import BombInterrupt, legal_actions_for
+
+    bomb_cards = (_c(Suit.JADE, 5), _c(Suit.SWORD, 5), _c(Suit.PAGODA, 5), _c(Suit.STAR, 5))
+    hand = frozenset(bomb_cards + (_c(Suit.JADE, 12),))
+    state = _state_with_per_player_hands({3: hand}, top=Single(_c(Suit.JADE, 9)), current_player=2)
+    legal = legal_actions_for(_private(state, 3))
+    assert legal == frozenset({PASS, BombInterrupt(player=3, bomb=FourOfAKindBomb(*bomb_cards))})
+
+
+def test_out_of_turn_on_empty_trick_still_offers_pass():
+    from tichu_engine.legality import BombInterrupt, legal_actions_for
+
+    bomb_cards = (_c(Suit.JADE, 7), _c(Suit.SWORD, 7), _c(Suit.PAGODA, 7), _c(Suit.STAR, 7))
+    state = _state_with_per_player_hands({1: frozenset(bomb_cards)}, current_player=0)
+    legal = legal_actions_for(_private(state, 1))
+    assert legal == frozenset({PASS, BombInterrupt(player=1, bomb=FourOfAKindBomb(*bomb_cards))})
+
+
+def test_out_of_turn_without_a_bomb_is_pass_only():
+    from tichu_engine.legality import legal_actions_for
+
+    state = _state_with_per_player_hands(
+        {3: frozenset({_c(Suit.JADE, 12), _c(Suit.SWORD, 12)})}, current_player=2,
+    )
+    assert legal_actions_for(_private(state, 3)) == frozenset({PASS})
+
+
+def test_out_of_turn_bomb_ignores_active_wish():
+    # The wish binds the seat on turn, not a seat dropping a bomb out of turn.
+    from tichu_engine.legality import BombInterrupt, legal_actions_for
+
+    bomb_cards = (_c(Suit.JADE, 5), _c(Suit.SWORD, 5), _c(Suit.PAGODA, 5), _c(Suit.STAR, 5))
+    hand = frozenset(bomb_cards + (_c(Suit.JADE, 12),))
+    state = _state_with_per_player_hands({3: hand}, top=Single(_c(Suit.JADE, 9)), current_player=2)
+    import dataclasses
+    state = dataclasses.replace(state, public=dataclasses.replace(state.public, mahjong_wish=12))
+    legal = legal_actions_for(_private(state, 3))
+    assert BombInterrupt(player=3, bomb=FourOfAKindBomb(*bomb_cards)) in legal
+
+
+def test_out_of_turn_interrupt_is_accepted_by_step():
+    from tichu_engine.engine import step
+    from tichu_engine.legality import BombInterrupt, legal_actions_for
+
+    bomb_cards = (_c(Suit.JADE, 5), _c(Suit.SWORD, 5), _c(Suit.PAGODA, 5), _c(Suit.STAR, 5))
+    state = _state_with_per_player_hands(
+        {2: frozenset({_c(Suit.JADE, 3)}), 3: frozenset(bomb_cards + (_c(Suit.JADE, 12),))},
+        top=Single(_c(Suit.JADE, 9)), current_player=2,
+    )
+    interrupt = next(a for a in legal_actions_for(_private(state, 3)) if isinstance(a, BombInterrupt))
+    new_state, *_ = step(state, interrupt)
+    assert new_state.public.trick.top_combination == FourOfAKindBomb(*bomb_cards)
