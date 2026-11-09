@@ -291,10 +291,10 @@ def test_records_learner_calls_and_grand_supersedes_tichu():
     def kinds(seat):
         return [s.decision_type for s in by_seat[seat].steps if s.decision_type in ("grand", "tichu")]
 
-    # Every learner seat is asked Grand at deal time. Seat 0 called Grand, so it is
-    # NOT asked Tichu; seat 2 declined Grand, so it IS asked Tichu at first non-Pass.
+    # Seat 0 called Grand, so it is NOT asked Tichu. Its partner, seat 2, is not
+    # asked Grand at all (never a Grand over the partner's), but IS asked Tichu.
     assert kinds(0) == ["grand"]
-    assert kinds(2) == ["grand", "tichu"]
+    assert kinds(2) == ["tichu"]
     # Only learner seats were routed to the learner's call method.
     assert {seat for _kind, seat in learner.solicited} == {0, 2}
     # Recorded with the bookkeeping the policy returned (logprob == -tag).
@@ -302,6 +302,37 @@ def test_records_learner_calls_and_grand_supersedes_tichu():
         for s in by_seat[seat].steps:
             if s.decision_type in ("grand", "tichu"):
                 assert s.logprob == float(-s.value)
+
+
+class AlwaysGrandPolicy:
+    """Plays RuleAgent moves; calls Grand on every ask, recording the Grand
+    callers each asked seat could see."""
+
+    def __init__(self) -> None:
+        self._rule = RuleAgent()
+        self.grand_asks: list[tuple[int, set]] = []
+
+    def act_play_batch(self, decisions) -> list[PlayChoice]:
+        return [PlayChoice(concrete_action=self._rule.act(ps)) for _s, ps, _gs in decisions]
+
+    def act_call_batch(self, kind: str, decisions) -> list[CallChoice]:
+        if kind == "grand":
+            for seat, ps, _gs in decisions:
+                self.grand_asks.append((seat, set(ps.public.grand_tichu_callers)))
+        return [CallChoice(called=kind == "grand", logprob=0.0, value=0.0) for _ in decisions]
+
+
+def test_grand_asked_in_seat_order_and_never_over_partners_grand():
+    # Matches play_full_round and the live client: seats asked 0->3, each seeing
+    # earlier callers; a seat whose partner called is not asked (no decision,
+    # nothing recorded). Opponents' Grands do not block.
+    pos = generate_full_position_pool(seed=0, n=1)[0]
+    policy = AlwaysGrandPolicy()
+    trajs = collect_rollout([pos], policy, learner_team=0)
+    assert policy.grand_asks == [(0, set()), (1, {0})]
+    by_seat = {t.seat: t for t in trajs}
+    assert [s.decision_type for s in by_seat[0].steps].count("grand") == 1
+    assert [s.decision_type for s in by_seat[2].steps].count("grand") == 0
 
 
 def test_outcome_matches_trusted_runner_with_a_tichu_caller():

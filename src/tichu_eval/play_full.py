@@ -290,19 +290,21 @@ def _ask_grand(
     agents: Sequence[Agent], grand_prefixes: Sequence[frozenset], decision_observer=None
 ) -> frozenset[int]:
     """Ask each seat for a Grand-Tichu Call on its synthetic (8,8,8,8) deal-time
-    state, independently (no prior callers visible — matching training)."""
+    state, in seat order, each seeing the Grand callers asked before it — as the
+    live client does. That is what lets MLAgent decline a grand over its
+    partner's. `current_player` stays pinned to 0, as in training."""
     hands = tuple(frozenset(p) for p in grand_prefixes)
-    grand_state = GameState(
-        hands=hands,
-        public=PublicState(
-            current_player=0,
-            hand_sizes=tuple(len(h) for h in hands),
-            scores=(0, 0),
-            trick=Trick.empty(),
-        ),
+    base = PublicState(
+        current_player=0,
+        hand_sizes=tuple(len(h) for h in hands),
+        scores=(0, 0),
+        trick=Trick.empty(),
     )
     callers: set[int] = set()
     for seat in range(4):
+        grand_state = GameState(
+            hands=hands, public=replace(base, grand_tichu_callers=frozenset(callers))
+        )
         called = _calls(agents[seat], grand_state.private_view(seat), "grand")
         if decision_observer is not None:
             decision_observer(seat, "grand", grand_state, called)

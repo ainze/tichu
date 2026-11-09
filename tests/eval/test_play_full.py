@@ -94,6 +94,30 @@ def test_grand_is_decided_on_an_eight_card_prefix_state():
     assert spy.grand_hand_sizes == [8]
 
 
+class SeenCallers(RuleAgent):
+    """Always calls Grand; records the Grand callers it could see when asked."""
+
+    def __init__(self, log):
+        super().__init__()
+        self._log = log
+
+    def should_call(self, private_state, kind: str) -> bool:
+        if kind == "grand":
+            self._log.append((private_state.player, set(private_state.public.grand_tichu_callers)))
+            return True
+        return False
+
+
+def test_grand_is_asked_in_seat_order_with_earlier_callers_visible():
+    # The live client asks in turn, so a seat sees who already called. The
+    # runner must match, or MLAgent's no-grand-over-partner rule never fires.
+    start = deal_for_schupfen(seed=2)
+    log: list = []
+    agents = tuple(SeenCallers(log) for _ in range(4))
+    play_full_round(agents, start, _grand_prefixes(start))
+    assert log == [(0, set()), (1, {0}), (2, {0, 1}), (3, {0, 1, 2})]
+
+
 def test_grand_caller_is_not_also_charged_for_tichu():
     start = deal_for_schupfen(seed=3)
     prefixes = _grand_prefixes(start)
