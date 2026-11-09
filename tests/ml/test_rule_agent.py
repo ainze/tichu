@@ -52,3 +52,21 @@ def test_rule_agent_completes_a_game_with_schupfen():
                 break
         else:
             raise AssertionError(f"seed={seed}: game did not terminate")
+
+
+def test_rule_agent_declines_every_bomb_window():
+    # A Bomb Window (ADR-0045) asks a seat not on turn "bomb now, or Pass?". The
+    # rule baseline never spends a bomb out of turn.
+    from tichu_engine.cards import Card, Suit
+    from tichu_engine.combinations import Single
+    from tichu_engine.legality import PASS, BombInterrupt, legal_actions_for
+    from tichu_engine.state import GameState, PublicState, Trick
+
+    bomb = frozenset(Card(suit=s, rank=5) for s in (Suit.JADE, Suit.SWORD, Suit.PAGODA, Suit.STAR))
+    hands = (frozenset(), frozenset({Card(Suit.JADE, 3)}), frozenset(), bomb)
+    trick = Trick.empty().add_play(player=0, combination=Single(Card(Suit.JADE, 9)))
+    public = PublicState(current_player=1, hand_sizes=(1, 1, 1, 4), scores=(0, 0), trick=trick)
+    private = GameState(hands=hands, public=public).private_view(3)
+
+    assert any(isinstance(a, BombInterrupt) for a in legal_actions_for(private))
+    assert RuleAgent().act(private) == PASS

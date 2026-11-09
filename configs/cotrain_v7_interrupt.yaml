@@ -1,0 +1,160 @@
+# INTERRUPT COTRAIN (ADR-0045): the v7 recipe, Bomb Windows always on.
+#
+# Same v7 Feature Vector and trunk, no re-materialise. Bomb Windows are not a
+# setting: the rollout, the greedy gate and the eval all open them unconditionally
+# on this code, so there is nothing here to switch on. Everything from `model:`
+# down is configs/cotrain_v7_gated.yaml UNCHANGED except:
+#
+#   1) warm_start = the v7 gated champion (iter 34304), not the v7 BC
+#   2) schupfen KL starts at its end-of-anneal target 0.025 (the v7 run finished
+#      its 0.008 -> 0.025 anneal long ago; re-running it would squeeze a trained
+#      head back toward its own init)
+#   3) eval.master = the SERVED export (iter 15360), not cpfix3328
+#   4) the champion iter 34304 joins the gate as a required regression guard
+#
+# KL ANCHORS. `bc_models` is a frozen copy of the warm-start, so every head is
+# anchored to the CHAMPION, not the v7 BC. For play this is where the v7 run
+# already was (reanchor_on_promote moved its anchor onto each champion); for
+# schupfen/tichu/grand/wish it is a new, champion-centred anchor. The "bc" gate
+# opponent is still the v7 BC: step 1 below seeds _bc_opponent.pt from the v7 run.
+#
+# STEP 1 — stage the warm start and seed the run dir (worktree src FIRST on
+# PYTHONPATH; alpha=1/beta=0 copies the champion unchanged):
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\agent-poll-current-player-385c4a\src"
+#   C:\Python314\python.exe scripts\shrink_perturb_champion.py `
+#     --weights     C:\workbench\tichu\data\runs\cotrain_v7_gated\_champion.pt `
+#     --config      configs\cotrain_v7_interrupt.yaml `
+#     --alpha 1.0 --beta 0.0 --seed 0 `
+#     --out-dir     C:\workbench\tichu\data\interrupt_v7\warm `
+#     --run-dir     C:\workbench\tichu\data\runs\cotrain_v7_interrupt `
+#     --bc-opponent C:\workbench\tichu\data\runs\cotrain_v7_gated\_bc_opponent.pt `
+#     --seed-champion
+#
+# STEP 2 — the iteration-0 smoke checks in ADR-0045 §7 (window rate ~23% of rounds,
+# bombs > 0 in windows, A/A gate CI containing 0, no illegal actions).
+#
+# STEP 3 — launch DETACHED (harness background tasks get reaped):
+#   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\agent-poll-current-player-385c4a\src"
+#   Start-Process C:\Python314\python.exe `
+#     -ArgumentList '-m','tichu_training.cli.train_cotrain','--config','configs\cotrain_v7_interrupt.yaml' `
+#     -WorkingDirectory C:\workbench\tichu\.claude\worktrees\agent-poll-current-player-385c4a `
+#     -RedirectStandardOutput C:\workbench\tichu\data\runs\cotrain_v7_interrupt\train_console.log `
+#     -RedirectStandardError  C:\workbench\tichu\data\runs\cotrain_v7_interrupt\train_console.err `
+#     -WindowStyle Hidden
+#
+# ENV: if PYTHONPATH does not put THIS worktree's src first, the editable install
+# resolves the main checkout, which has no Bomb Windows — the run would silently
+# train the old game. Never run alongside another heavy job (ADR-0034).
+#
+# READING IT. Ship bar (ADR-0045 §8) is a separate 40k-deal paired seat-swap ship
+# check, CI_lo > 0 vs BOTH iter 34304 and the served iter 15360, Bomb Windows on.
+# Gate streams are evidence for promotion, not the ship decision.
+
+resume: auto
+
+warm_start:
+  play:     C:\workbench\tichu\data\interrupt_v7\warm\play.bin
+  schupfen: C:\workbench\tichu\data\interrupt_v7\warm\schupfen.bin
+  tichu:    C:\workbench\tichu\data\interrupt_v7\warm\tichu.bin
+  grand:    C:\workbench\tichu\data\interrupt_v7\warm\grand.bin
+
+run_dir: C:\workbench\tichu\data\runs\cotrain_v7_interrupt
+
+promotion_gate:
+  enabled:             true
+  greedy:              true      # margin source = greedy mini-tournament (deployed MLAgent)
+  greedy_n_deals:      4096      # deals/opponent/window => 8192 seat-swapped obs/opp
+  greedy_every:        128
+  greedy_workers:      10
+  threshold:           0.0
+  bootstrap_iters:     1000
+  reanchor_on_promote: true
+  also_beat_bc:        true      # "bc" = the v7 BC (_bc_opponent.pt seeded in step 1)
+  paired:              true      # seat-swap cluster bootstrap
+  pooled:              true
+  pool_windows:        10
+  # Every opponent answers Bomb Windows from its own play head; none is
+  # special-cased (ADR-0045 §6). All held out of the rollout so the learner never
+  # best-responds to an opponent a verdict is read off.
+  extra_opponents:
+    # The champion this run starts from. Until the first promotion it duplicates
+    # the champion stream; after it, it stops a promotion that has quietly lost
+    # ground to the starting point.
+    - name: iter34304
+      path: C:\workbench\tichu\data\interrupt_v7\warm\source_opponent.pt
+      require: true
+      rollout: false
+    # The SERVED export.
+    - name: iter15360
+      path: C:\workbench\tichu\data\runs\cotrain_v7_gated\iter15360_opponent.pt
+      require: true
+      rollout: false
+    - name: iter26880
+      path: C:\workbench\tichu\data\runs\cotrain_v7_gated\iter26880_opponent.pt
+      require: true
+      rollout: false
+    # The previous served export (v6, widened), behind the v6-View Prefix.
+    - name: cpfix3328
+      path: C:\workbench\tichu\data\widened_v7\cpfix3328_v7_opponent.pt
+      require: true
+      rollout: false
+
+model:         { skill_dim: 64, trunk_hidden: 1024, trunk_depth: 4, trunk_out_dim: 512, head_hidden: 256, use_legal_mask: true }
+schupfen_model: { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # residual (PR #64)
+call_model:     { skill_dim: 64, hidden: 512, depth: 4, residual: true }   # tichu — residual (PR #64)
+grand_model:    { skill_dim: 64, hidden: 256 }                              # grand — non-residual (irreducible)
+
+# Perfect-Info Critic, fresh (not carried from the v7 run). Warm-up iters cover it.
+critic: { hidden: 1024, depth: 3, warmup_iters: 20, warmup_epochs: 3 }
+perfect_info: true
+
+update_device: cuda
+rollout_workers: 10
+
+league:
+  enabled:        false
+  snapshot_every: 50
+  max_snapshots:  3
+
+cotrain_wish: true
+
+kl:
+  play:     { coef: 1.0, target: 0.12,  factor: 2.0 }
+  schupfen: { coef: 1.0, target: 0.025, factor: 2.0 }   # v7's post-anneal value
+  tichu:    { coef: 1.0, target: 0.02,  factor: 2.0 }
+  grand:    { coef: 1.0, target: 0.008, factor: 1.5 }
+  wish:     { coef: 1.0, target: 0.008, factor: 2.0 }
+
+entropy: { play: 0.01, schupfen: 0.01, tichu: 0.01, grand: 0.01, wish: 0.01 }
+
+snapshot_every: 25
+
+eval:
+  starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet
+  n_deals:        4000
+  bootstrap_iters: 1000
+  seed:           0
+  workers:        8       # do NOT run while training is using the CPU (OOM, ADR-0034)
+  master:                 # out-of-loop check_cotrain target = the SERVED export
+    checkpoint_path: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\policy.pt
+    schupfen_path:   C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\schupfen.pt
+    tichu_call_path: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\tichu_call.pt
+    grand_call_path: C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360\grand_tichu_call.pt
+
+ppo:
+  iterations:         100000   # ceiling; resume continues
+  positions_per_iter: 512
+  pool_seed:          0
+  gamma:              1.0
+  lam:                1.0    # REQUIRED here: at lam=1 the advantage is R - V(s), so the extra
+                             # Bomb Window steps cost no credit dilution (ADR-0045 Consequences).
+  clip_eps:           0.1
+  vf_coef:            0.5
+  ppo_epochs:         3
+  policy_lr:          1.0e-4
+  critic_lr:          1.0e-3
+  skill_decile:       9
+  learner_team:       0
+  pbrs:
+    enabled:   true
+    potential: banked_points

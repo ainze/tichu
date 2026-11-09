@@ -32,6 +32,7 @@ from tichu_engine.combinations import (
 )
 from tichu_engine.legality import (
     PASS,
+    BombInterrupt,
     ConcreteAction,
     DragonGive,
     MahjongWish,
@@ -153,7 +154,7 @@ class RuleAgent(Agent):
         plays = [a for a in legal if not isinstance(a, Pass)]
         non_bombs = [
             a for a in plays
-            if not isinstance(a, (FourOfAKindBomb, StraightFlushBomb))
+            if not isinstance(a, (FourOfAKindBomb, StraightFlushBomb, BombInterrupt))
         ]
         if non_bombs:
             non_bombs.sort(key=_combo_cost)

@@ -52,3 +52,33 @@ def test_returned_delta_matches_engine_final_scores_relative_to_initial():
     # (Tichu rounds rarely exceed ~300 total card points + bonuses).
     total = delta[0] + delta[1]
     assert -400 <= total <= 600
+
+
+class _BombsInWindows(RuleAgent):
+    """Takes the first bomb offered in a Bomb Window; remembers its cards."""
+
+    def __init__(self):
+        super().__init__()
+        self.bombed: list[frozenset] = []
+
+    def act(self, private_state):
+        from tichu_engine.legality import BombInterrupt, _cards_in, legal_actions_for
+
+        # A bomb this seat took must have left its hand by its next Decision.
+        assert not any(b & private_state.hand for b in self.bombed)
+        if private_state.player != private_state.public.current_player:
+            for a in legal_actions_for(private_state):
+                if isinstance(a, BombInterrupt):
+                    self.bombed.append(frozenset(_cards_in(a.bomb)))
+                    return a
+        return super().act(private_state)
+
+
+def test_a_bomb_taken_in_a_bomb_window_is_played():
+    deals = generate_starting_position_pool(seed=0, n=40)
+    bombs = 0
+    for deal in deals:
+        agents = tuple(_BombsInWindows() for _ in range(4))
+        play_round(agents, deal)
+        bombs += sum(len(a.bombed) for a in agents)
+    assert bombs > 0, "no Bomb Window bomb in 40 deals"

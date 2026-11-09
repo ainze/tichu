@@ -177,6 +177,15 @@ Every action has a `"kind"`. The non-combination kinds:
 { "kind": "BombInterrupt", "player": 3, "bomb": { ...Combination... } }        // out-of-turn bomb
 ```
 
+`BombInterrupt` is returned only for a **Bomb Window** poll: a request whose
+`player` is **not** `public.current_player`, sent honestly (do not set
+`current_player` to the polled seat). Out of turn the only legal answers are
+`Pass` (decline) or a `BombInterrupt` with a bomb that beats the current top; a
+wish never restricts them. Poll after every Play, never after a Pass, the Dog,
+or while a Wish/Dragon give is pending — each seat that is not out, is neither
+the player nor the seat now to act, and holds a beating bomb, in turn order from
+the player; the first bomb taken ends that round of polls (see ADR-0045).
+
 A **play** action is a Combination, whose `"kind"` is the combination type
 (e.g. `"Single"`, `"Pair"`). Apply it to the named cards in your engine.
 

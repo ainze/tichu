@@ -270,3 +270,23 @@ def test_a_mask_consuming_policy_drives_a_rollout_and_updates():
         clip_eps=0.1, vf_coef=0.5, ent_coef=0.01, kl_coef=1.0, epochs=1,
     )
     assert all(math.isfinite(float(v)) for v in out.values())
+
+
+def test_the_real_policy_answers_bomb_windows_with_pass_or_a_bomb():
+    # Bomb Windows (ADR-0045): the learner's play head is asked out of turn. Its
+    # mask must be Pass + the seat's beating bombs, and every answer must be one
+    # the engine accepts (a Round that completes proves it).
+    from tichu_engine.legality import PASS
+    from tichu_training.action_space import play_intent_index
+
+    torch.manual_seed(0)
+    policy = _tiny_policy_with_mask()
+    pass_idx = play_intent_index(PASS)
+    windows = 0
+    for pos in generate_full_position_pool(seed=0, n=40):
+        trajs = collect_rollout([pos], policy, opponent_policy=policy, learner_team=0)
+        for s in (s for t in trajs for s in t.steps if s.bomb_window):
+            windows += 1
+            assert bool(s.legal_mask[pass_idx])
+            assert int(s.legal_mask.sum()) >= 2  # Pass + at least one bomb
+    assert windows > 0, "the learner was never offered a Bomb Window in 40 rounds"

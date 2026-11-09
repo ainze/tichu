@@ -11,7 +11,8 @@ opponents, so there is no pairing, no Δ and no BH — `drift_stats.summarise_re
 gives each rate a CI bootstrapped by Game (the same players recur within one).
 Known gaps versus the agent arms, stated in the report:
 
-* out-of-turn Bomb interrupts are not logged (agents only act on their turn);
+* human Bomb Windows (ADR-0045) are not logged: a BSW log shows a window only
+  when the bomb was taken, never a decline, so there is no exposure to rate;
 * Trick attribution is unavailable from the replay (`tricks_won` is None);
 * humans see the game score, so they are not score-blind.
 
@@ -60,7 +61,7 @@ def record_human_round(parsed, *, deal: int, game, subject_teams) -> list[RoundL
             continue
         if state is None:                          # a phantom BSW pass line
             continue
-        if isinstance(action, BombInterrupt):      # out of turn: agents never do this
+        if isinstance(action, BombInterrupt):      # a taken Bomb Window: declines are unlogged
             tracker.observe("play", action.bomb)
             continue
         view = _with_callers(state, grand=grand, tichu=called)

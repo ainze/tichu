@@ -203,6 +203,27 @@ def legal_bomb_interrupts(state: GameState, player: int) -> frozenset[Bomb]:
     return frozenset(b for b in bombs if _beats(b, top))  # type: ignore[arg-type]
 
 
+def bomb_window_queue(state: GameState, action: object, actor: int) -> tuple[int, ...]:
+    """Seats to offer a **Bomb Window** after `actor` took `action`, in ask order
+    (ADR-0045; the tichu-nuxt arena contract). `state` is the state after `action`.
+
+    Each listed seat holds a bomb that beats the new top and is neither `actor`
+    nor the seat now to act (that seat bombs on its own turn, as a Play). A Pass
+    opens no window: the top is unchanged, so it would re-ask a declined question."""
+    if isinstance(action, Pass):
+        return ()
+    if state.public.pending_decision is not None:
+        return ()  # a Wish or Dragon give is owed first; a Mahjong opens after its Wish
+    if state.public.trick.top_combination is None:
+        return ()  # the Dog, or a resolved Trick: no top to bomb, and no preempts
+    current = state.public.current_player
+    return tuple(
+        seat
+        for seat in ((actor + offset) % NUM_PLAYERS for offset in range(1, NUM_PLAYERS))
+        if seat != current and legal_bomb_interrupts(state, seat)
+    )
+
+
 def legal_actions(state: GameState) -> frozenset[ConcreteAction]:
     """Legal actions for the current player in `state`.
 

@@ -49,7 +49,7 @@ _Avoid_: call head (calls are not heads — they are separate networks).
 A standalone network for the Schupfen Decision, not sharing the BC trunk. Same precedent as Call Networks — carved out because the Decision shape (pick 3 of 14 cards, assign 3 labeled destinations) does not fit the single-discrete-output multi-head pattern. See [ADR-0012](docs/adr/0012-schupfen-is-a-standalone-network.md).
 _Avoid_: schupfen head, pass head.
 
-**The 6 Decisions** (canonical names, with network mapping):
+**The 6 Decisions** (canonical names, with network mapping) — plus the **Bomb Window** since [ADR-0045](docs/adr/0045-interrupt-cotrain-bomb-windows-always-on.md), a seventh Decision kind (`bomb_window`) that shares the Play head; the name "the 6 Decisions" is kept for the pre-0045 record:
 
 | Decision | Served by | Action space |
 |---|---|---|
@@ -57,6 +57,7 @@ _Avoid_: schupfen head, pass head.
 | **Schupfen** | Schupfen Network | 3 cards × 3 directions (to-next, to-partner, to-previous) |
 | **Tichu Call** | Call Network | binary (call / skip) |
 | **Play** | BC head `play` | 1809 intents, includes in-trick **Pass** as one slot |
+| **Bomb Window** | BC head `play` | the same 1809 intents, masked to Pass + the seat's beating bombs |
 | **Wish** | BC head `wish` | 14 ranks |
 | **Dragon Assignment** | BC head `dragon_assignment` | 2 opponents (left / right) |
 
@@ -604,6 +605,22 @@ _Avoid_: v6 compatibility mode, featurizer downgrade, backward-compatible featur
 **Net Widening**:
 Warm-starting a v7-shaped net from a v6 **Checkpoint** by copying the v6 weights into the new first layer and **zero-initialising** the added input columns — **exactly** function-preserving at init, not approximately. Used for the **Call Networks** at v7, and held in reserve as the fallback route for warm-starting the co-train from `cpfix3328` itself. The cost is that zero-initialised columns carry no supervised signal, so a widened net must discover the new inputs from the RL gradient alone.
 _Avoid_: net2net, transfer, resize, upcast.
+
+### Out-of-turn bomb terms
+
+Proposed in the grilling session of 2026-11-09 (handoff "V8 — out-of-turn bombs"). Lifts the on-turn-only descope of [ADR-0029](docs/adr/0029-ppo-refine-design.md) / [ADR-0030](docs/adr/0030-phase-2-search-design.md).
+
+**Bomb Interrupt**:
+A **Bomb** played by a seat that is **not** the current player — either over a live **Trick** or as a preempt into an empty one. The engine's `BombInterrupt`; in the **Action Space** it is the same bomb **Intent** as an on-turn bomb.
+_Avoid_: out-of-turn play (bare), OOT action, interrupt (bare — say **Bomb Interrupt** or **Bomb Window**).
+
+**Bomb Window**:
+An out-of-turn chance to bomb, offered to one seat — "bomb now, or Pass?". Adopted verbatim from the `tichu-nuxt` arena contract (its GLOSSARY + ADR-0011, `docs/arena-log.md`) so training, the website and the arena play one game. Windows open after every **Play** (never after a Pass, never after the Dog, never while a Wish or Dragon give is pending, never into an empty Trick), for each seat that is not out, is neither the seat that just played nor the seat now to act, and holds a Bomb that beats the new top — in turn order from the player; the first Bomb taken ends that round of windows, which then re-open on the Bomb, in turn order from the bomber. A Bomb taken in a Bomb Window carries the seat's Tichu Call if it is that seat's first card play. A bomb on one's own turn is a Play, never a Bomb Window. Served through honest (non-spoofed `current_player`) polls to `/act`.
+_Avoid_: interrupt poll, bomb poll, bomb check, interrupt window.
+
+**Interrupt Cotrain**:
+The co-train lineage that polls non-current seats for **Bomb Interrupts** during rollout, on the **v7** Feature Vector and trunk. It is **not** a featurizer version: in this repo `vN` names the **Featurizer** only, so the informal "V8" of the 2026-11-09 handoff is this lineage, not a v8 featurizer.
+_Avoid_: V8, v8 agent, OOT model. See [ADR-0045](docs/adr/0045-interrupt-cotrain-bomb-windows-always-on.md).
 
 ### Endgame / claim terms
 
