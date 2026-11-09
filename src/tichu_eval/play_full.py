@@ -17,7 +17,9 @@ from typing import NamedTuple, Sequence
 
 from tichu_engine.combinations import FourOfAKindBomb, StraightFlushBomb
 from tichu_engine.engine import step
-from tichu_engine.legality import Pass, _cards_in, legal_actions
+from tichu_engine.legality import (
+    BombInterrupt, Pass, _cards_in, bomb_window_queue, legal_actions,
+)
 from tichu_engine.state import (
     DragonGivePending,
     GameState,
@@ -136,24 +138,27 @@ def play_full_round(
     round_started: set[int] = set()
     first_out: int | None = None
     done = False
+    window_queue: list[int] = []
     for _ in range(_MAX_STEPS):
         if done:
             break
-        current = state.public.current_player
-        private = state.private_view(current)
+        # A queued Bomb Window seat (ADR-0045) is asked before the seat on turn.
+        in_window = bool(window_queue)
+        actor = window_queue.pop(0) if in_window else state.public.current_player
+        private = state.private_view(actor)
         # Run-time policy adaptation hook (ADR-0036): fire `on_round_start` once
         # per seat, at its first Play Decision, before it acts. Duck-typed and
         # off by default — agents without the method (every existing Agent) are
         # untouched, so the eval path stays byte-identical.
-        if state.public.pending_decision is None and current not in round_started:
-            round_started.add(current)
+        if state.public.pending_decision is None and not in_window and actor not in round_started:
+            round_started.add(actor)
             # Oracle variant (diagnostic, ADR-0036) gets the full GameState; the
             # normal hook gets only the seat's info-set. Oracle takes precedence.
-            oracle = getattr(agents[current], "on_round_start_oracle", None)
+            oracle = getattr(agents[actor], "on_round_start_oracle", None)
             if oracle is not None:
                 oracle(state)
             else:
-                hook = getattr(agents[current], "on_round_start", None)
+                hook = getattr(agents[actor], "on_round_start", None)
                 if hook is not None:
                     hook(private)
         # Telemetry probes computed before the agent acts (one legal_actions scan
@@ -162,74 +167,76 @@ def play_full_round(
         passivity_bomb = False
         steal_opp = False
         steal_caller = False
-        if collect_telemetry and state.public.pending_decision is None:
+        if collect_telemetry and state.public.pending_decision is None and not in_window:
             legal = legal_actions(state)
             has_bomb = any(isinstance(a, _BOMB_TYPES) for a in legal)
             if has_bomb:
-                bomb_legal_decisions[current] += 1
+                bomb_legal_decisions[actor] += 1
             has_beat = any(not isinstance(a, Pass) for a in legal)
             # `Trick.leader` IS the current winner (reassigned on every play), so
             # `leader` below is whoever currently holds the Trick.
             leader = state.public.trick.leader
-            following = leader is not None and leader != current
+            following = leader is not None and leader != actor
             # Caller passivity: this seat called Tichu/Grand, is FOLLOWING an
             # opponent's top (different team), and has a legal beating play.
             if (
-                (current in grand_callers or current in tichu_callers)
+                (actor in grand_callers or actor in tichu_callers)
                 and following
-                and (leader % 2) != (current % 2)
+                and (leader % 2) != (actor % 2)
                 and has_beat
             ):
-                caller_pass_opportunities[current] += 1
+                caller_pass_opportunities[actor] += 1
                 passivity_opp = True
                 if has_bomb:
-                    caller_pass_bomb_opportunities[current] += 1
+                    caller_pass_bomb_opportunities[actor] += 1
                     passivity_bomb = True
             # Partner steal (mirror): following the PARTNER's top (same team) with
             # a legal beat — the chance to wrongly overtake a winning partner.
-            if following and (leader % 2) == (current % 2) and has_beat:
-                partner_steal_opportunities[current] += 1
+            if following and (leader % 2) == (actor % 2) and has_beat:
+                partner_steal_opportunities[actor] += 1
                 steal_opp = True
                 if leader in grand_callers or leader in tichu_callers:
-                    partner_steal_caller_opportunities[current] += 1
+                    partner_steal_caller_opportunities[actor] += 1
                     steal_caller = True
-        action = agents[current].act(private)
+        action = agents[actor].act(private)
         if collect_telemetry:
             if isinstance(action, _BOMB_TYPES):
-                bombs_played[current] += 1
+                bombs_played[actor] += 1
             if isinstance(action, Pass):
                 if passivity_opp:
-                    caller_pass_events[current] += 1
+                    caller_pass_events[actor] += 1
                 if passivity_bomb:
-                    caller_pass_bomb_events[current] += 1
+                    caller_pass_bomb_events[actor] += 1
             else:  # a non-Pass beat == overtaking whoever currently holds the Trick
                 if steal_opp:
-                    partner_steal_events[current] += 1
+                    partner_steal_events[actor] += 1
                 if steal_caller:
-                    partner_steal_caller_events[current] += 1
+                    partner_steal_caller_events[actor] += 1
         if decision_observer is not None:
-            decision_observer(
-                current, _decision_kind(state.public.pending_decision), state, action
-            )
-        if observer is not None and state.public.pending_decision is None:
-            observer(current, private, action)
-        if state_observer is not None and state.public.pending_decision is None:
-            state_observer(current, state, action)
+            kind = "bomb_window" if in_window else _decision_kind(state.public.pending_decision)
+            decision_observer(actor, kind, state, action)
+        # `observer` / `state_observer` see on-turn Play Decisions only.
+        if observer is not None and state.public.pending_decision is None and not in_window:
+            observer(actor, private, action)
+        if state_observer is not None and state.public.pending_decision is None and not in_window:
+            state_observer(actor, state, action)
         # Tichu Call: asked once per seat, at its first non-Pass Play state
         # (ADR-0018). Skipped for Grand-Tichu callers (grand supersedes tichu).
         if (
             state.public.pending_decision is None
             and not isinstance(action, Pass)
-            and current not in asked_tichu
-            and current not in grand_callers
+            and actor not in asked_tichu
+            and actor not in grand_callers
         ):
-            asked_tichu.add(current)
-            called = _calls(agents[current], private, "tichu")
+            asked_tichu.add(actor)
+            called = _calls(agents[actor], private, "tichu")
             if decision_observer is not None:
-                decision_observer(current, "tichu", state, called)
+                decision_observer(actor, "tichu", state, called)
             if called:
-                tichu_callers.add(current)
+                tichu_callers.add(actor)
                 state = _with_callers(state, tichu=frozenset(tichu_callers))
+        if in_window and isinstance(action, Pass):
+            continue  # a declined Bomb Window changes nothing
         # Does this Play empty the actor's Hand? Needed because the step that
         # ends the Round also runs `_finalise_round`, which resets `out_order` —
         # so the Round-ending finisher never appears in any post-step state.
@@ -237,9 +244,12 @@ def play_full_round(
             collect_telemetry
             and state.public.pending_decision is None
             and not isinstance(action, Pass)
-            and len(state.hands[current]) == len(_cards_in(action))
+            and len(state.hands[actor]) == len(
+                _cards_in(action.bomb if isinstance(action, BombInterrupt) else action))
         )
         state, _, done, info = step(state, action)
+        if not done:
+            window_queue = list(bomb_window_queue(state, action, actor))
         if first_out is None and state.public.out_order:
             first_out = state.public.out_order[0]
         if collect_telemetry:
@@ -252,8 +262,8 @@ def play_full_round(
             # partners and a played-out Round all three finishers.
             if state.public.out_order:
                 last_out_order = state.public.out_order
-            elif goes_out and current not in last_out_order:
-                last_out_order = last_out_order + (current,)
+            elif goes_out and actor not in last_out_order:
+                last_out_order = last_out_order + (actor,)
     else:
         raise RuntimeError(
             f"play_full_round exceeded {_MAX_STEPS} steps without resolving — "
@@ -312,7 +322,9 @@ def _ask_grand(
 
 
 # The 6 Decisions, as `decision_observer` names them.
-DECISION_KINDS = ("grand", "schupfen", "tichu", "play", "wish", "dragon")
+# "bomb_window": an out-of-turn chance to bomb (ADR-0045) — its own Decision, not a
+# "play" (a bomb on one's own turn is a Play), though the play head answers it.
+DECISION_KINDS = ("grand", "schupfen", "tichu", "play", "bomb_window", "wish", "dragon")
 
 
 def _decision_kind(pending) -> str:

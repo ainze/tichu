@@ -590,7 +590,7 @@ The following items are documented but not yet implemented. They live as comment
 - **Negative call examples.** The BSW parser only emits positive Tichu / Grand Tichu calls. Negative examples (a player at a call-decision point who chose not to call) need to be synthesized — deferred to a follow-up.
 - **Trunk sharing between BC and value baseline.** The AWR value baseline is its own small MLP rather than sharing the BC trunk. Cleaner from a wiring standpoint at this stage; trunk sharing is a possible optimization later.
 - **ONNX export.** TorchScript is the primary target. The `--format onnx` flag is reserved but currently rejected with a clear message.
-- **BombInterrupt in tournament play.** The tournament harness exercises only in-turn actions because `legal_actions_for` doesn't enumerate out-of-turn bomb interrupts. Engine support exists; surfacing it through the harness is a follow-up.
+- ~~**BombInterrupt in tournament play.**~~ Done ([ADR-0045](docs/adr/0045-interrupt-cotrain-bomb-windows-always-on.md)): Bomb Windows are always on in `play_round`, `play_full_round` and the PPO rollout.
 - **Tichu calling composed onto play agents.** The play and call models exist as separate networks; a thin wrapper that uses the call models to decide whether to announce Tichu before play begins is a follow-up.
 - **Within-epoch shuffle buffer.** `ParquetBCDataset` iterates the archive in offset order (= chronological by `tools/compress.py` construction). SGD tolerates this, but a bounded shuffle buffer (e.g. 16k examples) would improve within-epoch independence. Documented in ADR-0011's "Consequences" section.
 

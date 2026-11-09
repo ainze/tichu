@@ -136,3 +136,122 @@ def test_same_agents_and_position_produce_identical_result():
     prefixes = _grand_prefixes(start)
     mk = lambda: (ScriptedCaller(grand=True), RuleAgent(), RuleAgent(), RuleAgent())
     assert play_full_round(mk(), start, prefixes) == play_full_round(mk(), start, prefixes)
+
+
+# ---- Bomb Windows (ADR-0045): out-of-turn bombs are always on ---------------
+
+class AlwaysBombsInWindows(RuleAgent):
+    """RuleAgent on its own turn; takes the first bomb offered in any Bomb Window."""
+
+    def act(self, private_state):
+        from tichu_engine.legality import BombInterrupt, legal_actions_for
+
+        if private_state.player != private_state.public.current_player:
+            bombs = [a for a in legal_actions_for(private_state) if isinstance(a, BombInterrupt)]
+            if bombs:
+                return bombs[0]
+        return super().act(private_state)
+
+
+def _window_bombs(agents, seeds):
+    """(seed, seat, state, action) for every BombInterrupt played, over `seeds`."""
+    from tichu_engine.legality import BombInterrupt
+
+    events = []
+    for seed in seeds:
+        start = deal_for_schupfen(seed=seed)
+
+        def obs(seat, kind, state, action, seed=seed):
+            if isinstance(action, BombInterrupt):
+                events.append((seed, seat, kind, state, action))
+
+        play_full_round(agents, start, _grand_prefixes(start), decision_observer=obs)
+    return events
+
+
+def test_a_seat_bombs_out_of_turn_in_its_bomb_window():
+    agents = tuple(AlwaysBombsInWindows() for _ in range(4))
+    events = _window_bombs(agents, range(30))
+    assert events, "no Bomb Window bomb in 30 rounds"
+    for _, seat, kind, state, action in events:
+        assert kind == "bomb_window"
+        assert seat != state.public.current_player
+        assert action.player == seat
+
+
+def test_every_decision_off_turn_is_reported_as_a_bomb_window_never_a_play():
+    from tichu_eval.play_full import DECISION_KINDS
+
+    assert "bomb_window" in DECISION_KINDS
+    for seed in range(30):
+        start = deal_for_schupfen(seed=seed)
+        rows = []
+        play_full_round(
+            tuple(CountsBombWindows() for _ in range(4)), start, _grand_prefixes(start),
+            decision_observer=lambda seat, kind, state, action: rows.append((seat, kind, state)),
+        )
+        for seat, kind, state in rows:
+            if kind in ("play", "bomb_window"):
+                assert (kind == "bomb_window") == (seat != state.public.current_player)
+
+
+class CountsBombWindows(RuleAgent):
+    """RuleAgent (declines every Bomb Window) that counts the windows it is offered."""
+
+    def __init__(self):
+        super().__init__()
+        self.windows = 0
+
+    def act(self, private_state):
+        if private_state.player != private_state.public.current_player:
+            self.windows += 1
+        return super().act(private_state)
+
+
+def _on_turn_only_total(seed):
+    """The same RuleAgent table played on the bare engine, never offering a window."""
+    from tichu_engine.engine import step
+
+    state = deal_for_schupfen(seed=seed)
+    initial = state.public.scores
+    agent = RuleAgent()
+    done = False
+    while not done:
+        actor = state.public.current_player
+        state, _, done, _ = step(state, agent.act(state.private_view(actor)))
+    return (state.public.scores[0] - initial[0], state.public.scores[1] - initial[1])
+
+
+def test_declined_bomb_windows_leave_the_round_unchanged():
+    offered = 0
+    for seed in range(30):
+        start = deal_for_schupfen(seed=seed)
+        agents = tuple(CountsBombWindows() for _ in range(4))
+        result = play_full_round(agents, start, _grand_prefixes(start))
+        offered += sum(a.windows for a in agents)
+        assert result.total == _on_turn_only_total(seed), f"seed={seed}"
+    assert offered > 0, "no Bomb Window offered in 30 rounds"
+
+
+def test_a_bomb_window_bomb_as_first_card_play_is_asked_for_tichu():
+    from tichu_engine.legality import BombInterrupt, Pass
+
+    checked = 0
+    for seed in range(60):
+        start = deal_for_schupfen(seed=seed)
+        log = []
+
+        def obs(seat, kind, state, action):
+            log.append((seat, kind, action))
+
+        agents = tuple(AlwaysBombsInWindows() for _ in range(4))
+        play_full_round(agents, start, _grand_prefixes(start), decision_observer=obs)
+        has_played: set[int] = set()
+        for i, (seat, kind, action) in enumerate(log):
+            if kind not in ("play", "bomb_window") or isinstance(action, Pass):
+                continue
+            if isinstance(action, BombInterrupt) and seat not in has_played:
+                assert log[i + 1][:2] == (seat, "tichu"), f"seed={seed}"
+                checked += 1
+            has_played.add(seat)
+    assert checked > 0, "no Bomb Window bomb was a first card play in 60 rounds"

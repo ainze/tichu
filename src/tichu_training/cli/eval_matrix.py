@@ -253,9 +253,9 @@ def _run_move_prediction_mode(agent_builders, held_out_dir: Path, config, output
         max_decisions = int(max_decisions)
 
     # Build the decision set ONCE (identical across agents for a fair compare) and
-    # drop decisions with no legal action — out-of-turn bomb-interrupt plays whose
-    # non-current-player view makes `agent.act` raise. Wish / schupfen / dragon /
-    # in-turn play all keep a non-empty legal set, so this only sheds the unactable.
+    # drop any decision with no legal action (a guard: none is known to occur). A
+    # human out-of-turn bomb is kept: its view offers Pass + the seat's bombs
+    # (b821066), so it is scored as a Bomb Window decision like any other.
     from tichu_engine.legality import legal_actions_for
 
     all_decisions = [

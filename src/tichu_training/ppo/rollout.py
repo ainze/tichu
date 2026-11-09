@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple, Protocol, Sequence
 
 from tichu_engine.engine import step
-from tichu_engine.legality import ConcreteAction, Pass, legal_actions
+from tichu_engine.legality import ConcreteAction, Pass, bomb_window_queue, legal_actions
 from tichu_engine.state import (
     GameState, MahjongWishPending, PublicState, SchupfenPending, Trick,
 )
@@ -134,6 +134,8 @@ class TrajectoryStep(NamedTuple):
     legal_mask: object | None = None
     critic_features: object | None = None
     decision_type: str = "play"
+    # True for a Bomb Window decision (ADR-0045): logging only, never in the loss.
+    bomb_window: bool = False
 
 
 @dataclass
@@ -165,6 +167,9 @@ class _GameRun:
     trajs: dict[int, Trajectory]
     done: bool = False
     asked_tichu: set[int] = field(default_factory=set)  # seats already solicited for Tichu
+    # Seats still to be offered a Bomb Window (ADR-0045), in ask order; refilled
+    # by `_advance` after every action.
+    window_queue: list[int] = field(default_factory=list)
 
 
 def collect_rollout(
@@ -277,6 +282,12 @@ def _drive(
         for run in runs:
             if run.done:
                 continue
+            if run.window_queue:  # a Bomb Window is this game's Decision this tick
+                seat = run.window_queue.pop(0)
+                group = groups[policy if seat % 2 == learner_team else opponent_policy]
+                group.meta.append((run, seat, True))
+                group.batch.append((seat, run.state.private_view(seat), run.state))
+                continue
             current = run.state.public.current_player
             private = run.state.private_view(current)
             model = policy if current % 2 == learner_team else opponent_policy
@@ -286,10 +297,10 @@ def _drive(
                     forced = _forced_action(run.state)
                     if forced is not None:
                         _maybe_solicit_tichu(run, current, forced, model)
-                        _advance(run, forced)
+                        _advance(run, forced, current)
                         continue
                 group = groups[model]
-                group.meta.append((run, current))
+                group.meta.append((run, current, False))
                 # (seat, private_state, game_state): the GameState carries all four
                 # hands for an asymmetric Perfect-Info Critic (ADR-0033); symmetric
                 # policies ignore it.
@@ -303,25 +314,28 @@ def _drive(
                 group.meta.append((run, current))
                 group.batch.append((current, private, run.state))
             else:  # Dragon, or Wish/Schupfen for a model without that head — inline
-                _advance(run, run.seat_agents[current].act(private))
+                _advance(run, run.seat_agents[current].act(private), current)
         for model, group in groups.items():
             if not group.batch:
                 continue
             choices = model.act_play_batch(group.batch)
-            for (run, seat), choice in zip(group.meta, choices):
+            for (run, seat, in_window), choice in zip(group.meta, choices):
                 if seat in run.trajs:
                     run.trajs[seat].steps.append(
                         TrajectoryStep(
                             choice.intent_index, choice.logprob, choice.value,
                             choice.features, choice.legal_mask, choice.critic_features,
+                            bomb_window=in_window,
                         )
                     )
+                if in_window and isinstance(choice.concrete_action, Pass):
+                    continue  # a declined Bomb Window changes nothing
                 # Tichu Call: solicited once per seat at its first non-Pass Play
                 # (ADR-0018). A call-capable model decides + records it via
                 # `act_call_batch`; a play-only model falls back to `should_call`. The
                 # +/-100 bonus lands in `round_outcome` either way.
                 _maybe_solicit_tichu(run, seat, choice.concrete_action, model)
-                _advance(run, choice.concrete_action)
+                _advance(run, choice.concrete_action, seat)
         for model, group in schupfen_groups.items():
             if not group.batch:
                 continue
@@ -335,7 +349,7 @@ def _drive(
                             decision_type="schupfen",
                         )
                     )
-                _advance(run, choice.concrete_action)
+                _advance(run, choice.concrete_action, seat)
         for model, group in wish_groups.items():
             if not group.batch:
                 continue
@@ -349,7 +363,7 @@ def _drive(
                             decision_type="wish",
                         )
                     )
-                _advance(run, choice.concrete_action)
+                _advance(run, choice.concrete_action, seat)
     else:
         raise RuntimeError(
             f"rollout exceeded {_MAX_STEPS} ticks without resolving — "
@@ -440,10 +454,13 @@ def _record_call(run: _GameRun, seat: int, choice, kind: str) -> None:
         )
 
 
-def _advance(run: _GameRun, action: ConcreteAction) -> None:
+def _advance(run: _GameRun, action: ConcreteAction, actor: int) -> None:
     run.state, _, done, _ = step(run.state, action)
     if done:
         run.done = True
+        run.window_queue = []
+    else:
+        run.window_queue = list(bomb_window_queue(run.state, action, actor))
 
 
 def _maybe_solicit_tichu(

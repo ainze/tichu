@@ -576,3 +576,75 @@ def test_forced_decisions_are_skipped_by_default():
         pos, LegalCountPolicy(), learner_team=0, skip_forced_play=False,
     )
     assert any(s.intent_index == 1 for s in _play_steps(opted_out))
+
+
+# ---------------------------------------------------------------------------
+# Bomb Windows (ADR-0045): always on. After every Play, seats holding a bomb
+# that beats the new top are asked "bomb now, or Pass?" — learner and opponent
+# seats alike, through the same batched `act_play_batch`.
+# ---------------------------------------------------------------------------
+
+
+class WindowBombingRule(RuleAgent):
+    """RuleAgent on its own turn; takes the first bomb offered in a Bomb Window."""
+
+    def act(self, private_state):
+        from tichu_engine.legality import BombInterrupt, legal_actions_for
+
+        if private_state.player != private_state.public.current_player:
+            bombs = [a for a in legal_actions_for(private_state) if isinstance(a, BombInterrupt)]
+            if bombs:
+                return bombs[0]
+        return super().act(private_state)
+
+
+class WindowBombingPolicy:
+    """Plays `WindowBombingRule`; stamps intent_index 1 on a Bomb Window decision,
+    0 on an on-turn one, and records which seats it was asked in a window."""
+
+    def __init__(self) -> None:
+        self._rule = WindowBombingRule()
+        self.window_seats: list[int] = []
+
+    def act_play_batch(self, decisions) -> list[PlayChoice]:
+        out = []
+        for seat, private_state, _gs in decisions:
+            in_window = seat != private_state.public.current_player
+            if in_window:
+                self.window_seats.append(seat)
+            out.append(PlayChoice(
+                concrete_action=self._rule.act(private_state), intent_index=int(in_window),
+            ))
+        return out
+
+
+def test_rollout_with_bomb_windows_matches_the_trusted_runner_outcome():
+    positions = generate_full_position_pool(seed=0, n=30)
+    bombed = 0
+    for pos in positions:
+        ref = play_full_round(
+            tuple(WindowBombingRule() for _ in range(4)), pos.state, pos.grand_prefixes,
+            decision_observer=lambda s, kind, g, a: None,
+        )
+        policy = WindowBombingPolicy()
+        trajs = collect_rollout([pos], policy, learner_team=0)
+        assert trajs[0].reward == ref.total[0] - ref.total[1]
+        bombed += len(policy.window_seats)
+    assert bombed > 0, "no Bomb Window in 30 rounds"
+
+
+def test_learner_bomb_windows_are_recorded_as_flagged_play_steps_and_opponents_are_not():
+    learner_windows = opponent_windows = 0
+    for pos in generate_full_position_pool(seed=0, n=30):
+        policy = WindowBombingPolicy()
+        trajs = collect_rollout([pos], policy, learner_team=0)
+        steps = [s for t in trajs for s in t.steps if s.decision_type == "play"]
+        # The policy stamped intent_index 1 exactly on its Bomb Window decisions.
+        for s in steps:
+            assert s.bomb_window == (s.intent_index == 1)
+        recorded = sum(s.bomb_window for s in steps)
+        asked_learner = sum(seat % 2 == 0 for seat in policy.window_seats)
+        assert recorded == asked_learner
+        learner_windows += asked_learner
+        opponent_windows += len(policy.window_seats) - asked_learner
+    assert learner_windows > 0 and opponent_windows > 0

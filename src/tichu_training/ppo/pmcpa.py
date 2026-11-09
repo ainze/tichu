@@ -244,15 +244,16 @@ class PMCPAAgent(Agent):
         Fired once per seat at its first Play Decision."""
         self._adapt_seat(private_view.player, private_view)
 
+    # Route by the ASKING seat, not `current_player`: in a Bomb Window (ADR-0045)
+    # the asked seat is not on turn. Identical on-turn.
     def act(self, private_state):
-        return self._agent_for(private_state.public.current_player).act(private_state)
+        return self._agent_for(private_state.player).act(private_state)
 
     def should_call(self, private_state, kind: str) -> bool:
-        seat = private_state.public.current_player
-        return self._agent_for(seat).should_call(private_state, kind)
+        return self._agent_for(private_state.player).should_call(private_state, kind)
 
     def rank_actions(self, private_state):
-        return self._agent_for(private_state.public.current_player).rank_actions(private_state)
+        return self._agent_for(private_state.player).rank_actions(private_state)
 
 
 class PMCPAOracleAgent(PMCPAAgent):
