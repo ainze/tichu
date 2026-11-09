@@ -104,6 +104,26 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         # still need to be applied.
         done = _round_done_state(new_state)  # capture before finalise resets out_order
         if done:
+            # The Mahjong-play branch defers everything to this handler, so the
+            # round-ends-mid-trick scoring that step() does for ordinary plays
+            # must happen here too: the trick goes to whoever holds its top.
+            # (The top is the Mahjong play itself, never a Dragon single.)
+            trick = state.public.trick
+            if trick.leader is not None:
+                points = trick_point_value(trick)
+                new_state = replace(
+                    new_state,
+                    public=replace(
+                        new_state.public,
+                        scores=_add_to_team(
+                            new_state.public.scores, _team_of(trick.leader), points
+                        ),
+                        round_points_by_player=_add_to_player(
+                            new_state.public.round_points_by_player, trick.leader, points
+                        ),
+                        trick=Trick.empty(),
+                    ),
+                )
             new_state = _finalise_round(new_state)
         return new_state, 0.0, done, {}
 
