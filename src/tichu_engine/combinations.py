@@ -309,6 +309,8 @@ class Straight(_SameTypeSameLengthRankCompare):
                 raise ValueError(f"Straight cannot contain special card {c.name}")
         has_phoenix = PHOENIX in self.cards
         has_mahjong = MAHJONG in self.cards
+        if not has_phoenix and not has_mahjong and len({c.suit for c in self.cards}) == 1:
+            raise ValueError("A one-suit straight is a StraightFlushBomb, not a Straight")
         if has_phoenix and self.phoenix_as_rank is None:
             raise ValueError("phoenix_as_rank is required when Phoenix is in the straight")
         if not has_phoenix and self.phoenix_as_rank is not None:
