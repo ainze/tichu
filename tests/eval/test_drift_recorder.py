@@ -2,7 +2,7 @@
 
 The recorder is a pure side channel over `play_full_round`: it sees every one of
 the 6 Decisions (Grand-Tichu Call, Schupfen, Tichu Call, Play, Wish, Dragon
-Assignment) and never changes how the Round plays out. See CONTEXT.md
+Assignment) and never changes how the Round plays out. See GLOSSARY.md
 §"Behavioral Drift Benchmark".
 """
 

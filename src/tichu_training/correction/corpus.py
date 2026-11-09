@@ -34,7 +34,7 @@ def band_candidates(tier1, *, bands=BANDS):
     it is estimating a *rate*; the corpus wants every row it can verify. Tier 1
     emits one row per alternative, so the dedup to the best alternative per
     `(round_idx, turn)` is what makes band membership a property of the Decision
-    (ADR-0042 / CONTEXT.md §Delta Band) rather than of a branch.
+    (ADR-0042 / GLOSSARY.md §Delta Band) rather than of a branch.
     """
     best = tier1.sort_values("delta", ascending=False).drop_duplicates(
         subset=["round_idx", "turn"], keep="first").copy()

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-NEUTRAL = 10  # Neutral Skill Decile sentinel (see CONTEXT.md)
+NEUTRAL = 10  # Neutral Skill Decile sentinel (see GLOSSARY.md)
 
 
 def _decile_counts(path: Path):

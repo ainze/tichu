@@ -400,7 +400,7 @@ def _run_awr_refinement_streaming(
     standardize_advantages = bool(awr_cfg.get("standardize_advantages", True))
     # `round` (default) fits V on BCExample.round_outcome; `game` fits on
     # BCExample.game_won (Incomplete Sessions filtered out per-chunk).
-    # See ADR-0013 and the Value Target entry in CONTEXT.md.
+    # See ADR-0013 and the Value Target entry in GLOSSARY.md.
     value_target = str(awr_cfg.get("value_target", "round"))
     # Mid-epoch win_rate_proxy logging. 0 disables; N>0 evaluates the
     # held-out subset every N chunks and writes an intermediate row to

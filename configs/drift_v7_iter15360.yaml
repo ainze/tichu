@@ -1,4 +1,4 @@
-# Behavioral Drift Benchmark (CONTEXT.md): HOW the v7 champion plays vs its BC.
+# Behavioral Drift Benchmark (GLOSSARY.md): HOW the v7 champion plays vs its BC.
 #
 # Subject = the shipped champion, cotrain_v7_gated iter_15360 (promotion #6).
 # BC      = the champion's own WARM-START stack — every net exactly as the co-train
@@ -48,7 +48,7 @@ n_boot: 2000
 floor: 200         # suppress a cell with < 200 opportunities in either arm
 output_dir: C:\workbench\tichu\data\runs\behavioral_drift_v7_iter15360
 
-# Human reference columns (unpaired; see CONTEXT.md). Replayed once from the BSW
+# Human reference columns (unpaired; see GLOSSARY.md). Replayed once from the BSW
 # archive and cached under <output_dir>/human/<group>/ — delete a cache to redo it.
 # "top 10%" = both partners of the measured team at Skill Decile 9, the decile the
 # BC and the champion are conditioned on.

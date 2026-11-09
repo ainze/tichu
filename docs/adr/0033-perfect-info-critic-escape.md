@@ -16,7 +16,7 @@ grilling + deep-research session of 2026-06-07. It does **not** lock the build; 
 records *why* the closed question is reopened, the *one new instrument* that justifies
 it, the cheap **gate** that must pass first, and the falsification criteria. The
 vocabulary (**Perfect-Info Critic**, **Perfect-Info Value-Ceiling Test**) is glossed in
-[CONTEXT.md](../../CONTEXT.md) §"Phase 2 / online-RL terms".
+[GLOSSARY.md](../../GLOSSARY.md) §"Phase 2 / online-RL terms".
 
 ## Terminology note — two colliding "option 4"s
 

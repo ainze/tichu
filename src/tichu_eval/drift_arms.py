@@ -10,7 +10,7 @@ Two arms over the same Pool deals, both recorded by `drift_recorder`:
   and keeps both arms row-for-row alike for the paired statistics.
 
 Only the Subject team's seats (`is_subject`) are read by metrics — the opponents
-are identical in both arms, so any Δ is the Subject's own behavior. See CONTEXT.md
+are identical in both arms, so any Δ is the Subject's own behavior. See GLOSSARY.md
 §"Behavioral Drift Benchmark".
 """
 
@@ -44,7 +44,7 @@ def run_aa_null(bc_builder, positions_a, positions_b, *, workers: int = 1,
     games twice (every Δ exactly 0, every CI [0, 0]) and tests nothing; on
     disjoint deals the pairing is meaningless but the bootstrap stays valid, so
     the run checks CI calibration, the BH false-positive rate and denominators.
-    Passing it gates reading any real Subject. See CONTEXT.md §"A/A Null Run"."""
+    Passing it gates reading any real Subject. See GLOSSARY.md §"A/A Null Run"."""
     if len(positions_a) != len(positions_b):
         raise ValueError("the A/A arms need equally many deals to pair by index")
     a = run_drift_arms(None, bc_builder, positions_a, workers=workers, progress=progress)

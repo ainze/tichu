@@ -5,7 +5,7 @@ Tournament Matrix measures strength; this measures behavior. Built first as the
 diagnostic instrument for the soft-policy / never-bombs hypothesis (does the
 `master` ML Agent ever Bomb? call Tichu? win its share of Tricks?), and reused
 later as the PPO Refine tuning dashboard (online RL is steered by watching
-behavior drift, not win-rate alone). See CONTEXT.md §"Phase 2 / online-RL terms".
+behavior drift, not win-rate alone). See GLOSSARY.md §"Phase 2 / online-RL terms".
 
 Each Agent is profiled in self-play: seated in all four seats of a Full-strength
 Round over the Starting-Position Pool, so the record is its behavior at a

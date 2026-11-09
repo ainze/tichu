@@ -69,7 +69,7 @@ AWR weights behaved as designed (`avg_weight ≈ 0.044` stable across the run, t
 
 3. **Bigger BC architecture.** Train a wider trunk (2048 × 6, head_hidden 512) and see if 87-88% play-acc is reachable. If yes, the 84% ceiling was capacity-bound. If no, it's a corpus/featurizer ceiling and the followup is Belief Module / search.
 
-4. **Park AWR, pivot to Phase 2 directions.** Per [CONTEXT.md](../../CONTEXT.md), Phase 2 was always going to be search + belief. If two AWR experiments at full scale come back flat, that's the signal to start Phase 2 work rather than tune AWR further. AWR's infrastructure stays in the repo for future use; the experiments demonstrate it works correctly even if it didn't pay off on this BC checkpoint.
+4. **Park AWR, pivot to Phase 2 directions.** Per [GLOSSARY.md](../../GLOSSARY.md), Phase 2 was always going to be search + belief. If two AWR experiments at full scale come back flat, that's the signal to start Phase 2 work rather than tune AWR further. AWR's infrastructure stays in the repo for future use; the experiments demonstrate it works correctly even if it didn't pay off on this BC checkpoint.
 
 ## What ships in PR #11 anyway
 

@@ -17,7 +17,7 @@ program was *about* to build would have measured the wrong quantity.
 Measure **Belief EV Value** = `D_on − D_off`: the paired tournament-point gap between two
 **Belief-Optimal Chooser**s, both scored against the frozen champion — one drawing
 **Determinized Worlds** from the **Belief Model**'s marginals, one drawing them uniformly
-over card-counting constraints. Vocabulary in [CONTEXT.md](../../CONTEXT.md)
+over card-counting constraints. Vocabulary in [GLOSSARY.md](../../GLOSSARY.md)
 §"Information-ceiling terms".
 
 The verdict bands are pre-committed:

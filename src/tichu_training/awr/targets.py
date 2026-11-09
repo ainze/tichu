@@ -10,7 +10,7 @@ are supported, selected by the `awr.value_target` config knob:
   actual objective. Rows from an Incomplete Session carry
   `game_won is None` and `target_value` returns None for them — the
   caller filters such rows out of the baseline fit. See ADR-0013 and
-  the Value Target entry in CONTEXT.md.
+  the Value Target entry in GLOSSARY.md.
 
 Kept in its own module — and taking primitives rather than a BCExample —
 so it stays torch-free and unit-testable. Callers pass the relevant

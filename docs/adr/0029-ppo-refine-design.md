@@ -7,7 +7,7 @@ to fix the diagnosed bomb / strong-combo undervaluation (caller passivity; see
 closed and offline methods are exhausted (BC is label-bound; AWR came back flat —
 [docs/notes/2026-05-29-awr-game-target-flat.md]). This ADR records the full design
 locked in the design interview; **PPO Refine** / **Sharpened Checkpoint** are
-glossed in [CONTEXT.md](../../CONTEXT.md) §"Phase 2 / online-RL terms".
+glossed in [GLOSSARY.md](../../GLOSSARY.md) §"Phase 2 / online-RL terms".
 
 ## Decisions
 

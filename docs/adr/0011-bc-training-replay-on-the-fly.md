@@ -175,7 +175,7 @@ Concrete shape:
 - **Action Space module grows engine coupling.**
   `tichu_training/action_space.py` gains imports from
   `tichu_engine.legality` and `tichu_engine.state`. This is consistent
-  with the layering in CONTEXT.md (training-layer knows engine; engine
+  with the layering in GLOSSARY.md (training-layer knows engine; engine
   does not know training-layer) and does not move the engine boundary.
 
 - **Crash mid-epoch loses in-flight examples, not on-disk state.** No
@@ -197,7 +197,7 @@ Concrete shape:
   random-access archive read is also slower per byte than the
   sequential read α.2 enables.
 - **Engine-side `legal_intents` function.** Rejected: violates the
-  CONTEXT.md layering (engine talks Combinations, not Intents). The
+  GLOSSARY.md layering (engine talks Combinations, not Intents). The
   same information is constructable from `legality.enumerate_legal` +
   `intent_for_concrete` in the training layer without breaking the
   boundary.

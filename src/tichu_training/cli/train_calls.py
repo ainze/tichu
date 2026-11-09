@@ -36,7 +36,7 @@ _NETWORKS = {
 
 # CLI tag → ParquetCallDataset call_type. The CLI uses short tags
 # ("grand", "tichu") for filenames; the dataset uses the canonical
-# Decision names from CONTEXT.md.
+# Decision names from GLOSSARY.md.
 _TAG_TO_CALL_TYPE: dict[str, str] = {
     "grand": "grand_tichu",
     "tichu": "tichu",

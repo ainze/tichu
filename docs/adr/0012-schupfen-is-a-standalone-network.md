@@ -138,13 +138,13 @@ featurizer to remove the duplicate-table drift risk.
   dataset shape, not by `ParquetBCDataset`.
 - `legal_mask` in `tichu_training/action_space.py` (also from ADR-0011)
   dispatches on three decision types now, not four. K ∈ {1809, 14, 2}.
-- CONTEXT.md's "The 6 Decisions" table moves Schupfen from "BC head
+- GLOSSARY.md's "The 6 Decisions" table moves Schupfen from "BC head
   `schupfen`" to a new "Schupfen Network" served-by row.
 - ML Agent (`tichu_inference/ml_agent.py`) gains a `SchupfenNetwork`
   load path. The Difficulty Spec gains `schupfen_path`. Both deferred
   until the Schupfen Network is implemented; until then the ML Agent
   falls back to a heuristic for Schupfen Decisions.
-- The CONTEXT.md term "Call Network" is overloaded to also cover the
+- The GLOSSARY.md term "Call Network" is overloaded to also cover the
   Schupfen Network, *or* a parallel "Schupfen Network" term is
   introduced. Choosing the latter keeps each Decision's network
   searchable by name.

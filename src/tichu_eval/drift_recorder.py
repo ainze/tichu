@@ -5,7 +5,7 @@ plus **one row per Round** (the outcome). Metrics are never counted here: the
 recorder writes raw situation facts and the chosen Action, and every metric is a
 pure function over the log computed afterwards (`drift_metrics`). That keeps the
 play loop free of metric code and lets a new metric run over an existing log
-without replaying a single Round. See CONTEXT.md §"Behavioral Drift Benchmark".
+without replaying a single Round. See GLOSSARY.md §"Behavioral Drift Benchmark".
 """
 
 from __future__ import annotations
