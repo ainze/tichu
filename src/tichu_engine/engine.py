@@ -191,7 +191,9 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
     # whose first-out completed it via a Mahjong-play goes undetected. We do
     # NOT call _finalise_round even when the round is done: BSW sometimes logs
     # a "Wunsch:X" line after a Mahjong-last-card play, and the MahjongWish
-    # handler takes responsibility for finalising in that case.
+    # handler takes responsibility for finalising in that case. So `done` is
+    # always False here: the round is only over (and scored) once the wish
+    # step has run, and callers that stop on `done` must not stop before it.
     if not isinstance(action, Pass) and MAHJONG in _cards_in(action):
         new_out_order = state.public.out_order
         prev_sizes = state.public.hand_sizes
@@ -211,7 +213,7 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
             pass_stats_by_player=next_pass_stats,
             rich_history=next_rich,
         )
-        return replace(state, hands=next_hands, public=next_public), 0.0, _round_done(next_hand_sizes), {}  # type: ignore[arg-type]
+        return replace(state, hands=next_hands, public=next_public), 0.0, False, {}
 
     # Advance turn or resolve trick.
     next_player, resolved_trick = _advance_or_resolve(

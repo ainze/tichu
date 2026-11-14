@@ -55,3 +55,14 @@ def test_trick_points_counted_when_third_player_goes_out_with_mahjong(wish):
     # Team 0 gets the trick's 5 points (seat 2 won it) plus seat 3's King (10)
     # in hand, which goes to the opponents of the last player.
     assert final.public.scores == (15, 0)
+
+
+def test_round_is_not_done_while_the_wish_is_still_owed():
+    """#108: `done` must stay False until the wish is declared — the runners stop
+    on `done`, and the round is only scored by the wish step."""
+    state = _third_out_leads_mahjong_straight()
+
+    after_play, _, done, _ = step(state, _the_straight(state))
+
+    assert after_play.public.pending_decision == MahjongWishPending(player=2)
+    assert not done

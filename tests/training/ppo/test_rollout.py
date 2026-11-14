@@ -679,3 +679,30 @@ def test_learner_bomb_windows_are_recorded_as_flagged_play_steps_and_opponents_a
         learner_windows += asked_learner
         opponent_windows += len(policy.window_seats) - asked_learner
     assert learner_windows > 0 and opponent_windows > 0
+
+
+def test_collector_scores_the_round_when_the_third_player_goes_out_with_the_mahjong():
+    """#108: seats 0 and 1 are out; seat 2 (team 0) leads its last card, the
+    Mahjong. The owed wish must still be resolved so the round is scored."""
+    from dataclasses import replace
+
+    from tichu_engine.cards import MAHJONG
+
+    hands = (
+        frozenset(),
+        frozenset(),
+        frozenset({MAHJONG}),
+        frozenset({_card(13, Suit.JADE)}),
+    )
+    public = PublicState(
+        current_player=2, hand_sizes=(0, 0, 1, 1), scores=(0, 20), trick=Trick.empty(),
+    )
+    # Seat 3 called Tichu and has already won 20 points of tricks this round.
+    public = replace(
+        public, out_order=(0, 1), tichu_callers=frozenset({3}),
+        round_points_by_player=(0, 0, 0, 20),
+    )
+
+    # Team 0 gains seat 3's King (10) + seat 3's tricks (20) = 30;
+    # team 1 loses those 20 and the failed Tichu (-100) = -120.
+    assert _collector_reward(GameState(hands=hands, public=public)) == 30 - (-120)

@@ -279,3 +279,37 @@ def test_a_bomb_window_bomb_as_first_card_play_is_asked_for_tichu():
                 checked += 1
             has_played.add(seat)
     assert checked > 0, "no Bomb Window bomb was a first card play in 60 rounds"
+
+
+def test_round_is_fully_scored_when_the_third_player_goes_out_with_the_mahjong():
+    """#108: seats 0 and 1 are out; seat 2 leads its last card, the Mahjong. The
+    wish it owes must still be resolved so the round gets scored: the last
+    player's hand and tricks, and its failed Tichu."""
+    from dataclasses import replace
+
+    from tichu_engine.cards import Card, MAHJONG, Suit
+    from tichu_engine.state import GameState, PublicState, Trick
+
+    hands = (
+        frozenset(),
+        frozenset(),
+        frozenset({MAHJONG}),
+        frozenset({Card(Suit.JADE, 13)}),
+    )
+    public = PublicState(
+        current_player=2, hand_sizes=(0, 0, 1, 1), scores=(0, 20), trick=Trick.empty(),
+    )
+    # Seat 3 called Tichu and has already won 20 points of tricks this round.
+    public = replace(
+        public, out_order=(0, 1), tichu_callers=frozenset({3}),
+        round_points_by_player=(0, 0, 0, 20),
+    )
+    start = GameState(hands=hands, public=public)
+
+    result = play_full_round(
+        tuple(RuleAgent() for _ in range(4)), start, (frozenset(),) * 4
+    )
+
+    # Team 0: seat 3's King in hand (10) + seat 3's tricks (20).
+    # Team 1: loses those 20 and the failed Tichu (-100).
+    assert result.total == (30, -120)
