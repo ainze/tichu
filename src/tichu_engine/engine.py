@@ -254,15 +254,9 @@ def step(state: GameState, action: ConcreteAction) -> tuple[GameState, float, bo
         if round_ends_mid_trick:
             resolved_trick = Trick.empty()
 
-    # Clear an active Mahjong wish once any play fulfils it (contains a
-    # natural card of the wished rank).
     new_wish = state.public.mahjong_wish
-    if (
-        not isinstance(action, Pass)
-        and new_wish is not None
-        and _play_fulfils_wish(action, new_wish)  # type: ignore[arg-type]
-    ):
-        new_wish = None
+    if not isinstance(action, Pass):
+        new_wish = _wish_after_play(new_wish, action)  # type: ignore[arg-type]
 
     # Track who has just gone out (hand became empty this step) so we can
     # apply slam / redistribution rules at end-of-round.
@@ -305,6 +299,14 @@ def _play_fulfils_wish(combo: Combination, wish_rank: int) -> bool:
         if isinstance(c, Card) and c.rank == wish_rank:
             return True
     return False
+
+
+def _wish_after_play(wish: int | None, combo: Combination) -> int | None:
+    """The Mahjong wish left standing after `combo` is played: cleared once any
+    play fulfils it. The one rule for on-turn plays and out-of-turn bombs alike."""
+    if wish is not None and _play_fulfils_wish(combo, wish):
+        return None
+    return wish
 
 
 def _round_done(hand_sizes: tuple[int, int, int, int]) -> bool:
@@ -660,6 +662,7 @@ def _apply_bomb_interrupt(state: GameState, action: BombInterrupt) -> tuple[Game
         scores=new_scores,
         round_points_by_player=new_round_points,
         out_order=new_out_order,
+        mahjong_wish=_wish_after_play(state.public.mahjong_wish, action.bomb),  # type: ignore[arg-type]
         pending_decision=new_pending,  # type: ignore[arg-type]
         played_cards_this_round=state.public.played_cards_this_round | played_cards,
         played_cards_by_player=_add_played_by(
