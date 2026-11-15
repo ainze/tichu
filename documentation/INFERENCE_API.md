@@ -5,7 +5,7 @@ The service is **stateless**: it holds no game state between requests. The
 client owns the game/engine, and asks the service for one decision at a time.
 
 - Source: `src/tichu_inference/app.py` (endpoints), `src/tichu_inference/codec.py` (JSON shapes).
-- Launch: `py -3.14 -m tichu_inference.cli.serve --config configs\serve_100k_v5.yaml --port 8000` (with `$env:PYTHONPATH = "src"`).
+- Launch: `py -3.15 -m tichu_inference.cli.serve --config configs\serve_100k_v5.yaml --port 8000` (with `$env:PYTHONPATH = "src"`).
 - Base URL: `http://<host>:8000`.
 
 ---

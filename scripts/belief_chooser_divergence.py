@@ -12,7 +12,7 @@ Rounds, with common random numbers, so a divergence is attributable to the
 marginals alone. Neither arm's choice is played out — this measures decision
 disagreement, not EV.
 
-  py -3.14 scripts/belief_chooser_divergence.py `
+  py -3.15 scripts/belief_chooser_divergence.py `
     --export-dir C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328 `
     --belief C:\workbench\tichu\data\runs\belief_selfplay_v6\belief_h256.bin `
     --rounds 200 --workers 10

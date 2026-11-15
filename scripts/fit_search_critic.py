@@ -16,7 +16,7 @@ distribution lets PIMC press the lead instead.
 
 Usage (PowerShell):
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\fit_search_critic.py --positions 600 --epochs 8 ^
+  py -3.15 scripts\fit_search_critic.py --positions 600 --epochs 8 ^
       --explore-epsilon 0.25 ^
       --out C:\workbench\tichu\data\export\search_critic_explore_v5\critic.bin
 """

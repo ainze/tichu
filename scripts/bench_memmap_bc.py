@@ -17,7 +17,7 @@ batch tensor.
 Usage (PowerShell):
 
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\bench_memmap_bc.py `
+  py -3.15 scripts\bench_memmap_bc.py `
       --data-dir C:\workbench\tichu\data\materialised_smoke `
       --device cuda --warmup 50000 --measure 200000 --arch current
 """

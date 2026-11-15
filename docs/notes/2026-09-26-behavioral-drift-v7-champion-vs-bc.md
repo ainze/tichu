@@ -31,7 +31,7 @@ partners decile 9), replayed through the engine and logged by the same code as t
 agents, sampled across the whole archive. Unpaired: different deals, human
 opponents, no Δ, no BH.
 
-Rerun: `py -3.14 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml`
+Rerun: `py -3.15 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml`
 (`--aa` for the gate, `--from-log` to re-summarise without replaying).
 
 ## Validation — why the numbers can be trusted

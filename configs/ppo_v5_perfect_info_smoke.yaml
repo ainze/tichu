@@ -7,7 +7,7 @@
 # Sharpened Checkpoint round-trips) before the long A/B run.
 #
 # Run:
-#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_perfect_info_smoke.yaml
+#   py -3.15 -m tichu_training.cli.train_ppo --config configs/ppo_v5_perfect_info_smoke.yaml
 
 warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin
 out:        C:\workbench\tichu\data\runs\ppo_v5_perfect_info_smoke\sharpened_smoke.bin

@@ -9,7 +9,7 @@ additionally carries a `replay:` of each /act request; this offline tape has no
 wire request to replay.)
 
 Usage (reuses any eval config's `agents:` block; defaults to the first agent):
-  py -3.14 scripts/decision_tape.py --config configs/eval_behavioral_v5.yaml `
+  py -3.15 scripts/decision_tape.py --config configs/eval_behavioral_v5.yaml `
     --agent master --rounds 5 --seed 0 --out C:\workbench\tichu\data\tape_master.txt
 """
 

@@ -6,7 +6,7 @@ warmup, so the worker-spawn cost is excluded from the measurement.
 
 Usage (PowerShell):
 
-  py -3.14 scripts\bench_parallel_dataset.py `
+  py -3.15 scripts\bench_parallel_dataset.py `
       --shards-dir C:\workbench\tichu\data\parquet_100k_v3 `
       --archive C:\workbench\tichu\data\archive.zst `
       --ratings C:\workbench\tichu\data\ratings_100k.parquet `

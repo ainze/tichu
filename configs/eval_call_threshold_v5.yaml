@@ -8,9 +8,9 @@
 # helps if the marginal calls are +EV.
 #
 #   # behavioral (call rates by threshold):
-#   py -3.14 -m tichu_training.cli.eval_matrix --config configs\eval_call_threshold_v5.yaml --mode behavioral -v
+#   py -3.15 -m tichu_training.cli.eval_matrix --config configs\eval_call_threshold_v5.yaml --mode behavioral -v
 #   # tournament (does it win?):
-#   py -3.14 -m tichu_training.cli.eval_matrix --config configs\eval_call_threshold_v5.yaml --mode tournament -v
+#   py -3.15 -m tichu_training.cli.eval_matrix --config configs\eval_call_threshold_v5.yaml --mode tournament -v
 
 variant: full_strength
 starting_position_pool: C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet

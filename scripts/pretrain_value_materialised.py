@@ -9,7 +9,7 @@ and (if that passes) the decoupled-value loop re-run.
 
 Usage (PowerShell):
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\pretrain_value_materialised.py --sample 18000000 --max-rows 2500000 ^
+  py -3.15 scripts\pretrain_value_materialised.py --sample 18000000 --max-rows 2500000 ^
       --epochs 20 --out C:\workbench\tichu\data\export\search_critic_materialised_d9_v5\critic.bin
 """
 

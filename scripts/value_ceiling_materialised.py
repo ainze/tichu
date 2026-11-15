@@ -13,7 +13,7 @@ sample << 1), so same-round leakage is negligible — no round id is needed.
 
 Usage (PowerShell):
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\value_ceiling_materialised.py --sample 6000000 --max-rows 2000000
+  py -3.15 scripts\value_ceiling_materialised.py --sample 6000000 --max-rows 2000000
 """
 
 from __future__ import annotations

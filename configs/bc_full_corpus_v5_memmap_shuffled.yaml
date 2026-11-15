@@ -18,7 +18,7 @@
 #
 # Prereq (already done by the user): one parse pass emitting the parquet
 # manifest + the bc/calls/schupfen bundles:
-#   py -3.14 -m tichu_training.cli.parse_bsw `
+#   py -3.15 -m tichu_training.cli.parse_bsw `
 #     --archive        C:\workbench\tichu\data\archive.zst `
 #     --output         C:\workbench\tichu\data\parquet_full_feat_v5 `
 #     --bundle-out-dir C:\workbench\tichu\data\materialised_full_v5 `
@@ -28,7 +28,7 @@
 #
 # Use (run from the worktree with src on PYTHONPATH so the multi-bundle code
 # shadows any pip-installed copy):
-#   py -3.14 -m tichu_training.cli.train_bc `
+#   py -3.15 -m tichu_training.cli.train_bc `
 #     --config  configs\bc_full_corpus_v5_memmap.yaml `
 #     --run-dir C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap `
 #     --device  cuda -v

@@ -21,13 +21,13 @@
 #   plateaus high, retry with 1e-4.
 #
 # Use:
-#   py -3.14 -m tichu_training.cli.train_bc `
+#   py -3.15 -m tichu_training.cli.train_bc `
 #     --config  configs/bc_xl_100k_v4_memmap.yaml `
 #     --run-dir C:\workbench\tichu\data\runs\bc_xl_100k_v4_memmap `
 #     --device cuda -v
 #
 # Compare after:
-#   py -3.14 scripts/compare_bc_runs.py `
+#   py -3.15 scripts/compare_bc_runs.py `
 #     --a C:\workbench\tichu\data\runs\bc_full_100k_v4_memmap --label-a bc_full `
 #     --b C:\workbench\tichu\data\runs\bc_xl_100k_v4_memmap   --label-b bc_xl `
 #     --weights configs/bc_xl_100k_v4_memmap.yaml

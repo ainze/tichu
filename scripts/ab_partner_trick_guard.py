@@ -20,7 +20,7 @@ A serial frequency pass (guard OFF self-play) counts where the guard WOULD fire 
 tags each fire's context (partner called / self called / anyone out yet).
 
     $env:PYTHONPATH = "<worktree>\src"
-    py -3.14 -m scripts.ab_partner_trick_guard `
+    py -3.15 -m scripts.ab_partner_trick_guard `
         --export-dir C:\workbench\tichu\data\runs\cotrain_v7_gated\export\iter_15360 `
         --pool C:\workbench\tichu\data\full_position_pool_s0_n20000.parquet `
         --n-deals 20000 --workers 10 --out C:\workbench\tichu\data\runs\ab_partner_trick_guard_v7

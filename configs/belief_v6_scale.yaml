@@ -12,19 +12,19 @@
 # a rough reference across the featurizer bump.
 #
 # 1. Materialise a belief bundle (subset to taste; ~534 examples/game):
-#   py -3.14 -m tichu_training.cli.parse_bsw `
+#   py -3.15 -m tichu_training.cli.parse_bsw `
 #     --archive        C:\workbench\tichu\data\archive.zst `
 #     --output         C:\workbench\tichu\data\parquet_belief_scale_v6 `
 #     --bundle-out-dir C:\workbench\tichu\data\materialised_belief_scale_v6 `
 #     --bundle-tasks   belief --subset 20000 --workers 10
 #
 # 2. Train (streaming; ~2 min/epoch per ~10M examples on this box):
-#   py -3.14 -m tichu_training.cli.train_belief `
+#   py -3.15 -m tichu_training.cli.train_belief `
 #     --config configs\belief_v6_scale.yaml `
 #     --run-dir C:\workbench\tichu\data\runs\belief_scale_v6 -v
 #
 # 3. Eval top-1 by round vs the gate:
-#   py -3.14 scripts\belief_naive_baseline.py `
+#   py -3.15 scripts\belief_naive_baseline.py `
 #     --bundle C:\workbench\tichu\data\materialised_belief_scale_v6\belief `
 #     --checkpoint C:\workbench\tichu\data\runs\belief_scale_v6\checkpoints\belief_final.bin `
 #     --max-examples 100000
