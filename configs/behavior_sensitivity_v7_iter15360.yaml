@@ -7,11 +7,11 @@
 # champion's BC over the same Pool deals with Seat-Swap, paired deal-for-deal.
 #
 # ORDER OF OPERATIONS:
-#   1. py -3.14 -m tichu_training.cli.behavior_sensitivity calibrate --config configs/behavior_sensitivity_v7_iter15360.yaml
+#   1. py -3.15 -m tichu_training.cli.behavior_sensitivity calibrate --config configs/behavior_sensitivity_v7_iter15360.yaml
 #      (baseline logit gaps on a SEPARATE deal set -> freezes δ± per lever; no EV read)
-#   2. py -3.14 -m tichu_training.cli.behavior_sensitivity run --config ...
+#   2. py -3.15 -m tichu_training.cli.behavior_sensitivity run --config ...
 #      (reference arm, δ = 0 identity check, 8 treatment arms; resumable)
-#   3. py -3.14 -m tichu_training.cli.behavior_sensitivity summarise --config ...
+#   3. py -3.15 -m tichu_training.cli.behavior_sensitivity summarise --config ...
 #
 # ENV: this worktree's src MUST be first on PYTHONPATH (editable-install shadowing).
 

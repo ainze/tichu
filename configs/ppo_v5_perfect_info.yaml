@@ -7,7 +7,7 @@
 # the symmetric critic was the confound behind the flat PPO result.
 #
 # Run (heavy — background + poll the CSV, per env notes):
-#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_perfect_info.yaml
+#   py -3.15 -m tichu_training.cli.train_ppo --config configs/ppo_v5_perfect_info.yaml
 #
 # DECISION (ADR-0033 "Result"):
 #   * BUILD  if Tournament-vs-master EV CI excludes 0 positive (vs flat's +2.1),

@@ -5,9 +5,9 @@ per-Decision / per-Round log as Parquet, and writes the tidy `summary.csv` and a
 self-contained `report.html`. `--from-log` re-summarises an existing log without
 replaying a Round (new metric, different floor, more bootstrap draws).
 
-  py -3.14 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml
-  py -3.14 -m tichu_training.cli.drift_benchmark --config ... --aa        # gate first
-  py -3.14 -m tichu_training.cli.drift_benchmark --config ... --from-log
+  py -3.15 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml
+  py -3.15 -m tichu_training.cli.drift_benchmark --config ... --aa        # gate first
+  py -3.15 -m tichu_training.cli.drift_benchmark --config ... --from-log
 
 Config keys: `subject` / `bc` (agent specs as in `eval_matrix`: name, factory,
 kwargs), `pool_seed`, `n_deals`, `workers`, `n_boot`, `floor`, `output_dir`, and an

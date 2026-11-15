@@ -19,7 +19,7 @@
 #   rule/random = baselines
 #
 # PREREQS — export policies + standalone nets, then generate the pool:
-#   py -3.14 scripts/gen_full_position_pool.py --seed 0 --n 2000 `
+#   py -3.15 scripts/gen_full_position_pool.py --seed 0 --n 2000 `
 #     --output C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
 
 variant: full_strength

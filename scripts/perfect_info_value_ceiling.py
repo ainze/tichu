@@ -23,7 +23,7 @@ starved at ~85k samples).
 
 Usage (PowerShell):
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\perfect_info_value_ceiling.py --rounds 4000
+  py -3.15 scripts\perfect_info_value_ceiling.py --rounds 4000
 """
 
 from __future__ import annotations

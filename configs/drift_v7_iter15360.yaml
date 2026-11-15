@@ -7,16 +7,16 @@
 #           `reanchor_on_promote` those capture the play ANCHOR at gate-setup time,
 #           not the BC (812-logit diff measured on the wishfix run). Export it once:
 #
-#   py -3.14 -m scripts.export_rollout_weights --warm-start `
+#   py -3.15 -m scripts.export_rollout_weights --warm-start `
 #     --config configs/cotrain_v7_gated.yaml `
 #     --out C:\workbench\tichu\data\export\bc_v7_warmstart_cotrain_v7_gated
 #
 # Both greedy at Skill Decile 9 (the co-train's only decile), full v7 features.
 #
 # ORDER OF OPERATIONS — the A/A Null Run gates reading the real result:
-#   1. py -3.14 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml --aa
+#   1. py -3.15 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml --aa
 #      PASS = no Δ survives BH, ~95%+ of Δ CIs cover 0, game win_rate ~ 50%.
-#   2. py -3.14 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml
+#   2. py -3.15 -m tichu_training.cli.drift_benchmark --config configs/drift_v7_iter15360.yaml
 #   3. (new metric / other floor) ... --from-log   re-summarises without replaying.
 #
 # ENV: this worktree's src MUST be first on PYTHONPATH (editable-install shadowing).

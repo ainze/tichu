@@ -6,7 +6,7 @@
 # Checkpoint round-trips through save_checkpoint -> load_checkpoint.
 #
 # Run:
-#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_smoke.yaml
+#   py -3.15 -m tichu_training.cli.train_ppo --config configs/ppo_v5_smoke.yaml
 # Expect: 2 iterations, finishes in well under a minute, writes a loadable .bin.
 
 warm_start: C:\workbench\tichu\data\runs\bc_full_corpus_v5_memmap_unshuffled\checkpoints\step_e000_b01250000.bin

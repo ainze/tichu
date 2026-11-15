@@ -23,8 +23,8 @@ THROWAWAY SHORTCUTS (do not copy into the real build)
 
 Usage (PowerShell):
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\spike_pimc_throughput.py --worlds 10 --sims 50 --seed 0
-  py -3.14 scripts\spike_pimc_throughput.py --worlds 10 --sims 50 --full-round
+  py -3.15 scripts\spike_pimc_throughput.py --worlds 10 --sims 50 --seed 0
+  py -3.15 scripts\spike_pimc_throughput.py --worlds 10 --sims 50 --full-round
 """
 
 from __future__ import annotations

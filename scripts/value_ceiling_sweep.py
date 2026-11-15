@@ -22,7 +22,7 @@ Read:
 
 Usage (PowerShell):
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\value_ceiling_sweep.py --rounds 1500
+  py -3.15 scripts\value_ceiling_sweep.py --rounds 1500
 """
 
 from __future__ import annotations

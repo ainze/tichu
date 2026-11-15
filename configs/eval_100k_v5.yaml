@@ -13,17 +13,17 @@
 #
 # PREREQS — export BOTH policies to .pt first (arch config is shared):
 #   # BC (already done):
-#   py -3.14 -m tichu_training.cli.export_model `
+#   py -3.15 -m tichu_training.cli.export_model `
 #     --checkpoint   C:\workbench\tichu\data\runs\bc_full_100k_v5_memmap\checkpoints\step_000001.bin `
 #     --model-config configs\export_100k_v5.yaml `
 #     --format torchscript --output C:\workbench\tichu\data\export\bc_full_100k_v5
 #   # AWR round (only epoch 0 was run — use the latest awr_epoch_*.bin written):
-#   py -3.14 -m tichu_training.cli.export_model `
+#   py -3.15 -m tichu_training.cli.export_model `
 #     --checkpoint   C:\workbench\tichu\data\runs\awr_full_100k_v5_memmap_round\checkpoints\awr_epoch_000_step_000002.bin `
 #     --model-config configs\export_100k_v5.yaml `
 #     --format torchscript --output C:\workbench\tichu\data\export\awr_full_100k_v5_round
 #   # Pool:
-#   py -3.14 scripts\gen_starting_position_pool.py --seed 0 --n 500 `
+#   py -3.15 scripts\gen_starting_position_pool.py --seed 0 --n 500 `
 #     --output C:\workbench\tichu\data\starting_position_pool_s0_n500.parquet
 
 starting_position_pool: C:\workbench\tichu\data\starting_position_pool_s0_n500.parquet

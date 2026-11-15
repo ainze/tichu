@@ -6,11 +6,11 @@
 # Checkpoint (drop-in `master`-tier swap).
 #
 # Run:
-#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5.yaml
+#   py -3.15 -m tichu_training.cli.train_ppo --config configs/ppo_v5.yaml
 #
 # AFTER training (separate steps — not done in-loop):
-#   1. Export for serving:   py -3.14 -m tichu_training.cli.export_model ...
-#   2. Behavioral dials:     py -3.14 -m tichu_training.cli.eval_matrix \
+#   1. Export for serving:   py -3.15 -m tichu_training.cli.export_model ...
+#   2. Behavioral dials:     py -3.15 -m tichu_training.cli.eval_matrix \
 #                              --config configs/eval_behavioral_v5.yaml --mode behavioral
 #      Watch caller_passivity_rate / caller_bomb_passivity_rate FALL vs `master`.
 #   3. Tournament (north star): the full-zoo eval_matrix; the Sharpened Checkpoint

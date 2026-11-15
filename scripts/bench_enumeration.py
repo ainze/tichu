@@ -14,7 +14,7 @@ by measured ms rather than guessed top-of-stack samples.
 Usage (PowerShell):
 
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\bench_enumeration.py --iters 5000
+  py -3.15 scripts\bench_enumeration.py --iters 5000
 """
 
 from __future__ import annotations

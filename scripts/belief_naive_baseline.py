@@ -15,8 +15,8 @@ With --checkpoint it also scores a trained Belief Checkpoint on the SAME
 examples, so naive vs trained lines up apples-to-apples.
 
 Usage:
-  py -3.14 scripts/belief_naive_baseline.py --bundle <belief_dir> [--max-examples N]
-  py -3.14 scripts/belief_naive_baseline.py --bundle <belief_dir> `
+  py -3.15 scripts/belief_naive_baseline.py --bundle <belief_dir> [--max-examples N]
+  py -3.15 scripts/belief_naive_baseline.py --bundle <belief_dir> `
       --checkpoint <run>/checkpoints/belief_final.bin
 """
 

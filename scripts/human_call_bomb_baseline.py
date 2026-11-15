@@ -22,7 +22,7 @@ and scale by 1/fraction. Bombs are detected structurally from the card list
 (4-same-rank, or 5+ same-suit consecutive) since action_taken does not tag them.
 
 Usage:
-  py -3.14 scripts/human_call_bomb_baseline.py `
+  py -3.15 scripts/human_call_bomb_baseline.py `
     --manifest C:\workbench\tichu\data\parquet_full_feat_v5 --play-rg-stride 8
 """
 

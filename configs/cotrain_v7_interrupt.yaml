@@ -21,7 +21,7 @@
 # STEP 1 — stage the warm start and seed the run dir (worktree src FIRST on
 # PYTHONPATH; alpha=1/beta=0 copies the champion unchanged):
 #   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\agent-poll-current-player-385c4a\src"
-#   C:\Python314\python.exe scripts\shrink_perturb_champion.py `
+#   C:\Python315\python.exe scripts\shrink_perturb_champion.py `
 #     --weights     C:\workbench\tichu\data\runs\cotrain_v7_gated\_champion.pt `
 #     --config      configs\cotrain_v7_interrupt.yaml `
 #     --alpha 1.0 --beta 0.0 --seed 0 `
@@ -35,7 +35,7 @@
 #
 # STEP 3 — launch DETACHED (harness background tasks get reaped):
 #   $env:PYTHONPATH = "C:\workbench\tichu\.claude\worktrees\agent-poll-current-player-385c4a\src"
-#   Start-Process C:\Python314\python.exe `
+#   Start-Process C:\Python315\python.exe `
 #     -ArgumentList '-m','tichu_training.cli.train_cotrain','--config','configs\cotrain_v7_interrupt.yaml' `
 #     -WorkingDirectory C:\workbench\tichu\.claude\worktrees\agent-poll-current-player-385c4a `
 #     -RedirectStandardOutput C:\workbench\tichu\data\runs\cotrain_v7_interrupt\train_console.log `

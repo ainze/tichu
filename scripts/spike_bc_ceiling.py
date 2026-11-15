@@ -25,7 +25,7 @@ Two arch shapes the BC pipeline actually runs at:
 Usage (PowerShell):
 
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\spike_bc_ceiling.py `
+  py -3.15 scripts\spike_bc_ceiling.py `
       --shards-dir C:\workbench\tichu\data\parquet_100k_v3 `
       --archive C:\workbench\tichu\data\archive.zst `
       --ratings C:\workbench\tichu\data\ratings_100k.parquet `

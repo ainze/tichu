@@ -52,7 +52,7 @@ Usage:
 
 On Windows, invoke the interpreter explicitly:
     python tools/plot_cotrain_csv.py path/to/run-dir --watch 30
-    py -3.14 tools/plot_cotrain_csv.py path/to/run-dir    # explicit version also OK
+    py -3.15 tools/plot_cotrain_csv.py path/to/run-dir    # explicit version also OK
 
 NOT plain `py tools/...`: the Windows launcher honours the `#!/usr/bin/env -S uv
 run --script` shebang above and tries to exec `/usr/bin/env`, which fails with

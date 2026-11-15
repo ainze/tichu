@@ -40,7 +40,7 @@ writer is what the full corpus uses.)
 Usage (PowerShell):
 
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\materialise_bc_subset.py `
+  py -3.15 scripts\materialise_bc_subset.py `
       --shards-dir C:\workbench\tichu\data\parquet_100k_v3 `
       --archive C:\workbench\tichu\data\archive.zst `
       --ratings C:\workbench\tichu\data\ratings_100k.parquet `

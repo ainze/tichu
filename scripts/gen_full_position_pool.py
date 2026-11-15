@@ -8,7 +8,7 @@ The Full-strength tournament (`eval_matrix --mode tournament`, the default
 
 Usage (PowerShell, from the worktree with `$env:PYTHONPATH = "src"`):
 
-    py -3.14 scripts/gen_full_position_pool.py `
+    py -3.15 scripts/gen_full_position_pool.py `
       --seed 0 --n 2000 `
       --output C:\workbench\tichu\data\full_position_pool_s0_n2000.parquet
 

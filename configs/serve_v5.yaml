@@ -9,7 +9,7 @@
 # Tier -> Skill Decile: medium=3, hard=6, master=9 (ascending strength).
 #
 # Play with a live decision tape (look up moves you think are bad):
-#   py -3.14 -m tichu_inference.cli.serve `
+#   py -3.15 -m tichu_inference.cli.serve `
 #     --config configs\serve_v5.yaml `
 #     --tape-log C:\workbench\tichu\data\live_tape.txt -v
 

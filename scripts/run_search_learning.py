@@ -13,7 +13,7 @@ to the master export); critic_0 is the master-self-play critic.
 
 Usage (PowerShell):
   $env:PYTHONPATH = (Resolve-Path src).Path
-  py -3.14 scripts\run_search_learning.py --generations 3 --rounds 50 --worlds 4 --sims 50
+  py -3.15 scripts\run_search_learning.py --generations 3 --rounds 50 --worlds 4 --sims 50
 """
 
 from __future__ import annotations

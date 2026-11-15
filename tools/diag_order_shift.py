@@ -11,7 +11,7 @@ If the tail bins differ sharply from the body, the loss jump is a
 non-i.i.d. ordering artifact, not optimizer instability or corruption.
 
 Run:
-  py -3.14 tools\diag_order_shift.py C:\workbench\tichu\data\materialised_full_v5\bc
+  py -3.15 tools\diag_order_shift.py C:\workbench\tichu\data\materialised_full_v5\bc
 """
 import json
 import sys

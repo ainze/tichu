@@ -14,7 +14,7 @@
 # collapse). Separate out dir so run-2's logs/snapshots are preserved.
 #
 # Run:
-#   py -3.14 -m tichu_training.cli.train_ppo --config configs/ppo_v5_escalate.yaml
+#   py -3.15 -m tichu_training.cli.train_ppo --config configs/ppo_v5_escalate.yaml
 # Bet: the plateau was the timid lever setting, not the method's ceiling. If this
 # ALSO moves the dial without moving the Tournament -> v1 scope is too narrow (B).
 

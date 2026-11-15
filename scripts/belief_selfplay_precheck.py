@@ -13,7 +13,7 @@ actually consumes — removing the human-corpus skew at the source.
 Metric is which-opponent top-1 over **Unseen Cards** (chance ~1/3). Reference:
 the v5 B-core model scored 0.505 aggregate on the BSW distribution.
 
-  py -3.14 scripts/belief_selfplay_precheck.py `
+  py -3.15 scripts/belief_selfplay_precheck.py `
     --export-dir C:\workbench\tichu\data\runs\cotrain_v6_pbrs_resid_wish_gated_cpfix\export\iter_03328 `
     --rounds 2000 --workers 10 --out C:\workbench\tichu\data\runs\belief_selfplay_v6\belief_final.bin
 

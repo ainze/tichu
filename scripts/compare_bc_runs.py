@@ -19,7 +19,7 @@ a non-comparable A/B — different data scale, different head_weights, or
 different filter).
 
 Use:
-  py -3.14 scripts/compare_bc_runs.py `
+  py -3.15 scripts/compare_bc_runs.py `
     --a C:\workbench\tichu\data\runs\bc_full_100k_v2 `
     --b C:\workbench\tichu\data\runs\bc_full_100k_v4_memmap
 

@@ -7,7 +7,7 @@ materialises it, so this script wraps the two library functions.
 
 Usage (PowerShell, from the worktree with `$env:PYTHONPATH = "src"`):
 
-    py -3.14 scripts/gen_starting_position_pool.py `
+    py -3.15 scripts/gen_starting_position_pool.py `
       --seed 0 --n 500 `
       --output C:\workbench\tichu\data\starting_position_pool_s0_n500.parquet
 
